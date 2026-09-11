@@ -2,88 +2,104 @@ package jwt
 
 import (
 	"context"
-	"encoding/base64"
-	"encoding/json"
-	"io"
-	"log/slog"
+	"net/http"
 	"strings"
 
-	"backend/constants"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 )
 
+// CheckLogin 全局 JWT 鉴权中间件，支持多源 Token 提取与用户隔离
 func CheckLogin(gCtx *gin.Context) {
-	fullPath := gCtx.FullPath()
 	reqPath := gCtx.Request.URL.Path
+	fullPath := gCtx.FullPath()
 
-	// 白名单路径直接放行（支持全匹配与前缀通配符）
+	// 1. 判断是否属于白名单开放路由
+	isIgnored := false
 	for _, pattern := range config.IgnorePath {
 		if pattern == fullPath || pattern == reqPath {
-			gCtx.Next()
-			return
+			isIgnored = true
+			break
 		}
 		if strings.HasSuffix(pattern, "*") {
 			prefix := strings.TrimSuffix(pattern, "*")
 			if strings.HasPrefix(reqPath, prefix) || strings.HasPrefix(fullPath, prefix) {
-				gCtx.Next()
-				return
+				isIgnored = true
+				break
 			}
 		}
 	}
 
-	if !strings.HasPrefix(fullPath, "/api") {
-		gCtx.Next()
-		return
+	// 2. 多源提取 Token：Header x-token > Header Authorization > Cookie agents_token > Cookie jwt_token
+	var tokenStr string
+	if t := gCtx.Request.Header.Get("x-token"); t != "" {
+		tokenStr = strings.TrimSpace(t)
+	} else if auth := gCtx.Request.Header.Get("Authorization"); auth != "" {
+		tokenStr = strings.TrimSpace(strings.TrimPrefix(auth, "Bearer "))
+	} else if cookie, err := gCtx.Cookie("agents_token"); err == nil && cookie != "" {
+		tokenStr = strings.TrimSpace(cookie)
+	} else if cookie, err := gCtx.Cookie("jwt_token"); err == nil && cookie != "" {
+		tokenStr = strings.TrimSpace(cookie)
 	}
 
-	token := gCtx.Request.Header.Get("Authorization")
-	if token == "" {
-		// 方便未登录调试
-		tc := TokenClaims{UserId: 1, UserType: constants.User}
-		ctx := gCtx.Request.Context()
-		gCtx.Request = gCtx.Request.WithContext(context.WithValue(ctx, "tokenClaims", tc))
-		gCtx.Next()
-		return
+	// 3. 校验并解析 Token
+	var identity AuthIdentity
+	var parseErr error
+
+	if tokenStr != "" {
+		token, err := jwt.ParseWithClaims(tokenStr, &TokenClaims{}, func(token *jwt.Token) (interface{}, error) {
+			return []byte(config.Secret), nil
+		})
+
+		if err == nil && token.Valid {
+			if claims, ok := token.Claims.(*TokenClaims); ok {
+				uid := claims.Uid
+				if uid == 0 {
+					uid = claims.UserId
+				}
+				cid := claims.CompanyId
+				if cid == 0 {
+					cid = claims.CompanyID
+				}
+				name := claims.Name
+				if name == "" {
+					name = claims.Username
+				}
+
+				identity = AuthIdentity{
+					UserID:    uid,
+					CompanyID: cid,
+					Name:      name,
+					Username:  claims.Username,
+					UserType:  claims.UserType,
+				}
+			}
+		} else {
+			parseErr = err
+		}
 	}
 
-	token = strings.TrimPrefix(token, "Bearer ")
-
-	parse, err := jwt.Parse(token, func(token *jwt.Token) (interface{}, error) {
-		return []byte(config.Secret), nil
-	}, jwt.WithExpirationRequired())
-	if err != nil {
-		slog.Error("jwt验证失败", "err", err, "jwt", token)
-		gCtx.Status(401)
-		gCtx.Abort()
-		return
+	// 4. 将身份信息植入 Context
+	if identity.UserID > 0 {
+		ctx := context.WithValue(gCtx.Request.Context(), "authIdentity", identity)
+		gCtx.Request = gCtx.Request.WithContext(ctx)
 	}
 
-	var tc TokenClaims
-	split := strings.Split(parse.Raw, ".")
-	if len(split) < 2 {
-		slog.Error("jwt结构不合法", "jwt", token)
-		gCtx.Status(401)
-		gCtx.Abort()
-		return
+	// 5. 如果路由需要强制鉴权
+	if !isIgnored && strings.HasPrefix(reqPath, "/api") {
+		if identity.UserID == 0 {
+			msg := "未登录或登录态已失效"
+			if parseErr != nil && strings.Contains(parseErr.Error(), "expired") {
+				msg = "登录已过期，请重新登录"
+			}
+			gCtx.JSON(http.StatusUnauthorized, gin.H{
+				"error":  "unauthorized",
+				"detail": msg,
+			})
+			gCtx.Abort()
+			return
+		}
 	}
 
-	jsonData, err := io.ReadAll(base64.NewDecoder(base64.RawStdEncoding, strings.NewReader(split[1])))
-	if err != nil {
-		slog.Error("jwt base64解码错误", "err", err)
-		gCtx.Status(401)
-		gCtx.Abort()
-		return
-	}
-
-	err = json.Unmarshal(jsonData, &tc)
-	if err != nil {
-		slog.Error("jwt payload解析错误", "err", err)
-		gCtx.Status(401)
-		gCtx.Abort()
-		return
-	}
-
-	ctx := gCtx.Request.Context()
-	gCtx.Request = gCtx.Request.WithContext(context.WithValue(ctx, "tokenClaims", tc))
+	gCtx.Next()
 }

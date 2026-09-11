@@ -1,177 +1,348 @@
 package api
 
 import (
-	"context"
+	"encoding/json"
+	"net/http"
+	"strings"
 	"time"
 
 	"backend/config"
 	"backend/dal/model"
 	"backend/dao"
-	"backend/pkg/errors"
+	"backend/pkg/jwt"
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
-type CreateSessionReq struct {
-	Title        string `json:"title"`
-	Model        string `json:"model"`
-	SystemPrompt string `json:"system_prompt"`
+type SessionOut struct {
+	ID           string  `json:"id"`
+	Title        string  `json:"title"`
+	Model        string  `json:"model"`
+	SystemPrompt *string `json:"system_prompt"`
+	AutoSkill    bool    `json:"auto_skill"`
+	CreatedAt    string  `json:"created_at"`
+	UpdatedAt    string  `json:"updated_at"`
 }
 
-type CreateSessionResp struct {
-	SessionID string `json:"session_id"`
-	Title     string `json:"title"`
-	Model     string `json:"model"`
+type MessageOut struct {
+	ID          string          `json:"id"`
+	Role        string          `json:"role"`
+	Content     string          `json:"content"`
+	ToolCalls   json.RawMessage `json:"tool_calls,omitempty"`
+	ToolCallID  *string         `json:"tool_call_id,omitempty"`
+	Name        *string         `json:"name,omitempty"`
+	Attachments json.RawMessage `json:"attachments,omitempty"`
+	CreatedAt   string          `json:"created_at"`
 }
 
-func CreateSession(ctx context.Context, req *CreateSessionReq) (*CreateSessionResp, error) {
-	title := req.Title
+type SessionDetailOut struct {
+	SessionOut
+	Messages        []MessageOut `json:"messages"`
+	EnabledSkillIDs []int64      `json:"enabled_skill_ids"`
+}
+
+// CreateSession 创建会话 (POST /api/sessions)
+func CreateSession(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	var req struct {
+		Title        string  `json:"title"`
+		Model        string  `json:"model"`
+		SystemPrompt *string `json:"system_prompt"`
+	}
+	_ = c.ShouldBindJSON(&req)
+
+	title := strings.TrimSpace(req.Title)
 	if title == "" {
 		title = "新会话"
 	}
-	modelName := req.Model
+
+	// 防重复创建机制：若用户存在尚无任何消息的空会话，直接复用返回现有空会话
+	latestEmpty, err := dao.GetLatestEmptySession(c.Request.Context(), identity.UserID)
+	if err == nil && latestEmpty != nil {
+		var promptPtr *string
+		if latestEmpty.SystemPrompt != "" {
+			promptPtr = &latestEmpty.SystemPrompt
+		}
+		c.JSON(http.StatusOK, SessionOut{
+			ID:           latestEmpty.SessionID,
+			Title:        latestEmpty.Title,
+			Model:        latestEmpty.Model,
+			SystemPrompt: promptPtr,
+			AutoSkill:    latestEmpty.AutoSkill,
+			CreatedAt:    latestEmpty.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    latestEmpty.UpdatedAt.Format(time.RFC3339),
+		})
+		return
+	}
+	modelName := strings.TrimSpace(req.Model)
 	if modelName == "" {
 		modelName = config.GetConfig().LLM.DefaultModel
 	}
+	if modelName == "" {
+		modelName = "MiniMax-Text-01"
+	}
+	sysPrompt := ""
+	if req.SystemPrompt != nil {
+		sysPrompt = *req.SystemPrompt
+	}
 
 	sessionID := uuid.New().String()
+	now := time.Now()
 	session := &model.Session{
 		SessionID:    sessionID,
+		UserID:       identity.UserID,
+		CompanyID:    identity.CompanyID,
 		Title:        title,
 		Model:        modelName,
-		SystemPrompt: req.SystemPrompt,
+		SystemPrompt: sysPrompt,
 		AutoSkill:    true,
 		Interactive:  false,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		CreatedAt:    now,
+		UpdatedAt:    now,
 	}
 
-	if err := dao.CreateSession(ctx, session); err != nil {
-		return nil, errors.NewMsg("创建会话失败")
+	if err := dao.CreateSession(c.Request.Context(), session); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建会话失败: " + err.Error()})
+		return
 	}
 
-	return &CreateSessionResp{
-		SessionID: sessionID,
-		Title:     title,
-		Model:     modelName,
-	}, nil
-}
-
-type ListSessionsReq struct {
-	Page     int `form:"page"`
-	PageSize int `form:"page_size"`
-}
-
-type SessionItem struct {
-	SessionID    string    `json:"session_id"`
-	Title        string    `json:"title"`
-	Model        string    `json:"model"`
-	SystemPrompt string    `json:"system_prompt,omitempty"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
-}
-
-type ListSessionsResp struct {
-	List  []SessionItem `json:"list"`
-	Total int64         `json:"total"`
-}
-
-func ListSessions(ctx context.Context, req *ListSessionsReq) (*ListSessionsResp, error) {
-	pageSize := req.PageSize
-	if pageSize <= 0 {
-		pageSize = 20
+	var promptPtr *string
+	if sysPrompt != "" {
+		promptPtr = &sysPrompt
 	}
-	page := req.Page
-	if page <= 0 {
-		page = 1
-	}
-	offset := (page - 1) * pageSize
 
-	sessions, total, err := dao.ListSessions(ctx, 0, 0, pageSize, offset)
+	c.JSON(http.StatusOK, SessionOut{
+		ID:           sessionID,
+		Title:        title,
+		Model:        modelName,
+		SystemPrompt: promptPtr,
+		AutoSkill:    true,
+		CreatedAt:    now.Format(time.RFC3339),
+		UpdatedAt:    now.Format(time.RFC3339),
+	})
+}
+
+// ListSessions 获取当前用户所有会话列表 (GET /api/sessions)
+func ListSessions(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	sessions, _, err := dao.ListSessions(c.Request.Context(), identity.UserID, identity.CompanyID, 100, 0)
 	if err != nil {
-		return nil, errors.NewMsg("查询会话列表失败")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询会话失败: " + err.Error()})
+		return
 	}
 
-	list := make([]SessionItem, 0, len(sessions))
+	res := make([]SessionOut, 0, len(sessions))
 	for _, s := range sessions {
-		list = append(list, SessionItem{
-			SessionID:    s.SessionID,
+		var promptPtr *string
+		if s.SystemPrompt != "" {
+			promptPtr = &s.SystemPrompt
+		}
+		res = append(res, SessionOut{
+			ID:           s.SessionID,
 			Title:        s.Title,
 			Model:        s.Model,
-			SystemPrompt: s.SystemPrompt,
-			CreatedAt:    s.CreatedAt,
-			UpdatedAt:    s.UpdatedAt,
+			SystemPrompt: promptPtr,
+			AutoSkill:    s.AutoSkill,
+			CreatedAt:    s.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    s.UpdatedAt.Format(time.RFC3339),
 		})
 	}
 
-	return &ListSessionsResp{
-		List:  list,
-		Total: total,
-	}, nil
+	c.JSON(http.StatusOK, res)
 }
 
-type SessionDetailReq struct {
-	SessionID string `uri:"id" validate:"required"`
-}
+// GetSessionDetail 获取会话详情及历史消息 (GET /api/sessions/:id)
+func GetSessionDetail(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
 
-type SessionDetailResp struct {
-	SessionID    string          `json:"session_id"`
-	Title        string          `json:"title"`
-	Model        string          `json:"model"`
-	SystemPrompt string          `json:"system_prompt,omitempty"`
-	Messages     []model.Message `json:"messages"`
-	CreatedAt    time.Time       `json:"created_at"`
-	UpdatedAt    time.Time       `json:"updated_at"`
-}
-
-func GetSessionDetail(ctx context.Context, req *SessionDetailReq) (*SessionDetailResp, error) {
-	session, err := dao.GetSessionBySessionID(ctx, req.SessionID)
+	sessionID := c.Param("id")
+	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
 	if err != nil || session == nil {
-		return nil, errors.NewMsg("会话不存在")
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != identity.UserID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
 	}
 
-	messages, err := dao.ListMessagesBySessionID(ctx, req.SessionID)
+	messages, err := dao.ListMessagesBySessionID(c.Request.Context(), sessionID)
 	if err != nil {
-		return nil, errors.NewMsg("获取会话历史消息失败")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取历史消息失败: " + err.Error()})
+		return
 	}
 
-	return &SessionDetailResp{
-		SessionID:    session.SessionID,
+	msgOuts := make([]MessageOut, 0, len(messages))
+	for _, m := range messages {
+		msgItem := MessageOut{
+			ID:         m.MessageID,
+			Role:       m.Role,
+			Content:    m.Content,
+			ToolCallID: m.ToolCallID,
+			Name:       m.Name,
+			CreatedAt:  m.CreatedAt.Format(time.RFC3339),
+		}
+		if m.ToolCalls != nil && *m.ToolCalls != "" {
+			msgItem.ToolCalls = json.RawMessage(*m.ToolCalls)
+		}
+		if m.Attachments != nil && *m.Attachments != "" {
+			msgItem.Attachments = json.RawMessage(*m.Attachments)
+		}
+		msgOuts = append(msgOuts, msgItem)
+	}
+
+	var promptPtr *string
+	if session.SystemPrompt != "" {
+		promptPtr = &session.SystemPrompt
+	}
+
+	c.JSON(http.StatusOK, SessionDetailOut{
+		SessionOut: SessionOut{
+			ID:           session.SessionID,
+			Title:        session.Title,
+			Model:        session.Model,
+			SystemPrompt: promptPtr,
+			AutoSkill:    session.AutoSkill,
+			CreatedAt:    session.CreatedAt.Format(time.RFC3339),
+			UpdatedAt:    session.UpdatedAt.Format(time.RFC3339),
+		},
+		Messages:        msgOuts,
+		EnabledSkillIDs: []int64{},
+	})
+}
+
+// UpdateSession 更新会话 (PATCH /api/sessions/:id)
+func UpdateSession(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	sessionID := c.Param("id")
+	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
+	if err != nil || session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != identity.UserID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+
+	var req struct {
+		Title        *string `json:"title"`
+		SystemPrompt *string `json:"system_prompt"`
+		Model        *string `json:"model"`
+		AutoSkill    *bool   `json:"auto_skill"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
+		return
+	}
+
+	updates := make(map[string]interface{})
+	if req.Title != nil {
+		updates["title"] = *req.Title
+		session.Title = *req.Title
+	}
+	if req.SystemPrompt != nil {
+		updates["system_prompt"] = *req.SystemPrompt
+		session.SystemPrompt = *req.SystemPrompt
+	}
+	if req.Model != nil {
+		updates["model"] = *req.Model
+		session.Model = *req.Model
+	}
+	if req.AutoSkill != nil {
+		updates["auto_skill"] = *req.AutoSkill
+		session.AutoSkill = *req.AutoSkill
+	}
+
+	if len(updates) > 0 {
+		if err := dao.UpdateSession(c.Request.Context(), sessionID, updates); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新失败: " + err.Error()})
+			return
+		}
+	}
+
+	var promptPtr *string
+	if session.SystemPrompt != "" {
+		promptPtr = &session.SystemPrompt
+	}
+
+	c.JSON(http.StatusOK, SessionOut{
+		ID:           session.SessionID,
 		Title:        session.Title,
 		Model:        session.Model,
-		SystemPrompt: session.SystemPrompt,
-		Messages:     messages,
-		CreatedAt:    session.CreatedAt,
-		UpdatedAt:    session.UpdatedAt,
-	}, nil
+		SystemPrompt: promptPtr,
+		AutoSkill:    session.AutoSkill,
+		CreatedAt:    session.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:    time.Now().Format(time.RFC3339),
+	})
 }
 
-type RenameSessionReq struct {
-	SessionID string `uri:"id" validate:"required"`
-	Title     string `json:"title" validate:"required"`
-}
-
-type RenameSessionResp struct {
-	Success bool `json:"success"`
-}
-
-func RenameSession(ctx context.Context, req *RenameSessionReq) (*RenameSessionResp, error) {
-	if err := dao.UpdateSessionTitle(ctx, req.SessionID, req.Title); err != nil {
-		return nil, errors.NewMsg("修改会话标题失败")
+// DeleteSession 删除会话 (DELETE /api/sessions/:id)
+func DeleteSession(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
 	}
-	return &RenameSessionResp{Success: true}, nil
-}
 
-type DeleteSessionReq struct {
-	SessionID string `uri:"id" validate:"required"`
-}
-
-type DeleteSessionResp struct {
-	Success bool `json:"success"`
-}
-
-func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*DeleteSessionResp, error) {
-	if err := dao.DeleteSession(ctx, req.SessionID); err != nil {
-		return nil, errors.NewMsg("删除会话失败")
+	sessionID := c.Param("id")
+	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
+	if err != nil || session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
 	}
-	return &DeleteSessionResp{Success: true}, nil
+	if session.UserID != identity.UserID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+
+	if err := dao.DeleteSession(c.Request.Context(), sessionID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除会话失败: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }
+
+// SetEnabledSkills 设置会话启用的技能 (PUT /api/sessions/:id/skills)
+func SetEnabledSkills(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+		return
+	}
+
+	sessionID := c.Param("id")
+	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
+	if err != nil || session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != identity.UserID {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+
+	// 预留技能关联同步逻辑
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
+

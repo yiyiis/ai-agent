@@ -9,6 +9,7 @@ import (
 
 	"backend/dal/model"
 	"backend/dao"
+	"backend/pkg/jwt"
 	"backend/pkg/provider"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -33,10 +34,19 @@ func SendMessageStream(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
+	identity, err := jwt.GetIdentityFromCtx(ctx)
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录或登录态已失效"})
+		return
+	}
 
-	// 1. 查询目标会话
+	// 1. 查询目标会话并严格实施用户隔离
 	session, err := dao.GetSessionBySessionID(ctx, sessionID)
 	if err != nil || session == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
+		return
+	}
+	if session.UserID != identity.UserID {
 		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
 		return
 	}

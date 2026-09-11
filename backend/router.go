@@ -10,26 +10,41 @@ import (
 
 func RegisterRouter(engine *gin.Engine) {
 	// 健康检查
-	engine.GET("/api/ping", TimeOut(time.Second*2), Controller(api.Ping))
+	engine.GET("/api/ping", api.Ping)
 
 	// 模型矩阵接口
-	engine.GET("/api/models", TimeOut(time.Second*3), Controller(api.ListModels))
+	engine.GET("/api/models", api.ListModels)
 
-	// 会话管理模块
+	// 认证与用户模块
+	authGroup := engine.Group("/api/auth")
+	{
+		authGroup.POST("/login", api.UserLogin)
+		authGroup.GET("/me", api.AuthMe)
+		authGroup.POST("/register", api.UserRegister)
+		authGroup.POST("/logout", api.UserLogout)
+	}
+
+	// 会话管理模块（严格基于登录态进行用户隔离）
 	sessionGroup := engine.Group("/api/sessions")
 	{
-		sessionGroup.POST("", TimeOut(time.Second*5), Controller(api.CreateSession))
-		sessionGroup.GET("", TimeOut(time.Second*5), Controller(api.ListSessions))
-		sessionGroup.GET("/:id", TimeOut(time.Second*5), Controller(api.GetSessionDetail))
-		sessionGroup.PATCH("/:id", TimeOut(time.Second*5), Controller(api.RenameSession))
-		sessionGroup.DELETE("/:id", TimeOut(time.Second*5), Controller(api.DeleteSession))
+		sessionGroup.POST("", api.CreateSession)
+		sessionGroup.GET("", api.ListSessions)
+		sessionGroup.GET("/:id", api.GetSessionDetail)
+		sessionGroup.PATCH("/:id", api.UpdateSession)
+		sessionGroup.DELETE("/:id", api.DeleteSession)
+		sessionGroup.PUT("/:id/skills", api.SetEnabledSkills)
 
 		// SSE 流式对话长连接
 		sessionGroup.POST("/:id/messages", api.SendMessageStream)
 	}
 
-	// 认证模块
-	engine.POST("/api/auth/login", TimeOut(time.Second*5), Controller(api.UserLogin))
+	// 技能与记忆模块
+	engine.GET("/api/skills", api.ListSkills)
+	engine.GET("/api/memories/status", api.MemoryStatus)
+	engine.GET("/api/memories", api.ListMemories)
+
+	// 兼容中台与管理端接口
 	engine.GET("/api/user/info", TimeOut(time.Second*3), Controller(api.UserInfoDetail))
 	engine.POST("/api/user/password", TimeOut(time.Second*3), Controller(api.UpdatePassword))
 }
+

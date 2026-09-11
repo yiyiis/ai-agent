@@ -1,65 +1,183 @@
 package api
 
 import (
-	"context"
+	"net/http"
+	"strings"
+
 	"backend/constants"
-	"backend/dao"
-	"backend/pkg/errors"
+	"backend/dal/model"
+	"backend/pkg/db"
 	"backend/pkg/jwt"
-	"gorm.io/gorm"
+	"github.com/gin-gonic/gin"
 )
 
-// PingRequest 健康检查请求
-type PingRequest struct{}
-
-// PingResp 健康检查响应
-type PingResp struct {
-	Status  string `json:"status"`
-	Message string `json:"message"`
-}
-
 // Ping 健康检查接口
-func Ping(ctx context.Context, req *PingRequest) (*PingResp, error) {
-	return &PingResp{
-		Status:  "ok",
-		Message: "pong",
-	}, nil
+func Ping(c *gin.Context) {
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "ok",
+		"message": "pong",
+	})
 }
 
-// UserLoginRequest 用户登录请求
-type UserLoginRequest struct {
-	Username string `json:"username" binding:"required"`
+type LoginReq struct {
+	Account  string `json:"account"`
+	Username string `json:"username"`
 	Password string `json:"password" binding:"required"`
 }
 
-// UserLoginResp 用户登录响应
-type UserLoginResp struct {
-	Token string `json:"token"`
+type UserInfoResp struct {
+	UserID    int64  `json:"user_id"`
+	CompanyID int64  `json:"company_id"`
+	Name      string `json:"name"`
+	Phone     string `json:"phone,omitempty"`
+	Username  string `json:"username,omitempty"`
 }
 
-// UserLogin 用户登录接口
-func UserLogin(ctx context.Context, req *UserLoginRequest) (*UserLoginResp, error) {
-	userModel, err := dao.GetUserByUsername(ctx, req.Username)
+type LoginResp struct {
+	Token string       `json:"token"`
+	User  UserInfoResp `json:"user"`
+}
+
+// UserLogin 处理用户登录 (POST /api/auth/login)
+func UserLogin(c *gin.Context) {
+	var req LoginReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
+		return
+	}
+
+	account := strings.TrimSpace(req.Account)
+	if account == "" {
+		account = strings.TrimSpace(req.Username)
+	}
+	if account == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "账号或用户名不能为空"})
+		return
+	}
+
+	// 从 user_info 查询用户
+	var user model.UserInfo
+	err := db.GetRawDB().WithContext(c.Request.Context()).
+		Where("(username = ? OR phone = ?) AND deleted_at IS NULL", account, account).
+		First(&user).Error
 	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, errors.NewMsg("用户不存在")
-		}
-		return nil, errors.Join(err, errors.New("查询用户记录错误"), errors.NewMsg("系统异常"))
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
+		return
 	}
 
-	if !dao.ComparePassword(userModel, req.Password) {
-		return nil, errors.NewMsg("密码错误")
+	if user.Password != req.Password {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
+		return
 	}
 
-	token, err := jwt.GenAccessToken(jwt.TokenClaims{
-		UserId:   userModel.UserID,
-		UserType: constants.UserType(userModel.UserType),
-	})
+	name := user.Nickname
+	if name == "" {
+		name = user.Username
+	}
+
+	identity := jwt.AuthIdentity{
+		UserID:    int64(user.UserID),
+		CompanyID: 1, // 默认公司/租户 ID
+		Name:      name,
+		Username:  user.Username,
+		UserType:  constants.UserType(user.UserType),
+	}
+
+	token, err := jwt.GenAccessToken(identity)
 	if err != nil {
-		return nil, errors.Join(err, errors.New("生成jwt失败"), errors.NewMsg("系统异常"))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成登录令牌失败"})
+		return
 	}
 
-	return &UserLoginResp{
+	// 注入 Cookie
+	c.SetCookie("agents_token", token, 7*24*3600, "/", "", false, false)
+
+	c.JSON(http.StatusOK, LoginResp{
 		Token: token,
-	}, nil
+		User: UserInfoResp{
+			UserID:    int64(user.UserID),
+			CompanyID: 1,
+			Name:      name,
+			Phone:     user.Phone,
+			Username:  user.Username,
+		},
+	})
+}
+
+// AuthMe 获取当前登录用户信息 (GET /api/auth/me)
+func AuthMe(c *gin.Context) {
+	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	if err != nil || identity.UserID == 0 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
+		return
+	}
+
+	c.JSON(http.StatusOK, UserInfoResp{
+		UserID:    identity.UserID,
+		CompanyID: identity.CompanyID,
+		Name:      identity.Name,
+		Username:  identity.Username,
+	})
+}
+
+// UserRegister 用户快速注册 (POST /api/auth/register)
+func UserRegister(c *gin.Context) {
+	var req struct {
+		Username string `json:"username" binding:"required"`
+		Password string `json:"password" binding:"required"`
+		Nickname string `json:"nickname"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效: " + err.Error()})
+		return
+	}
+
+	var count int64
+	db.GetRawDB().Model(&model.UserInfo{}).Where("username = ?", req.Username).Count(&count)
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "该用户名已被注册"})
+		return
+	}
+
+	nickname := req.Nickname
+	if nickname == "" {
+		nickname = req.Username
+	}
+
+	newUser := model.UserInfo{
+		Username: req.Username,
+		Nickname: nickname,
+		Password: req.Password,
+		UserType: int32(constants.User),
+	}
+	if err := db.GetRawDB().Create(&newUser).Error; err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "用户创建失败"})
+		return
+	}
+
+	identity := jwt.AuthIdentity{
+		UserID:    int64(newUser.UserID),
+		CompanyID: 1,
+		Name:      nickname,
+		Username:  newUser.Username,
+		UserType:  constants.User,
+	}
+	token, _ := jwt.GenAccessToken(identity)
+	c.SetCookie("agents_token", token, 7*24*3600, "/", "", false, false)
+
+	c.JSON(http.StatusOK, LoginResp{
+		Token: token,
+		User: UserInfoResp{
+			UserID:    int64(newUser.UserID),
+			CompanyID: 1,
+			Name:      nickname,
+			Username:  newUser.Username,
+		},
+	})
+}
+
+// UserLogout 用户退出登录 (POST /api/auth/logout)
+func UserLogout(c *gin.Context) {
+	c.SetCookie("agents_token", "", -1, "/", "", false, false)
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
 }

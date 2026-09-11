@@ -49,3 +49,15 @@ func GetMessageByMessageID(ctx context.Context, messageID string) (*model.Messag
 	}
 	return &msg, nil
 }
+
+// CountMessagesBySessionID 统计指定会话的消息总数
+func CountMessagesBySessionID(ctx context.Context, sessionID string) (int64, error) {
+	var count int64
+	err := db.GetRawDB().WithContext(ctx).Model(&model.Message{}).
+		Where("session_id = ?", sessionID).
+		Count(&count).Error
+	if err != nil {
+		return 0, errors.Wrap(err, "统计会话消息数量失败")
+	}
+	return count, nil
+}

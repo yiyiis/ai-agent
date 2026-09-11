@@ -15,9 +15,10 @@ type Server struct {
 }
 
 type ProviderConfig struct {
-	Name    string `yaml:"Name" mapstructure:"Name"`
-	BaseURL string `yaml:"BaseURL" mapstructure:"BaseURL"`
-	APIKey  string `yaml:"ApiKey" mapstructure:"ApiKey"`
+	Name    string   `yaml:"Name" mapstructure:"Name"`
+	BaseURL string   `yaml:"BaseURL" mapstructure:"BaseURL"`
+	APIKey  string   `yaml:"ApiKey" mapstructure:"ApiKey"`
+	Models  []string `yaml:"Models" mapstructure:"Models"`
 }
 
 type LLMConfig struct {

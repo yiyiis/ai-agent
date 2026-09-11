@@ -28,11 +28,14 @@ func main() {
 	log.InitSlog(conf.Log)
 	validate.InitGinValidate()
 
-	// 3. 注册 LLM Provider
+	// 3. 注册 LLM Provider 及模型路由
 	for _, p := range conf.LLM.Providers {
 		openAIProvider := provider.NewOpenAICompatProvider(p.BaseURL, p.APIKey)
 		provider.RegisterProvider(p.Name, openAIProvider)
-		fmt.Printf("[INFO] 成功注册模型 Provider: %s (BaseURL: %s)\n", p.Name, p.BaseURL)
+		for _, m := range p.Models {
+			provider.RegisterModelRoute(m, p.Name)
+		}
+		fmt.Printf("[INFO] 成功注册模型 Provider: %s (BaseURL: %s, 模型数: %d)\n", p.Name, p.BaseURL, len(p.Models))
 	}
 
 	// 4. 初始化 Gin Engine

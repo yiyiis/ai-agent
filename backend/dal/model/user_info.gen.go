@@ -17,8 +17,8 @@ type UserInfo struct {
 	Phone     string         `gorm:"column:phone;comment:手机号码" json:"phone"`                                     // 手机号码
 	UserType  int32          `gorm:"column:user_type;comment:用户类型：1：超级管理员，2：管理员，3：普通用户" json:"user_type"`        // 用户类型：1：超级管理员，2：管理员，3：普通用户
 	HeadImage string         `gorm:"column:head_image;comment:用户头像" json:"head_image"`                           // 用户头像
-	CreatedAt time.Time      `gorm:"column:created_at;default:CURRENT_TIMESTAMP;comment:创建时间" json:"created_at"` // 创建时间
-	UpdatedAt time.Time      `gorm:"column:updated_at;default:CURRENT_TIMESTAMP;comment:更新时间" json:"updated_at"` // 更新时间
+	CreatedAt time.Time      `gorm:"column:created_at;comment:创建时间" json:"created_at"` // 创建时间
+	UpdatedAt time.Time      `gorm:"column:updated_at;comment:更新时间" json:"updated_at"` // 更新时间
 	DeletedAt gorm.DeletedAt `gorm:"column:deleted_at;comment:删除时间" json:"deleted_at"`                           // 删除时间
 }
 

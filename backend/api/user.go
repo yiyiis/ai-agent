@@ -11,8 +11,8 @@ import (
 // UserInfoRequest 用户信息获取请求
 type UserInfoRequest struct{}
 
-// UserInfoResp 用户信息响应
-type UserInfoResp struct {
+// UserDetailResp 用户信息响应
+type UserDetailResp struct {
 	UserId   int32  `json:"user_id"`
 	Username string `json:"username"`
 	Nickname string `json:"nickname"`
@@ -21,18 +21,18 @@ type UserInfoResp struct {
 }
 
 // UserInfoDetail 获取当前登录人详细信息
-func UserInfoDetail(ctx context.Context, req *UserInfoRequest) (*UserInfoResp, error) {
+func UserInfoDetail(ctx context.Context, req *UserInfoRequest) (*UserDetailResp, error) {
 	tc, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	userInfo, err := dao.GetUserById(ctx, tc.UserId)
+	userInfo, err := dao.GetUserById(ctx, int32(tc.UserId))
 	if err != nil {
 		return nil, err
 	}
 
-	return &UserInfoResp{
+	return &UserDetailResp{
 		UserId:   userInfo.UserID,
 		Username: userInfo.Username,
 		Nickname: userInfo.Nickname,
@@ -62,7 +62,7 @@ func UpdatePassword(ctx context.Context, req *UpdatePasswordRequest) (*UpdatePas
 	// 演示使用 db.Transition 事务保护
 	// 闭包函数签名优化为纯粹的 func(ctx context.Context) error
 	err = db.Transition(ctx, func(txCtx context.Context) error {
-		userInfo, err := dao.GetUserById(txCtx, tc.UserId)
+		userInfo, err := dao.GetUserById(txCtx, int32(tc.UserId))
 		if err != nil {
 			return err
 		}
@@ -71,7 +71,7 @@ func UpdatePassword(ctx context.Context, req *UpdatePasswordRequest) (*UpdatePas
 			return errors.NewMsg("原密码错误")
 		}
 
-		return dao.UpdatePassword(txCtx, tc.UserId, req.NewPassword)
+		return dao.UpdatePassword(txCtx, int32(tc.UserId), req.NewPassword)
 	})
 	if err != nil {
 		return nil, err

@@ -40,7 +40,23 @@ func GetSessionBySessionID(ctx context.Context, sessionID string) (*model.Sessio
 	return &s, nil
 }
 
-// ListSessions 查询会话列表
+// GetLatestEmptySession 获取用户最近一条未发送任何消息的空会话（若有）
+func GetLatestEmptySession(ctx context.Context, userID int64) (*model.Session, error) {
+	var s model.Session
+	err := db.GetRawDB().WithContext(ctx).
+		Where("user_id = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.session_id)", userID).
+		Order("id DESC").
+		First(&s).Error
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, errors.Wrap(err, "查询空会话失败")
+	}
+	return &s, nil
+}
+
+// ListSessions 查询会话列表（仅展示有真实对话消息的会话，过滤无消息空会话）
 func ListSessions(ctx context.Context, userID, companyID int64, limit, offset int) ([]model.Session, int64, error) {
 	var sessions []model.Session
 	var total int64
@@ -52,6 +68,8 @@ func ListSessions(ctx context.Context, userID, companyID int64, limit, offset in
 	if companyID > 0 {
 		tx = tx.Where("company_id = ?", companyID)
 	}
+	// 只展示有实际对话消息的会话，彻底杜绝未对话的空会话污染列表
+	tx = tx.Where("EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.session_id)")
 
 	if err := tx.Count(&total).Error; err != nil {
 		return nil, 0, errors.Wrap(err, "统计会话数量失败")
@@ -73,14 +91,19 @@ func ListSessions(ctx context.Context, userID, companyID int64, limit, offset in
 
 // UpdateSessionTitle 修改会话标题
 func UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
+	return UpdateSession(ctx, sessionID, map[string]interface{}{
+		"title": title,
+	})
+}
+
+// UpdateSession 更新会话指定字段
+func UpdateSession(ctx context.Context, sessionID string, updates map[string]interface{}) error {
+	updates["updated_at"] = time.Now()
 	err := db.GetRawDB().WithContext(ctx).Model(&model.Session{}).
 		Where("session_id = ?", sessionID).
-		Updates(map[string]interface{}{
-			"title":      title,
-			"updated_at": time.Now(),
-		}).Error
+		Updates(updates).Error
 	if err != nil {
-		return errors.Wrap(err, "更新会话标题失败")
+		return errors.Wrap(err, "更新会话失败")
 	}
 	return nil
 }

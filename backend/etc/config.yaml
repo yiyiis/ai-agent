@@ -14,12 +14,11 @@ Auth:
   Seconds: 604800
   Secret: "your_jwt_secret_key"
   IgnorePath:
+    - /api/ping
     - /api/auth/login
     - /api/auth/register
-    - /api/ping
+    - /api/auth/logout
     - /api/models
-    - /api/sessions
-    - /api/sessions/*
 
 Log:
   Mode: "default"
@@ -31,6 +30,19 @@ LLM:
     - Name: "minimax"
       BaseURL: "https://api.minimaxi.com/v1"
       ApiKey: "YOUR_MINIMAX_API_KEY"
+      Models:
+        - "MiniMax-Text-01"
+        - "MiniMax-M3"
+    - Name: "glm"
+      BaseURL: "https://open.bigmodel.cn/api/coding/paas/v4"
+      ApiKey: "YOUR_GLM_API_KEY"
+      Models:
+        - "GLM-5.3"
+        - "GLM-5.3-Flash"
+        - "GLM-5.2"
+        - "GLM-5.1"
+        - "GLM-5-Turbo"
+        - "GLM-4.7"
 
 COS:
   SecretId: "YOUR_TENCENT_COS_SECRET_ID"
