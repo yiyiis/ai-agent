@@ -1,0 +1,422 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>agent-runs 调试台</title>
+<!--
+  /api/v1/agent-runs 的手工调试页。单文件、零依赖。
+
+  ⚠️ 页面所在的来源必须在后端 CORS 白名单里（Settings.CORS_ORIGINS），否则浏览器
+     会把每个请求都拦掉，表现为"点了没反应"。直接双击（file://）一定不行。
+
+     本地调试：
+       cd backend/scripts && python3 -m http.server 5173
+       打开 http://localhost:5173/agent_playground.html      # 默认就放行这个来源
+
+     部署到别的域名（如 https://agent.example.com）：在后端 .env 里加上
+       CORS_ORIGINS=http://localhost:5173,https://agent.example.com
+     然后重启后端。
+
+  用 fetch 而不是 EventSource 读 SSE：EventSource 不支持自定义 header，
+  而这里要带 Authorization: Bearer。
+-->
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a19; --dim: #6b6b68; --line: #e3e3e0;
+    --card: #fff; --accent: #3b6ea5;
+    --c-thinking: #8b7ec8; --c-skill: #c2853a; --c-tool: #3b8a6e;
+    --c-artifact: #b5546e; --c-progress: #5f8fb5; --c-system: #8a8a86;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #17171a; --fg: #e8e8e4; --dim: #96968f; --line: #2e2e33;
+      --card: #1e1e22; --accent: #7aa7d9;
+      --c-thinking: #a99ce0; --c-skill: #dba463; --c-tool: #5fb694;
+      --c-artifact: #d97e97; --c-progress: #7fb0d6; --c-system: #9a9a94;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 20px; background: var(--bg); color: var(--fg);
+    font: 14px/1.55 -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  }
+  .wrap { max-width: 1080px; margin: 0 auto; }
+  h1 { font-size: 17px; margin: 0 0 4px; font-weight: 600; }
+  .sub { color: var(--dim); font-size: 12px; margin-bottom: 18px; }
+  .panel {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 8px; padding: 14px; margin-bottom: 14px;
+  }
+  label { display: block; font-size: 12px; color: var(--dim); margin-bottom: 4px; }
+  input, textarea, select {
+    width: 100%; padding: 7px 9px; border: 1px solid var(--line);
+    border-radius: 5px; background: var(--bg); color: var(--fg);
+    font: inherit; font-size: 13px;
+  }
+  textarea { resize: vertical; min-height: 68px; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  .row > * { flex: 1 1 200px; }
+  .row.tight > * { flex: 0 0 auto; }
+  .field { margin-bottom: 10px; }
+  button {
+    padding: 7px 14px; border: 1px solid var(--line); border-radius: 5px;
+    background: var(--card); color: var(--fg); font: inherit; font-size: 13px;
+    cursor: pointer;
+  }
+  button:hover:not(:disabled) { border-color: var(--accent); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .inline { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+  .inline input[type=checkbox] { width: auto; }
+  .meta { font-size: 12px; color: var(--dim); margin-top: 8px; word-break: break-all; }
+  .meta code { background: var(--bg); padding: 1px 5px; border-radius: 3px; }
+  #log { display: flex; flex-direction: column; gap: 6px; }
+  .ev {
+    border-left: 3px solid var(--c-system); padding: 5px 0 5px 10px;
+    font-size: 13px; white-space: pre-wrap; word-break: break-word;
+  }
+  .ev .tag {
+    font-size: 11px; color: var(--dim); text-transform: uppercase;
+    letter-spacing: .04em; margin-right: 6px;
+  }
+  .ev.thinking { border-color: var(--c-thinking); }
+  .ev.skill    { border-color: var(--c-skill);  font-weight: 600; }
+  .ev.tool     { border-color: var(--c-tool); }
+  .ev.artifact { border-color: var(--c-artifact); }
+  .ev.progress { border-color: var(--c-progress); }
+  .ev.system   { border-color: var(--c-system); color: var(--dim); }
+  .ev .detail { color: var(--dim); font-size: 12px; margin-top: 2px; }
+  .status {
+    display: inline-block; padding: 2px 9px; border-radius: 10px;
+    font-size: 12px; border: 1px solid var(--line);
+  }
+  .status.running { border-color: var(--accent); color: var(--accent); }
+  .status.succeeded { border-color: var(--c-tool); color: var(--c-tool); }
+  .status.needs_input { border-color: var(--c-skill); color: var(--c-skill); }
+  .status.failed, .status.canceled { border-color: var(--c-artifact); color: var(--c-artifact); }
+  pre {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 5px;
+    padding: 10px; overflow-x: auto; font-size: 12px; margin: 8px 0 0;
+  }
+  .ask {
+    border: 1px solid var(--c-skill); border-radius: 6px; padding: 12px;
+    margin-top: 10px;
+  }
+  .ask h3 { margin: 0 0 8px; font-size: 13px; color: var(--c-skill); }
+  a { color: var(--accent); }
+</style>
+
+<div class="wrap">
+  <h1>agent-runs 调试台</h1>
+  <div class="sub">
+    <code>/api/v1/agent-runs</code> · 只给一句自然语言，agent 自己选 skill，中间过程实时可见
+  </div>
+
+  <div class="panel">
+    <div class="row">
+      <div class="field"><label>服务地址（同源部署时留空即可）</label>
+        <input id="base" placeholder="留空 = 用本页所在的域名"></div>
+      <div class="field"><label>API Key（Bearer，存在本地浏览器）</label>
+        <input id="key" type="password" placeholder="sk_… 或 UUID"></div>
+    </div>
+    <div class="field">
+      <label>指令</label>
+      <textarea id="input" placeholder="例：帮我给海信 L9S Pro 激光电视做一批小红书热搜词"></textarea>
+    </div>
+    <div class="row">
+      <div class="field"><label>模型（留空用默认）</label><input id="model" placeholder=""></div>
+      <div class="field"><label>预先启用的 skill（逗号分隔，一般留空）</label>
+        <input id="skills" placeholder=""></div>
+    </div>
+    <div class="row tight" style="align-items:center; margin-top:4px">
+      <label class="inline" style="margin:0">
+        <input type="checkbox" id="interactive"> 允许 agent 反问（interactive）
+      </label>
+      <div style="flex:1"></div>
+      <button class="primary" id="send">发起</button>
+      <button id="cancel" disabled>取消</button>
+      <button id="close" disabled>结束对话</button>
+      <button id="clear">清空</button>
+    </div>
+    <div class="meta" id="meta">未开始</div>
+  </div>
+
+  <div class="panel">
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px">
+      <strong style="font-size:13px">中间过程</strong>
+      <span class="status" id="status">—</span>
+      <div style="flex:1"></div>
+      <label class="inline" style="margin:0">
+        <input type="checkbox" id="raw"> 显示原始 JSON
+      </label>
+    </div>
+    <div id="log"></div>
+    <div id="ask"></div>
+    <div id="result"></div>
+  </div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+// 留空就用本页所在的 origin——页面和 API 同源时**完全不产生 CORS**，
+// 那是最省事的部署方式（把本文件丢进 frontend/public/ 即可）。
+const base = () => ($('base').value.trim() || location.origin).replace(/\/+$/, '');
+const auth = () => ({ 'Authorization': 'Bearer ' + $('key').value.trim() });
+
+let conversationId = null;   // 多轮：续接同一段对话
+let runId = null;
+let abort = null;            // 中断当前 SSE 流
+let seq = 0;                 // 已收到的 progress 条数，断线重连用 ?since=
+
+// API key 留在本地，省得每次重输
+$('key').value = localStorage.getItem('agent_key') || '';
+$('key').addEventListener('change', () => localStorage.setItem('agent_key', $('key').value));
+$('base').value = localStorage.getItem('agent_base') || '';
+$('base').addEventListener('change', () => localStorage.setItem('agent_base', $('base').value));
+
+function setStatus(s) {
+  const el = $('status');
+  el.textContent = s || '—';
+  el.className = 'status ' + (s || '');
+}
+
+function setMeta() {
+  $('meta').innerHTML = conversationId
+    ? `conversation: <code>${conversationId}</code>　run: <code>${runId || '—'}</code>　已收事件: ${seq}`
+    : '未开始';
+}
+
+// 一条进度事件 → 一行。category 决定配色，phase + 附加字段决定内容
+function renderEvent(ev) {
+  const cat = ev.category || 'system';
+  const div = document.createElement('div');
+  div.className = 'ev ' + cat;
+
+  if ($('raw').checked) {
+    div.innerHTML = `<span class="tag">${cat}/${ev.phase || ''}</span>`;
+    const pre = document.createElement('pre');
+    pre.textContent = JSON.stringify(ev, null, 2);
+    div.appendChild(pre);
+    $('log').appendChild(div);
+    return;
+  }
+
+  let head = `<span class="tag">${ev.phase || cat}</span>`;
+  let body = ev.message || '';
+  let detail = '';
+
+  if (ev.phase === 'skill_loaded') {
+    body = `已自动选用 skill：${ev.skill_name}`;
+  } else if (cat === 'tool') {
+    body = ev.tool_label || ev.tool_name || body;
+    const d = ev.tool_args_preview || ev.output_preview;
+    if (d) detail = d;
+  } else if (ev.phase === 'artifact' && ev.artifact) {
+    const a = ev.artifact;
+    body = `产出文件：${a.filename || a.name || ''}`;
+    detail = a.url;
+  } else if (ev.phase === 'needs_input') {
+    body = `需要补充信息：${ev.question || ''}`;
+  } else if (typeof ev.index === 'number' && typeof ev.total === 'number') {
+    body = `${ev.message || ev.phase} (${ev.index}/${ev.total})`;
+  }
+
+  div.innerHTML = head + escapeHtml(body) +
+    (detail ? `<div class="detail">${escapeHtml(String(detail).slice(0, 300))}</div>` : '');
+  $('log').appendChild(div);
+  div.scrollIntoView({ block: 'nearest' });
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' }[c]));
+}
+
+function showResult(snap) {
+  const r = snap.result || {};
+  const parts = [];
+  if (r.answer) parts.push(`<strong style="font-size:13px">回答</strong><pre>${escapeHtml(r.answer)}</pre>`);
+  if (r.skills_used && r.skills_used.length)
+    parts.push(`<div class="meta">用到的 skill：<code>${r.skills_used.join('、')}</code></div>`);
+  if (snap.artifacts && snap.artifacts.length) {
+    const links = snap.artifacts
+      .map(a => `<a href="${a.url}" target="_blank" rel="noreferrer">${escapeHtml(a.filename || a.name || a.url)}</a>`)
+      .join('　');
+    parts.push(`<div class="meta">产物：${links}</div>`);
+  }
+  if (snap.error) parts.push(`<pre style="color:var(--c-artifact)">${escapeHtml(snap.error)}</pre>`);
+  if (snap.duration_ms != null) parts.push(`<div class="meta">耗时 ${(snap.duration_ms / 1000).toFixed(1)}s</div>`);
+  $('result').innerHTML = parts.join('');
+}
+
+// needs_input：把问题摆出来，回答后带同一个 conversation_id 再发一轮
+function showAsk(question) {
+  $('ask').innerHTML = `
+    <div class="ask">
+      <h3>agent 需要更多信息</h3>
+      <div style="margin-bottom:8px">${escapeHtml(question)}</div>
+      <div class="row tight">
+        <input id="answer" placeholder="回答后回车，或点右侧按钮" style="flex:1 1 320px">
+        <button class="primary" id="reply">回答并继续</button>
+      </div>
+    </div>`;
+  const go = () => {
+    const a = $('answer').value.trim();
+    if (a) { $('ask').innerHTML = ''; start(a); }
+  };
+  $('reply').onclick = go;
+  $('answer').addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+  $('answer').focus();
+}
+
+// 读 SSE：fetch + ReadableStream 手工分帧。
+// EventSource 用不了——它不支持自定义 header，而这里必须带 Authorization。
+async function streamEvents(id, since) {
+  abort = new AbortController();
+  const url = `${base()}/api/v1/agent-runs/${id}/events?since=${since}`;
+  const res = await fetch(url, { headers: auth(), signal: abort.signal });
+  if (!res.ok) throw new Error(`SSE ${res.status}: ${await res.text()}`);
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+
+    // 帧之间用空行分隔
+    let i;
+    while ((i = buf.indexOf('\n\n')) >= 0) {
+      const frame = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      if (!frame.trim() || frame.startsWith(':')) continue;  // 心跳注释
+
+      let name = 'message';
+      const data = [];
+      for (const line of frame.split('\n')) {
+        if (line.startsWith('event:')) name = line.slice(6).trim();
+        else if (line.startsWith('data:')) data.push(line.slice(5).trim());
+      }
+      let payload = null;
+      try { payload = JSON.parse(data.join('\n')); } catch { payload = data.join('\n'); }
+      handleFrame(name, payload);
+    }
+  }
+}
+
+function handleFrame(name, data) {
+  if (name === 'status') {
+    setStatus(data.status);
+  } else if (name === 'progress') {
+    seq++; renderEvent(data); setMeta();
+  } else if (name === 'done') {
+    setStatus(data.status);
+    showResult(data);
+    if (data.status === 'needs_input') showAsk((data.result || {}).question || '');
+    finish();
+  } else if (name === 'error' || name === 'timeout') {
+    setStatus('failed');
+    $('result').innerHTML = `<pre style="color:var(--c-artifact)">${escapeHtml(JSON.stringify(data))}</pre>`;
+    finish();
+  }
+}
+
+function finish() {
+  abort = null;
+  $('send').disabled = false;
+  $('cancel').disabled = true;
+  $('close').disabled = !conversationId;
+  setMeta();
+}
+
+async function start(text) {
+  const body = { input: text };
+  if (conversationId) {
+    // 会话级设定只能在开新对话时给，续接时再传后端会 400
+    body.conversation_id = conversationId;
+  } else {
+    if ($('model').value.trim()) body.model = $('model').value.trim();
+    if ($('interactive').checked) body.interactive = true;
+    const sk = $('skills').value.split(',').map(s => s.trim()).filter(Boolean);
+    if (sk.length) body.skills = sk;
+  }
+
+  $('send').disabled = true;
+  $('result').innerHTML = '';
+  setStatus('queued');
+
+  let run;
+  try {
+    const res = await fetch(`${base()}/api/v1/agent-runs`, {
+      method: 'POST',
+      headers: { ...auth(), 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    run = await res.json();
+    if (!res.ok) throw new Error(`${res.status} ${JSON.stringify(run)}`);
+  } catch (e) {
+    setStatus('failed');
+    $('result').innerHTML = `<pre style="color:var(--c-artifact)">${escapeHtml(e.message)}
+（若是跨域被拦：把本页所在的来源加进后端 .env 的 CORS_ORIGINS 再重启，例如
+CORS_ORIGINS=http://localhost:5173,https://agent.example.com）</pre>`;
+    $('send').disabled = false;
+    return;
+  }
+
+  runId = run.id;
+  conversationId = run.conversation_id;
+  seq = 0;
+  $('cancel').disabled = false;
+  $('close').disabled = false;
+  setMeta();
+
+  // 断线自动续传：带上已收条数，服务端只推之后的
+  for (let tries = 0; tries < 3; tries++) {
+    try {
+      await streamEvents(runId, seq);
+      return;
+    } catch (e) {
+      if (e.name === 'AbortError') return;
+      renderEvent({ category: 'system', phase: 'error', message: `连接中断，${seq} 条之后续传…（${e.message}）` });
+      await new Promise(r => setTimeout(r, 1000));
+    }
+  }
+  setStatus('failed');
+  finish();
+}
+
+$('send').onclick = () => {
+  const t = $('input').value.trim();
+  if (!t) return $('input').focus();
+  if (!$('key').value.trim()) return alert('先填 API Key');
+  start(t);
+};
+
+$('cancel').onclick = async () => {
+  if (!runId) return;
+  if (abort) abort.abort();
+  await fetch(`${base()}/api/v1/agent-runs/${runId}/cancel`, { method: 'POST', headers: auth() });
+  setStatus('canceled');
+  finish();
+};
+
+$('close').onclick = async () => {
+  if (!conversationId) return;
+  const res = await fetch(
+    `${base()}/api/v1/agent-runs/conversations/${conversationId}`,
+    { method: 'DELETE', headers: auth() });
+  renderEvent({
+    category: 'system', phase: 'done',
+    message: res.status === 204 ? '对话已结束，沙箱已释放' : `结束失败：${res.status}`,
+  });
+  if (res.status === 204) { conversationId = null; runId = null; }
+  finish();
+};
+
+$('clear').onclick = () => {
+  if (abort) abort.abort();
+  conversationId = null; runId = null; seq = 0; abort = null;
+  $('log').innerHTML = ''; $('result').innerHTML = ''; $('ask').innerHTML = '';
+  setStatus(''); setMeta();
+  $('send').disabled = false; $('cancel').disabled = true; $('close').disabled = true;
+};
+</script>

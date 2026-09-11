@@ -1,0 +1,36 @@
+# 容器内的 Caddy：只发静态文件。
+# 站点地址写成 `:80`（没有主机名）时 Caddy 自动关闭 auto-HTTPS——
+# 证书是宿主机那份 Caddy 的职责，这里不掺和。
+
+:80 {
+	root * /srv
+
+	# 只压文本类。**不要**用默认的 text/* 通配：那会把 text/event-stream 也卷进去，
+	# 虽然 SSE 不走这个容器，但配置将来被复制到别处时这是个隐患。
+	encode gzip {
+		match {
+			header Content-Type text/html*
+			header Content-Type text/css*
+			header Content-Type text/javascript*
+			header Content-Type application/javascript*
+			header Content-Type application/json*
+			header Content-Type image/svg+xml*
+		}
+	}
+
+	# 带 hash 的产物可以永久缓存。
+	header /assets/* Cache-Control "public, max-age=31536000, immutable"
+
+	# 其余一律 no-cache——主要是 index.html。换镜像发版时旧 assets 会随旧容器一起
+	# 消失，浏览器若拿着缓存的旧 html 去请求已删除的 assets，页面直接白屏。
+	#
+	# 匹配器**不能**写成 `header /index.html`：Caddy 的 header 指令排在 try_files
+	# 之前，访问 `/` 时路径还没被重写成 /index.html，那条规则匹配不上——
+	# 而 `/` 恰恰是最常见的入口。所以改成"除 assets 外全都 no-cache"。
+	@notasset not path /assets/*
+	header @notasset Cache-Control "no-cache"
+
+	# SPA 路由：找不到的路径一律回 index.html 交给前端路由
+	try_files {path} /index.html
+	file_server
+}

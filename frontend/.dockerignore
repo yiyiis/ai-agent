@@ -1,0 +1,12 @@
+# 构建上下文是 frontend/。node_modules 必须排除——几百 MB 传给 daemon 纯属浪费，
+# 而且宿主机装的是 darwin/arm64 的二进制，进 linux 容器也用不了。
+node_modules/
+dist/
+
+# 增量编译信息：留着可能让 tsc -b 跳过检查，构建要从干净状态开始
+*.tsbuildinfo
+
+.DS_Store
+*.log
+.env
+.env.*
