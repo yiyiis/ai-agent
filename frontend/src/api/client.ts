@@ -339,7 +339,7 @@ export const api = {
 
 export type StreamEvent =
   | { type: 'user_message_id'; id: string }
-  | { type: 'delta'; content: string }
+  | { type: 'delta'; content?: string; reasoning?: string }
   | { type: 'tool_call_start'; id: string; name: string; arguments: string }
   | { type: 'tool_call_result'; id: string; output: string }
   | { type: 'tool_call_error'; id: string; error: string }

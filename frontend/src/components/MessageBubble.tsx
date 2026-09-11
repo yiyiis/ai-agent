@@ -2,7 +2,10 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import {
+  Brain,
   Check,
+  ChevronDown,
+  ChevronRight,
   Copy,
   FileText,
   Image as ImageIcon,
@@ -18,6 +21,7 @@ import { BrandIcon } from './BrandIcons'
 interface Props {
   role: 'user' | 'assistant'
   content: string
+  reasoning?: string | null
   attachments?: Attachment[] | null
   streaming?: boolean
   onRegenerate?: () => void
@@ -136,6 +140,7 @@ function AttachmentList({
 export function MessageBubble({
   role,
   content,
+  reasoning,
   attachments,
   streaming,
   onRegenerate,
@@ -143,6 +148,7 @@ export function MessageBubble({
   onPreview,
 }: Props) {
   const [copied, setCopied] = useState(false)
+  const [reasoningOpen, setReasoningOpen] = useState(false)
   const isUser = role === 'user'
 
   const copy = async () => {
@@ -201,6 +207,27 @@ export function MessageBubble({
         <BrandIcon className="w-6 h-6" />
       </div>
       <div className="flex-1 min-w-0 flex flex-col">
+        {reasoning && (
+          <div className="mb-3 rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
+            <button
+              onClick={() => setReasoningOpen((o) => !o)}
+              className="flex w-full items-center gap-2 px-3 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+            >
+              <Brain className="w-3.5 h-3.5" />
+              <span className="font-medium">思考过程</span>
+              {reasoningOpen ? (
+                <ChevronDown className="w-3.5 h-3.5 ml-auto" />
+              ) : (
+                <ChevronRight className="w-3.5 h-3.5 ml-auto" />
+              )}
+            </button>
+            {reasoningOpen && (
+              <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words">
+                {reasoning}
+              </div>
+            )}
+          </div>
+        )}
         <div className="text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#e3e3e3] markdown-body select-text">
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}

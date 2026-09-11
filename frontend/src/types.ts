@@ -27,8 +27,9 @@ export interface Attachment {
 
 export interface Message {
   id: string
-  role: 'user' | 'assistant' | 'system' | 'tool'
+  role: 'user' | 'assistant' | 'system' | 'tool' | 'notice'
   content: string
+  reasoning?: string | null
   tool_calls?: ToolCall[] | null
   tool_call_id?: string | null
   name?: string | null

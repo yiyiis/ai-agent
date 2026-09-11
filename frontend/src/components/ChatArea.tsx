@@ -3,6 +3,8 @@ import {
   AlertCircle,
   ArrowDown,
   Brain,
+  ChevronDown,
+  ChevronRight,
   Code2,
   FileText,
   Lightbulb,
@@ -49,10 +51,12 @@ type Segment =
       key: string
       role: 'user' | 'assistant'
       content: string
+      reasoning?: string | null
       messageId?: string
       attachments?: Attachment[] | null
     }
   | { kind: 'tool'; key: string; invocation: ToolInvocation }
+  | { kind: 'notice'; key: string; content: string }
 
 /** 把后端返回的扁平消息列表展开成 UI 渲染段。 */
 function buildSegments(messages: Message[]): Segment[] {
@@ -60,7 +64,9 @@ function buildSegments(messages: Message[]): Segment[] {
   const invocationById = new Map<string, ToolInvocation>()
 
   for (const m of messages) {
-    if (m.role === 'user') {
+    if (m.role === 'notice') {
+      segs.push({ kind: 'notice', key: m.id, content: m.content })
+    } else if (m.role === 'user') {
       segs.push({
         kind: 'text',
         key: m.id,
@@ -76,6 +82,7 @@ function buildSegments(messages: Message[]): Segment[] {
           key: m.id,
           role: 'assistant',
           content: m.content,
+          reasoning: m.reasoning,
           messageId: m.id,
         })
       }
@@ -129,6 +136,12 @@ export function ChatArea({
   const [allSkills, setAllSkills] = useState<Skill[]>([])
   const [models, setModels] = useState<Model[]>([])
   const [currentModel, setCurrentModel] = useState<string>('')
+  // 上一轮对话实际使用的模型：用于在模型真正变化的那一轮展示切换分隔条
+  const lastRoundModelRef = useRef<string>('')
+  // 流式思考过程（如 MiniMax-M3 的 <think> 块）：流式期间展开，正文开始后自动收起
+  const [streamReasoning, setStreamReasoning] = useState('')
+  const [reasoningOpen, setReasoningOpen] = useState(true)
+  const sawReasoningRef = useRef(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [autoSkill, setAutoSkill] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -175,12 +188,17 @@ export function ChatArea({
       setEditingId(null)
       setEnabledEntries([])
       setAutoSkill(true)
+      lastRoundModelRef.current = ''
+      setStreamReasoning('')
+      setReasoningOpen(true)
       return
     }
 
     setLoading(true)
     setStreamSegs([])
     setOptimisticUser(null)
+    setStreamReasoning('')
+    setReasoningOpen(true)
     api
       .getSession(sessionId)
       .then((s) => {
@@ -197,6 +215,7 @@ export function ChatArea({
             })),
         )
         setCurrentModel(s.model)
+        lastRoundModelRef.current = s.model
         // 老后端没有这个字段——按默认开处理
         setAutoSkill(s.auto_skill !== false)
       })
@@ -404,7 +423,15 @@ export function ChatArea({
 
   const handleEvent = (ev: StreamEvent) => {
     if (ev.type === 'delta') {
-      updateLastText(ev.content)
+      if (ev.reasoning) {
+        sawReasoningRef.current = true
+        setStreamReasoning((prev) => prev + ev.reasoning)
+      }
+      if (ev.content) {
+        updateLastText(ev.content)
+        // 思考结束、正文开始输出：思考面板自动收起
+        if (sawReasoningRef.current) setReasoningOpen(false)
+      }
     } else if (ev.type === 'tool_call_start') {
       const startedAt = Date.now()
       updateInvocation(
@@ -465,6 +492,10 @@ export function ChatArea({
         isUpdate: Boolean(ev.is_update),
       })
     } else if (ev.type === 'done' || ev.type === 'error') {
+      // 流结束：实时思考面板清空，落库的思考过程以折叠面板形式留在回答上方
+      setStreamReasoning('')
+      setReasoningOpen(true)
+      sawReasoningRef.current = false
       const currentId = activeIdRef.current
       if (currentId) {
         api.getSession(currentId).then((s) => {
@@ -550,6 +581,31 @@ export function ChatArea({
     stickRef.current = true
     setShowJump(false)
     scrollToBottom(false)
+
+    // 新一轮开始：清空上一轮的思考过程展示
+    setStreamReasoning('')
+    setReasoningOpen(true)
+    sawReasoningRef.current = false
+
+    // 模型切换分隔条：对比上一轮实际使用的模型，真正发生变化才展示。
+    // A→B→A 连续切换但中间没有对话时，上一轮与这一轮同为 A，不展示。
+    if (
+      lastRoundModelRef.current &&
+      currentModel &&
+      lastRoundModelRef.current !== currentModel
+    ) {
+      const nameOf = (id: string) => models.find((m) => m.id === id)?.name ?? id
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `switch-${Date.now()}`,
+          role: 'notice',
+          content: `模型从 ${nameOf(lastRoundModelRef.current)} 切换为 ${nameOf(currentModel)}`,
+          created_at: new Date().toISOString(),
+        },
+      ])
+    }
+    lastRoundModelRef.current = currentModel
 
     if (editingId) {
       const msgId = editingId
@@ -774,11 +830,20 @@ export function ChatArea({
             >
               <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
                 {historySegs.map((s) =>
-                  s.kind === 'text' ? (
+                  s.kind === 'notice' ? (
+                    <div key={s.key} className="flex items-center gap-3 py-1 select-none" aria-hidden>
+                      <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
+                      <span className="text-[11px] text-[#747775] dark:text-[#9aa0a6] whitespace-nowrap">
+                        {s.content}
+                      </span>
+                      <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
+                    </div>
+                  ) : s.kind === 'text' ? (
                     <MessageBubble
                       key={s.key}
                       role={s.role}
                       content={s.content}
+                      reasoning={s.reasoning}
                       attachments={s.attachments}
                       onPreview={setPreview}
                       onEdit={
@@ -808,6 +873,29 @@ export function ChatArea({
                     onPreview={setPreview}
                   />
                 )}
+                {streamReasoning && (
+                  <div className="pl-11 pr-2">
+                    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
+                      <button
+                        onClick={() => setReasoningOpen((o) => !o)}
+                        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+                      >
+                        <Brain className="w-3.5 h-3.5" />
+                        <span className="font-medium">思考过程</span>
+                        {reasoningOpen ? (
+                          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
+                        ) : (
+                          <ChevronRight className="w-3.5 h-3.5 ml-auto" />
+                        )}
+                      </button>
+                      {reasoningOpen && (
+                        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words">
+                          {streamReasoning}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
                 {streamSegs.map((s) =>
                   s.kind === 'text' ? (
                     <MessageBubble
@@ -817,11 +905,11 @@ export function ChatArea({
                       streaming
                       onPreview={setPreview}
                     />
-                  ) : (
+                  ) : s.kind === 'tool' ? (
                     <div key={s.key} className="pl-11 pr-2">
                       <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
                     </div>
-                  ),
+                  ) : null,
                 )}
                 {streaming && streamSegs.length === 0 && (
                   <div className="text-xs text-[#747775] pl-11 flex items-center gap-2">
