@@ -31,8 +31,19 @@ func InitDb(conf Config) {
 		panic(fmt.Sprintf("数据库连接失败: %v", err))
 	}
 
-	// 自动同步核心表结构
-	if err := db.AutoMigrate(&model.Session{}, &model.Message{}); err != nil {
+	// 自动同步全量智能体核心表结构
+	if err := db.AutoMigrate(
+		&model.Session{},
+		&model.Message{},
+		&model.Skill{},
+		&model.SkillVersion{},
+		&model.SessionSkill{},
+		&model.ApiKey{},
+		&model.SkillRun{},
+		&model.TokenUsage{},
+		&model.Memory{},
+		&model.SessionDigest{},
+	); err != nil {
 		fmt.Printf("警告: 自动同步数据表失败: %v\n", err)
 	}
 
