@@ -26,6 +26,7 @@ backend/ai-agent.db
 # Environment and sensitive files
 .env
 .env.local
+*.local.yaml
 
 # IDE and OS files
 .idea/
