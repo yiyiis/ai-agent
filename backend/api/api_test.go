@@ -29,8 +29,11 @@ func setupTestServer() {
 		return
 	}
 
-	// 寻找配置文件
+	// 寻找配置文件（与后端启动一致：存在 config.local.yaml 时优先）
 	confPath := "../etc/config.yaml"
+	if _, err := os.Stat("../etc/config.local.yaml"); err == nil {
+		confPath = "../etc/config.local.yaml"
+	}
 	if _, err := os.Stat(confPath); os.IsNotExist(err) {
 		confPath = filepath.Join("..", "etc", "config.yaml")
 	}
@@ -130,7 +133,7 @@ func TestUserIsolation(t *testing.T) {
 	setupTestServer()
 
 	// 生成 User 1 Token
-	token1, err := jwt.GenAccessToken(jwt.AuthIdentity{
+	token1, err := jwt.GenAccessToken(jwt.TokenClaims{
 		UserID:    101,
 		CompanyID: 1,
 		Name:      "User 101",
@@ -142,7 +145,7 @@ func TestUserIsolation(t *testing.T) {
 	}
 
 	// 生成 User 2 Token
-	token2, err := jwt.GenAccessToken(jwt.AuthIdentity{
+	token2, err := jwt.GenAccessToken(jwt.TokenClaims{
 		UserID:    102,
 		CompanyID: 1,
 		Name:      "User 102",
@@ -174,7 +177,8 @@ func TestUserIsolation(t *testing.T) {
 	}
 
 	// 插入一条对话消息，使会话成为包含实际发言的活跃会话
-	_ = dao.CreateMessage(context.Background(), &model.Message{
+	// （测试直连 dao，需显式注入 db：db.WithContext 是非请求链路的正规入口）
+	_ = dao.CreateMessage(db.WithContext(context.Background()), &model.Message{
 		MessageID: uuid.New().String(),
 		SessionID: s1.ID,
 		Role:      "user",

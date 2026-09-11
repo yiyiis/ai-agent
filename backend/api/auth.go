@@ -55,11 +55,12 @@ func UserLogin(c *gin.Context) {
 		return
 	}
 
-	// 从 user_info 查询用户
-	var user model.UserInfo
-	err := db.GetRawDB().WithContext(c.Request.Context()).
-		Where("(username = ? OR phone = ?) AND deleted_at IS NULL", account, account).
-		First(&user).Error
+	// 从 user_info 查询用户（软删除由 gorm.DeletedAt 自动过滤）
+	u := db.Ctx(c.Request.Context()).UserInfo
+	user, err := u.WithContext(c.Request.Context()).
+		Where(u.Username.Eq(account)).
+		Or(u.Phone.Eq(account)).
+		First()
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
 		return
@@ -75,7 +76,7 @@ func UserLogin(c *gin.Context) {
 		name = user.Username
 	}
 
-	identity := jwt.AuthIdentity{
+	claims := jwt.TokenClaims{
 		UserID:    int64(user.UserID),
 		CompanyID: 1, // 默认公司/租户 ID
 		Name:      name,
@@ -83,7 +84,7 @@ func UserLogin(c *gin.Context) {
 		UserType:  constants.UserType(user.UserType),
 	}
 
-	token, err := jwt.GenAccessToken(identity)
+	token, err := jwt.GenAccessToken(claims)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成登录令牌失败"})
 		return
@@ -106,7 +107,7 @@ func UserLogin(c *gin.Context) {
 
 // AuthMe 获取当前登录用户信息 (GET /api/auth/me)
 func AuthMe(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
 		return
@@ -132,8 +133,10 @@ func UserRegister(c *gin.Context) {
 		return
 	}
 
-	var count int64
-	db.GetRawDB().Model(&model.UserInfo{}).Where("username = ?", req.Username).Count(&count)
+	u := db.Ctx(c.Request.Context()).UserInfo
+	count, _ := u.WithContext(c.Request.Context()).
+		Where(u.Username.Eq(req.Username)).
+		Count()
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "该用户名已被注册"})
 		return
@@ -150,19 +153,19 @@ func UserRegister(c *gin.Context) {
 		Password: req.Password,
 		UserType: int32(constants.User),
 	}
-	if err := db.GetRawDB().Create(&newUser).Error; err != nil {
+	if err := db.Ctx(c.Request.Context()).UserInfo.WithContext(c.Request.Context()).Create(&newUser); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "用户创建失败"})
 		return
 	}
 
-	identity := jwt.AuthIdentity{
+	claims := jwt.TokenClaims{
 		UserID:    int64(newUser.UserID),
 		CompanyID: 1,
 		Name:      nickname,
 		Username:  newUser.Username,
 		UserType:  constants.User,
 	}
-	token, _ := jwt.GenAccessToken(identity)
+	token, _ := jwt.GenAccessToken(claims)
 	c.SetCookie("agents_token", token, 7*24*3600, "/", "", false, false)
 
 	c.JSON(http.StatusOK, LoginResp{

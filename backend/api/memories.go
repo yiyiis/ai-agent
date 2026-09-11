@@ -3,7 +3,6 @@
 import (
 	"net/http"
 
-	"backend/dal/model"
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"github.com/gin-gonic/gin"
@@ -19,28 +18,28 @@ func MemoryStatus(c *gin.Context) {
 
 // ListMemories 查询跨会话记忆列表 (GET /api/memories)
 func ListMemories(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
 	}
 
-	var memories []model.Memory
-	_ = db.GetRawDB().WithContext(c.Request.Context()).
-		Where("user_id = ?", identity.UserID).
-		Order("pinned DESC, updated_at DESC").
-		Find(&memories).Error
+	m := db.Ctx(c.Request.Context()).Memory
+	memories, _ := m.WithContext(c.Request.Context()).
+		Where(m.UserID.Eq(identity.UserID)).
+		Order(m.Pinned.Desc(), m.UpdatedAt.Desc()).
+		Find()
 
 	res := make([]gin.H, 0, len(memories))
-	for _, m := range memories {
+	for _, mo := range memories {
 		res = append(res, gin.H{
-			"id":         m.MemoryID,
-			"scope":      m.Scope,
-			"topic":      m.Topic,
-			"content":    m.Content,
-			"pinned":     m.Pinned,
-			"created_at": m.CreatedAt,
-			"updated_at": m.UpdatedAt,
+			"id":         mo.MemoryID,
+			"scope":      mo.Scope,
+			"topic":      mo.Topic,
+			"content":    mo.Content,
+			"pinned":     mo.Pinned,
+			"created_at": mo.CreatedAt,
+			"updated_at": mo.UpdatedAt,
 		})
 	}
 

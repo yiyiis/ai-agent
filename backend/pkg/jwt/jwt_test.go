@@ -1,10 +1,11 @@
-﻿package jwt
+package jwt
 
 import (
 	"context"
 	"testing"
 
 	"backend/constants"
+	"github.com/golang-jwt/jwt/v5"
 )
 
 func TestJWTGenerationAndParsing(t *testing.T) {
@@ -13,7 +14,7 @@ func TestJWTGenerationAndParsing(t *testing.T) {
 		Seconds: 3600,
 	})
 
-	identity := AuthIdentity{
+	claims := TokenClaims{
 		UserID:    1001,
 		CompanyID: 1,
 		Name:      "test_user",
@@ -21,7 +22,7 @@ func TestJWTGenerationAndParsing(t *testing.T) {
 		UserType:  constants.User,
 	}
 
-	token, err := GenAccessToken(identity)
+	token, err := GenAccessToken(claims)
 	if err != nil {
 		t.Fatalf("GenAccessToken failed: %v", err)
 	}
@@ -29,21 +30,25 @@ func TestJWTGenerationAndParsing(t *testing.T) {
 		t.Fatal("generated token is empty")
 	}
 
-	// Test Context injection and extraction
-	ctx := context.WithValue(context.Background(), "authIdentity", identity)
-	extracted, err := GetIdentityFromCtx(ctx)
-	if err != nil {
-		t.Fatalf("GetIdentityFromCtx failed: %v", err)
+	// 验证签出的 token 能按相同结构解析回来
+	parsed, err := jwt.ParseWithClaims(token, &TokenClaims{}, func(t *jwt.Token) (interface{}, error) {
+		return []byte("test_jwt_secret_key_12345"), nil
+	}, jwt.WithExpirationRequired())
+	if err != nil || !parsed.Valid {
+		t.Fatalf("parse generated token failed: %v", err)
 	}
-	if extracted.UserID != 1001 || extracted.Name != "test_user" {
-		t.Fatalf("extracted identity mismatch: %+v", extracted)
+	got := parsed.Claims.(*TokenClaims)
+	if got.UserID != 1001 || got.CompanyID != 1 || got.Name != "test_user" {
+		t.Fatalf("parsed claims mismatch: %+v", got)
 	}
 
-	claims, err := GetTokenClaimsFromCtx(ctx)
+	// 验证 Context 注入与提取
+	ctx := context.WithValue(context.Background(), "tokenClaims", claims)
+	extracted, err := GetTokenClaimsFromCtx(ctx)
 	if err != nil {
 		t.Fatalf("GetTokenClaimsFromCtx failed: %v", err)
 	}
-	if claims.UserId != 1001 || claims.CompanyId != 1 {
-		t.Fatalf("extracted claims mismatch: %+v", claims)
+	if extracted.UserID != 1001 || extracted.Name != "test_user" {
+		t.Fatalf("extracted claims mismatch: %+v", extracted)
 	}
 }

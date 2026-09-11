@@ -17,33 +17,23 @@ type Config struct {
 	IgnorePath []string `mapstructure:"IgnorePath"`
 }
 
+// InitJwt 初始化 JWT 配置
 func InitJwt(conf Config) {
 	config = &conf
 }
 
-// AuthIdentity 从 token 解析出的用户身份
-type AuthIdentity struct {
+// TokenClaims JWT 载荷：业务身份字段 + 标准注册声明
+type TokenClaims struct {
 	UserID    int64              `json:"user_id"`
 	CompanyID int64              `json:"company_id"`
 	Name      string             `json:"name"`
-	Username  string             `json:"username"`
-	UserType  constants.UserType `json:"user_type"`
-}
-
-// TokenClaims JWT 自定义 Payload（兼容 Uid/UserId、CompanyId 等命名规范）
-type TokenClaims struct {
-	Uid       int64              `json:"Uid"`
-	UserId    int64              `json:"user_id"`
-	CompanyId int64              `json:"CompanyId"`
-	CompanyID int64              `json:"company_id"`
-	Name      string             `json:"Name"`
 	Username  string             `json:"username"`
 	UserType  constants.UserType `json:"user_type"`
 	jwt.RegisteredClaims
 }
 
 // GenAccessToken 签发 JWT
-func GenAccessToken(identity AuthIdentity) (string, error) {
+func GenAccessToken(tc TokenClaims) (string, error) {
 	if config == nil || config.Secret == "" {
 		return "", errors.New("jwt secret must not be empty")
 	}
@@ -53,58 +43,29 @@ func GenAccessToken(identity AuthIdentity) (string, error) {
 	}
 
 	now := time.Now()
-	uid := identity.UserID
-	cid := identity.CompanyID
-	if cid == 0 {
-		cid = 1
-	}
+	tc.ExpiresAt = jwt.NewNumericDate(now.Add(time.Duration(seconds) * time.Second))
+	tc.IssuedAt = jwt.NewNumericDate(now)
+	tc.NotBefore = jwt.NewNumericDate(now.Add(-5 * time.Second))
 
-	claims := TokenClaims{
-		Uid:       uid,
-		UserId:    uid,
-		CompanyId: cid,
-		CompanyID: cid,
-		Name:      identity.Name,
-		Username:  identity.Username,
-		UserType:  identity.UserType,
-		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(time.Duration(seconds) * time.Second)),
-			IssuedAt:  jwt.NewNumericDate(now),
-			NotBefore: jwt.NewNumericDate(now.Add(-5 * time.Second)),
-		},
-	}
-
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, tc)
 	return token.SignedString([]byte(config.Secret))
 }
 
-// GetIdentityFromCtx 从 Context 获取当前登录用户身份
-func GetIdentityFromCtx(ctx context.Context) (AuthIdentity, error) {
-	value := ctx.Value("authIdentity")
+// GetTokenClaimsFromCtx 从 Context 中提取登录身份
+func GetTokenClaimsFromCtx(ctx context.Context) (TokenClaims, error) {
+	if ctx == nil {
+		return TokenClaims{}, errors.NewMsg("用户未登录")
+	}
+
+	value := ctx.Value("tokenClaims")
 	if value == nil {
-		return AuthIdentity{}, errors.NewMsg("用户未登录")
+		return TokenClaims{}, errors.NewMsg("用户未登录或登录态已失效")
 	}
-	identity, ok := value.(AuthIdentity)
-	if !ok || identity.UserID == 0 {
-		return AuthIdentity{}, errors.NewMsg("无效的登录身份")
-	}
-	return identity, nil
-}
 
-// GetTokenClaimsFromCtx 兼容旧接口获取 TokenClaims
-func GetTokenClaimsFromCtx(ctx context.Context) (*TokenClaims, error) {
-	identity, err := GetIdentityFromCtx(ctx)
-	if err != nil {
-		return nil, err
+	tc, ok := value.(TokenClaims)
+	if !ok || tc.UserID == 0 {
+		return TokenClaims{}, errors.NewMsg("无效的登录身份")
 	}
-	return &TokenClaims{
-		Uid:       identity.UserID,
-		UserId:    identity.UserID,
-		CompanyId: identity.CompanyID,
-		CompanyID: identity.CompanyID,
-		Name:      identity.Name,
-		Username:  identity.Username,
-		UserType:  identity.UserType,
-	}, nil
-}
 
+	return tc, nil
+}

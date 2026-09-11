@@ -7,6 +7,7 @@ import (
 	"backend/dal/model"
 	"backend/pkg/db"
 	"github.com/pkg/errors"
+	"gorm.io/gen"
 	"gorm.io/gorm"
 )
 
@@ -18,8 +19,7 @@ func CreateSession(ctx context.Context, session *model.Session) error {
 	if session.UpdatedAt.IsZero() {
 		session.UpdatedAt = time.Now()
 	}
-	err := db.GetRawDB().WithContext(ctx).Create(session).Error
-	if err != nil {
+	if err := db.Ctx(ctx).Session.WithContext(ctx).Create(session); err != nil {
 		return errors.Wrap(err, "创建会话记录失败")
 	}
 	return nil
@@ -27,65 +27,76 @@ func CreateSession(ctx context.Context, session *model.Session) error {
 
 // GetSessionBySessionID 根据 session_id 查询会话
 func GetSessionBySessionID(ctx context.Context, sessionID string) (*model.Session, error) {
-	var s model.Session
-	err := db.GetRawDB().WithContext(ctx).
-		Where("session_id = ?", sessionID).
-		First(&s).Error
+	s := db.Ctx(ctx).Session
+	session, err := s.WithContext(ctx).
+		Where(s.SessionID.Eq(sessionID)).
+		First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, errors.Wrap(err, "查询会话失败")
 	}
-	return &s, nil
+	return session, nil
 }
 
 // GetLatestEmptySession 获取用户最近一条未发送任何消息的空会话（若有）
 func GetLatestEmptySession(ctx context.Context, userID int64) (*model.Session, error) {
-	var s model.Session
-	err := db.GetRawDB().WithContext(ctx).
-		Where("user_id = ? AND NOT EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.session_id)", userID).
-		Order("id DESC").
-		First(&s).Error
+	q := db.Ctx(ctx)
+	s, m := q.Session, q.Message
+	session, err := s.WithContext(ctx).
+		Where(s.UserID.Eq(userID)).
+		Where(gen.Columns{s.SessionID}.NotIn(m.WithContext(ctx).Select(m.SessionID))).
+		Order(s.ID.Desc()).
+		First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
 		return nil, errors.Wrap(err, "查询空会话失败")
 	}
-	return &s, nil
+	return session, nil
 }
 
 // ListSessions 查询会话列表（仅展示有真实对话消息的会话，过滤无消息空会话）
 func ListSessions(ctx context.Context, userID, companyID int64, limit, offset int) ([]model.Session, int64, error) {
-	var sessions []model.Session
-	var total int64
+	q := db.Ctx(ctx)
+	s, m := q.Session, q.Message
+	sq := s.WithContext(ctx)
 
-	tx := db.GetRawDB().WithContext(ctx).Model(&model.Session{})
-	if userID > 0 {
-		tx = tx.Where("user_id = ?", userID)
-	}
-	if companyID > 0 {
-		tx = tx.Where("company_id = ?", companyID)
-	}
 	// 只展示有实际对话消息的会话，彻底杜绝未对话的空会话污染列表
-	tx = tx.Where("EXISTS (SELECT 1 FROM messages WHERE messages.session_id = sessions.session_id)")
+	conds := func() []gen.Condition {
+		cs := []gen.Condition{gen.Columns{s.SessionID}.In(m.WithContext(ctx).Select(m.SessionID))}
+		if userID > 0 {
+			cs = append(cs, s.UserID.Eq(userID))
+		}
+		if companyID > 0 {
+			cs = append(cs, s.CompanyID.Eq(companyID))
+		}
+		return cs
+	}
 
-	if err := tx.Count(&total).Error; err != nil {
+	total, err := sq.Where(conds()...).Count()
+	if err != nil {
 		return nil, 0, errors.Wrap(err, "统计会话数量失败")
 	}
 
 	if limit <= 0 {
 		limit = 20
 	}
-	err := tx.Order("id DESC").
+	list, err := sq.Where(conds()...).
+		Order(s.ID.Desc()).
 		Limit(limit).
 		Offset(offset).
-		Find(&sessions).Error
+		Find()
 	if err != nil {
 		return nil, 0, errors.Wrap(err, "获取会话列表失败")
 	}
 
+	sessions := make([]model.Session, 0, len(list))
+	for _, item := range list {
+		sessions = append(sessions, *item)
+	}
 	return sessions, total, nil
 }
 
@@ -99,9 +110,10 @@ func UpdateSessionTitle(ctx context.Context, sessionID, title string) error {
 // UpdateSession 更新会话指定字段
 func UpdateSession(ctx context.Context, sessionID string, updates map[string]interface{}) error {
 	updates["updated_at"] = time.Now()
-	err := db.GetRawDB().WithContext(ctx).Model(&model.Session{}).
-		Where("session_id = ?", sessionID).
-		Updates(updates).Error
+	s := db.Ctx(ctx).Session
+	_, err := s.WithContext(ctx).
+		Where(s.SessionID.Eq(sessionID)).
+		Updates(updates)
 	if err != nil {
 		return errors.Wrap(err, "更新会话失败")
 	}
@@ -110,13 +122,18 @@ func UpdateSession(ctx context.Context, sessionID string, updates map[string]int
 
 // DeleteSession 删除会话及级联清理消息
 func DeleteSession(ctx context.Context, sessionID string) error {
-	return db.GetRawDB().WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// 删除关联消息
-		if err := tx.Where("session_id = ?", sessionID).Delete(&model.Message{}).Error; err != nil {
+	return db.Transition(ctx, func(txCtx context.Context) error {
+		m := db.Ctx(txCtx).Message
+		if _, err := m.WithContext(txCtx).
+			Where(m.SessionID.Eq(sessionID)).
+			Delete(); err != nil {
 			return err
 		}
-		// 删除会话记录
-		if err := tx.Where("session_id = ?", sessionID).Delete(&model.Session{}).Error; err != nil {
+
+		s := db.Ctx(txCtx).Session
+		if _, err := s.WithContext(txCtx).
+			Where(s.SessionID.Eq(sessionID)).
+			Delete(); err != nil {
 			return err
 		}
 		return nil

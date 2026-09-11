@@ -89,7 +89,7 @@ func (u *userInfo) updateTableName(table string) *userInfo {
 	return u
 }
 
-func (u *userInfo) WithContext(ctx context.Context) *userInfoDo { return u.userInfoDo.WithContext(ctx) }
+func (u *userInfo) WithContext(ctx context.Context) IUserInfoDo { return u.userInfoDo.WithContext(ctx) }
 
 func (u userInfo) TableName() string { return u.userInfoDo.TableName() }
 
@@ -132,95 +132,156 @@ func (u userInfo) replaceDB(db *gorm.DB) userInfo {
 
 type userInfoDo struct{ gen.DO }
 
-func (u userInfoDo) Debug() *userInfoDo {
+type IUserInfoDo interface {
+	gen.SubQuery
+	Debug() IUserInfoDo
+	WithContext(ctx context.Context) IUserInfoDo
+	WithResult(fc func(tx gen.Dao)) gen.ResultInfo
+	ReplaceDB(db *gorm.DB)
+	ReadDB() IUserInfoDo
+	WriteDB() IUserInfoDo
+	As(alias string) gen.Dao
+	Session(config *gorm.Session) IUserInfoDo
+	Columns(cols ...field.Expr) gen.Columns
+	Clauses(conds ...clause.Expression) IUserInfoDo
+	Not(conds ...gen.Condition) IUserInfoDo
+	Or(conds ...gen.Condition) IUserInfoDo
+	Select(conds ...field.Expr) IUserInfoDo
+	Where(conds ...gen.Condition) IUserInfoDo
+	Order(conds ...field.Expr) IUserInfoDo
+	Distinct(cols ...field.Expr) IUserInfoDo
+	Omit(cols ...field.Expr) IUserInfoDo
+	Join(table schema.Tabler, on ...field.Expr) IUserInfoDo
+	LeftJoin(table schema.Tabler, on ...field.Expr) IUserInfoDo
+	RightJoin(table schema.Tabler, on ...field.Expr) IUserInfoDo
+	Group(cols ...field.Expr) IUserInfoDo
+	Having(conds ...gen.Condition) IUserInfoDo
+	Limit(limit int) IUserInfoDo
+	Offset(offset int) IUserInfoDo
+	Count() (count int64, err error)
+	Scopes(funcs ...func(gen.Dao) gen.Dao) IUserInfoDo
+	Unscoped() IUserInfoDo
+	Create(values ...*model.UserInfo) error
+	CreateInBatches(values []*model.UserInfo, batchSize int) error
+	Save(values ...*model.UserInfo) error
+	First() (*model.UserInfo, error)
+	Take() (*model.UserInfo, error)
+	Last() (*model.UserInfo, error)
+	Find() ([]*model.UserInfo, error)
+	FindInBatch(batchSize int, fc func(tx gen.Dao, batch int) error) (results []*model.UserInfo, err error)
+	FindInBatches(result *[]*model.UserInfo, batchSize int, fc func(tx gen.Dao, batch int) error) error
+	Pluck(column field.Expr, dest interface{}) error
+	Delete(...*model.UserInfo) (info gen.ResultInfo, err error)
+	Update(column field.Expr, value interface{}) (info gen.ResultInfo, err error)
+	UpdateSimple(columns ...field.AssignExpr) (info gen.ResultInfo, err error)
+	Updates(value interface{}) (info gen.ResultInfo, err error)
+	UpdateColumn(column field.Expr, value interface{}) (info gen.ResultInfo, err error)
+	UpdateColumnSimple(columns ...field.AssignExpr) (info gen.ResultInfo, err error)
+	UpdateColumns(value interface{}) (info gen.ResultInfo, err error)
+	UpdateFrom(q gen.SubQuery) gen.Dao
+	Attrs(attrs ...field.AssignExpr) IUserInfoDo
+	Assign(attrs ...field.AssignExpr) IUserInfoDo
+	Joins(fields ...field.RelationField) IUserInfoDo
+	Preload(fields ...field.RelationField) IUserInfoDo
+	FirstOrInit() (*model.UserInfo, error)
+	FirstOrCreate() (*model.UserInfo, error)
+	FindByPage(offset int, limit int) (result []*model.UserInfo, count int64, err error)
+	ScanByPage(result interface{}, offset int, limit int) (count int64, err error)
+	Scan(result interface{}) (err error)
+	Returning(value interface{}, columns ...string) IUserInfoDo
+	UnderlyingDB() *gorm.DB
+	schema.Tabler
+}
+
+func (u userInfoDo) Debug() IUserInfoDo {
 	return u.withDO(u.DO.Debug())
 }
 
-func (u userInfoDo) WithContext(ctx context.Context) *userInfoDo {
+func (u userInfoDo) WithContext(ctx context.Context) IUserInfoDo {
 	return u.withDO(u.DO.WithContext(ctx))
 }
 
-func (u userInfoDo) ReadDB() *userInfoDo {
+func (u userInfoDo) ReadDB() IUserInfoDo {
 	return u.Clauses(dbresolver.Read)
 }
 
-func (u userInfoDo) WriteDB() *userInfoDo {
+func (u userInfoDo) WriteDB() IUserInfoDo {
 	return u.Clauses(dbresolver.Write)
 }
 
-func (u userInfoDo) Session(config *gorm.Session) *userInfoDo {
+func (u userInfoDo) Session(config *gorm.Session) IUserInfoDo {
 	return u.withDO(u.DO.Session(config))
 }
 
-func (u userInfoDo) Clauses(conds ...clause.Expression) *userInfoDo {
+func (u userInfoDo) Clauses(conds ...clause.Expression) IUserInfoDo {
 	return u.withDO(u.DO.Clauses(conds...))
 }
 
-func (u userInfoDo) Returning(value interface{}, columns ...string) *userInfoDo {
+func (u userInfoDo) Returning(value interface{}, columns ...string) IUserInfoDo {
 	return u.withDO(u.DO.Returning(value, columns...))
 }
 
-func (u userInfoDo) Not(conds ...gen.Condition) *userInfoDo {
+func (u userInfoDo) Not(conds ...gen.Condition) IUserInfoDo {
 	return u.withDO(u.DO.Not(conds...))
 }
 
-func (u userInfoDo) Or(conds ...gen.Condition) *userInfoDo {
+func (u userInfoDo) Or(conds ...gen.Condition) IUserInfoDo {
 	return u.withDO(u.DO.Or(conds...))
 }
 
-func (u userInfoDo) Select(conds ...field.Expr) *userInfoDo {
+func (u userInfoDo) Select(conds ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Select(conds...))
 }
 
-func (u userInfoDo) Where(conds ...gen.Condition) *userInfoDo {
+func (u userInfoDo) Where(conds ...gen.Condition) IUserInfoDo {
 	return u.withDO(u.DO.Where(conds...))
 }
 
-func (u userInfoDo) Order(conds ...field.Expr) *userInfoDo {
+func (u userInfoDo) Order(conds ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Order(conds...))
 }
 
-func (u userInfoDo) Distinct(cols ...field.Expr) *userInfoDo {
+func (u userInfoDo) Distinct(cols ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Distinct(cols...))
 }
 
-func (u userInfoDo) Omit(cols ...field.Expr) *userInfoDo {
+func (u userInfoDo) Omit(cols ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Omit(cols...))
 }
 
-func (u userInfoDo) Join(table schema.Tabler, on ...field.Expr) *userInfoDo {
+func (u userInfoDo) Join(table schema.Tabler, on ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Join(table, on...))
 }
 
-func (u userInfoDo) LeftJoin(table schema.Tabler, on ...field.Expr) *userInfoDo {
+func (u userInfoDo) LeftJoin(table schema.Tabler, on ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.LeftJoin(table, on...))
 }
 
-func (u userInfoDo) RightJoin(table schema.Tabler, on ...field.Expr) *userInfoDo {
+func (u userInfoDo) RightJoin(table schema.Tabler, on ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.RightJoin(table, on...))
 }
 
-func (u userInfoDo) Group(cols ...field.Expr) *userInfoDo {
+func (u userInfoDo) Group(cols ...field.Expr) IUserInfoDo {
 	return u.withDO(u.DO.Group(cols...))
 }
 
-func (u userInfoDo) Having(conds ...gen.Condition) *userInfoDo {
+func (u userInfoDo) Having(conds ...gen.Condition) IUserInfoDo {
 	return u.withDO(u.DO.Having(conds...))
 }
 
-func (u userInfoDo) Limit(limit int) *userInfoDo {
+func (u userInfoDo) Limit(limit int) IUserInfoDo {
 	return u.withDO(u.DO.Limit(limit))
 }
 
-func (u userInfoDo) Offset(offset int) *userInfoDo {
+func (u userInfoDo) Offset(offset int) IUserInfoDo {
 	return u.withDO(u.DO.Offset(offset))
 }
 
-func (u userInfoDo) Scopes(funcs ...func(gen.Dao) gen.Dao) *userInfoDo {
+func (u userInfoDo) Scopes(funcs ...func(gen.Dao) gen.Dao) IUserInfoDo {
 	return u.withDO(u.DO.Scopes(funcs...))
 }
 
-func (u userInfoDo) Unscoped() *userInfoDo {
+func (u userInfoDo) Unscoped() IUserInfoDo {
 	return u.withDO(u.DO.Unscoped())
 }
 
@@ -286,22 +347,22 @@ func (u userInfoDo) FindInBatches(result *[]*model.UserInfo, batchSize int, fc f
 	return u.DO.FindInBatches(result, batchSize, fc)
 }
 
-func (u userInfoDo) Attrs(attrs ...field.AssignExpr) *userInfoDo {
+func (u userInfoDo) Attrs(attrs ...field.AssignExpr) IUserInfoDo {
 	return u.withDO(u.DO.Attrs(attrs...))
 }
 
-func (u userInfoDo) Assign(attrs ...field.AssignExpr) *userInfoDo {
+func (u userInfoDo) Assign(attrs ...field.AssignExpr) IUserInfoDo {
 	return u.withDO(u.DO.Assign(attrs...))
 }
 
-func (u userInfoDo) Joins(fields ...field.RelationField) *userInfoDo {
+func (u userInfoDo) Joins(fields ...field.RelationField) IUserInfoDo {
 	for _, _f := range fields {
 		u = *u.withDO(u.DO.Joins(_f))
 	}
 	return &u
 }
 
-func (u userInfoDo) Preload(fields ...field.RelationField) *userInfoDo {
+func (u userInfoDo) Preload(fields ...field.RelationField) IUserInfoDo {
 	for _, _f := range fields {
 		u = *u.withDO(u.DO.Preload(_f))
 	}

@@ -27,7 +27,7 @@ func UserInfoDetail(ctx context.Context, req *UserInfoRequest) (*UserDetailResp,
 		return nil, err
 	}
 
-	userInfo, err := dao.GetUserById(ctx, int32(tc.UserId))
+	userInfo, err := dao.GetUserById(ctx, int32(tc.UserID))
 	if err != nil {
 		return nil, err
 	}
@@ -62,7 +62,7 @@ func UpdatePassword(ctx context.Context, req *UpdatePasswordRequest) (*UpdatePas
 	// 演示使用 db.Transition 事务保护
 	// 闭包函数签名优化为纯粹的 func(ctx context.Context) error
 	err = db.Transition(ctx, func(txCtx context.Context) error {
-		userInfo, err := dao.GetUserById(txCtx, int32(tc.UserId))
+		userInfo, err := dao.GetUserById(txCtx, int32(tc.UserID))
 		if err != nil {
 			return err
 		}
@@ -71,7 +71,7 @@ func UpdatePassword(ctx context.Context, req *UpdatePasswordRequest) (*UpdatePas
 			return errors.NewMsg("原密码错误")
 		}
 
-		return dao.UpdatePassword(txCtx, int32(tc.UserId), req.NewPassword)
+		return dao.UpdatePassword(txCtx, int32(tc.UserID), req.NewPassword)
 	})
 	if err != nil {
 		return nil, err

@@ -80,14 +80,30 @@ err := db.Transition(ctx, func(txCtx context.Context) error {
 go mod tidy
 ```
 
-### 2. 生成数据库代码 (`dal/`)
-配置好 MySQL 数据库后，运行生成器：
+### 2. 初始化数据库
+
+表结构以 `etc/schema.sql` 为唯一源头（DB-first）：修改表结构先改本文件，再执行建表：
+
 ```bash
-cd dal
-go run gen.go -dsn="root:password@(127.0.0.1:3306)/your_dbname?charset=utf8mb4&parseTime=True&loc=Local"
+docker exec -i ai-agent-mysql mysql -uroot -p"你的密码" --default-character-set=utf8mb4 < backend/etc/schema.sql
 ```
 
-### 3. 运行项目
+> 注意：脚本包含 `DROP TABLE` 与 `USE` 语句，执行会清空目标库中的表数据，执行前请确认连接的库名。
+
+首次运行前必须先执行本脚本建表，应用启动只负责连接数据库，不自动建表。
+
+### 3. 生成数据库代码 (`dal/`)
+
+表建好后，运行生成器逆向生成 model 与强类型 query（新增表先在 `dal/gen.go` 的 `tables` 中登记）：
+
+```bash
+cd backend/dal
+go run .
+```
+
+连接串来源优先级：`-dsn` 参数 > 环境变量 `DB_DSN` > 配置文件（默认读 `etc/config.yaml`，存在 `etc/config.local.yaml` 时优先；可用 `-conf` 指定其他路径）。
+
+### 4. 运行项目
 ```bash
 go run . -conf="./etc/config.yaml"
 ```

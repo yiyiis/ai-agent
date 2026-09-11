@@ -28,6 +28,7 @@ type MessageOut struct {
 	ID          string          `json:"id"`
 	Role        string          `json:"role"`
 	Content     string          `json:"content"`
+	Reasoning   *string         `json:"reasoning,omitempty"`
 	ToolCalls   json.RawMessage `json:"tool_calls,omitempty"`
 	ToolCallID  *string         `json:"tool_call_id,omitempty"`
 	Name        *string         `json:"name,omitempty"`
@@ -43,7 +44,7 @@ type SessionDetailOut struct {
 
 // CreateSession 创建会话 (POST /api/sessions)
 func CreateSession(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -129,7 +130,7 @@ func CreateSession(c *gin.Context) {
 
 // ListSessions 获取当前用户所有会话列表 (GET /api/sessions)
 func ListSessions(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -163,7 +164,7 @@ func ListSessions(c *gin.Context) {
 
 // GetSessionDetail 获取会话详情及历史消息 (GET /api/sessions/:id)
 func GetSessionDetail(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -192,6 +193,7 @@ func GetSessionDetail(c *gin.Context) {
 			ID:         m.MessageID,
 			Role:       m.Role,
 			Content:    m.Content,
+			Reasoning:  m.Reasoning,
 			ToolCallID: m.ToolCallID,
 			Name:       m.Name,
 			CreatedAt:  m.CreatedAt.Format(time.RFC3339),
@@ -227,7 +229,7 @@ func GetSessionDetail(c *gin.Context) {
 
 // UpdateSession 更新会话 (PATCH /api/sessions/:id)
 func UpdateSession(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -298,7 +300,7 @@ func UpdateSession(c *gin.Context) {
 
 // DeleteSession 删除会话 (DELETE /api/sessions/:id)
 func DeleteSession(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
@@ -325,7 +327,7 @@ func DeleteSession(c *gin.Context) {
 
 // SetEnabledSkills 设置会话启用的技能 (PUT /api/sessions/:id/skills)
 func SetEnabledSkills(c *gin.Context) {
-	identity, err := jwt.GetIdentityFromCtx(c.Request.Context())
+	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
 	if err != nil || identity.UserID == 0 {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
 		return
