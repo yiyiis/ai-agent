@@ -24,6 +24,8 @@ interface Props {
   reasoning?: string | null
   attachments?: Attachment[] | null
   streaming?: boolean
+  /** 同一次回答中后续片段隐藏重复头像 */
+  hideAvatar?: boolean
   onRegenerate?: () => void
   onEdit?: () => void
   onPreview?: (a: Attachment) => void
@@ -147,6 +149,7 @@ export function MessageBubble({
   reasoning,
   attachments,
   streaming,
+  hideAvatar,
   onRegenerate,
   onEdit,
   onPreview,
@@ -285,7 +288,11 @@ export function MessageBubble({
   return (
     <div className="group flex gap-4 w-full font-sans animate-fade-in">
       <div className="shrink-0 pt-0.5">
-        <BrandIcon className="w-6 h-6" />
+        {hideAvatar ? (
+          <div className="w-6 h-6" aria-hidden />
+        ) : (
+          <BrandIcon className="w-6 h-6" />
+        )}
       </div>
       <div className="flex-1 min-w-0 flex flex-col">
         {reasoning && (

@@ -16,7 +16,6 @@ import {
 import {
   api,
   editUserMessage,
-  regenerateLast,
   streamMessage,
   type StreamEvent,
 } from '../api/client'
@@ -792,13 +791,6 @@ export function ChatArea({
     )
   }
 
-  const regenerate = async () => {
-    if (streaming || !activeIdRef.current) return
-    await runStream((onEvent, opts) =>
-      regenerateLast(activeIdRef.current!, onEvent, opts),
-    )
-  }
-
   // 停止生成：中断流（服务端会回滚这轮未完成的记录），并把提问还原到输入框
   const lastAskRef = useRef<{ content: string; attachments: Attachment[] } | null>(null)
   const [composerKey, setComposerKey] = useState(0)
@@ -817,6 +809,21 @@ export function ChatArea({
       restoreComposer(lastAskRef.current.content, lastAskRef.current.attachments)
       lastAskRef.current = null
     }
+  }
+
+  // 重试 = 原样重发最后一条提问：先在本地立刻移除旧一轮（提问+回答），
+  // 再走编辑重发端点截断重流——不等网络返回，旧答案瞬间消失
+  const regenerate = async () => {
+    if (streaming || !activeIdRef.current) return
+    let lastUser: Message | undefined
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUser = messages[i]
+        break
+      }
+    }
+    if (!lastUser) return
+    await submitEdit(lastUser.id, lastUser.content, lastUser.attachments ?? null)
   }
 
   const historySegs = buildSegments(messages)
@@ -996,50 +1003,75 @@ export function ChatArea({
               className="flex-1 overflow-y-auto scrollbar-thin [overflow-anchor:none]"
             >
               <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
-                {historySegs.map((s) =>
-                  s.kind === 'notice' ? (
-                    <div key={s.key} className="flex items-center gap-3 py-1 select-none" aria-hidden>
-                      <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
-                      <span className="text-[11px] text-[#747775] dark:text-[#9aa0a6] whitespace-nowrap">
-                        {s.content}
-                      </span>
-                      <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
-                    </div>
-                  ) : s.kind === 'text' ? (
-                    <MessageBubble
-                      key={s.key}
-                      role={s.role}
-                      content={s.content}
-                      reasoning={s.reasoning}
-                      attachments={s.attachments}
-                      onPreview={setPreview}
-                      isEditing={s.role === 'user' && s.messageId === editingId}
-                      onSubmitEdit={
-                        !streaming && s.role === 'user' && s.messageId
-                          ? (content) =>
-                              submitEdit(s.messageId!, content, s.attachments ?? null)
-                          : undefined
+                {(() => {
+                  let turnHasAssistantAvatar = false
+                  return historySegs.map((s) => {
+                    if (s.kind === 'notice') {
+                      turnHasAssistantAvatar = false
+                      return (
+                        <div key={s.key} className="flex items-center gap-3 py-1 select-none" aria-hidden>
+                          <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
+                          <span className="text-[11px] text-[#747775] dark:text-[#9aa0a6] whitespace-nowrap">
+                            {s.content}
+                          </span>
+                          <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
+                        </div>
+                      )
+                    }
+                    if (s.kind === 'text') {
+                      if (s.role === 'user') {
+                        turnHasAssistantAvatar = false
+                        return (
+                          <MessageBubble
+                            key={s.key}
+                            role="user"
+                            content={s.content}
+                            reasoning={s.reasoning}
+                            attachments={s.attachments}
+                            onPreview={setPreview}
+                            isEditing={s.messageId === editingId}
+                            onSubmitEdit={
+                              !streaming && s.messageId
+                                ? (content) =>
+                                    submitEdit(s.messageId!, content, s.attachments ?? null)
+                                : undefined
+                            }
+                            onCancelEdit={editingId ? () => setEditingId(null) : undefined}
+                            onEdit={
+                              !streaming && s.messageId && s.content
+                                ? () => setEditingId(s.messageId!)
+                                : undefined
+                            }
+                          />
+                        )
                       }
-                      onCancelEdit={editingId ? () => setEditingId(null) : undefined}
-                      onEdit={
-                        !streaming && s.role === 'user' && s.messageId && s.content
-                          ? () => setEditingId(s.messageId!)
-                          : undefined
-                      }
-                      onRegenerate={
-                        !streaming &&
-                        s.role === 'assistant' &&
-                        s.messageId === lastAssistantId
-                          ? regenerate
-                          : undefined
-                      }
-                    />
-                  ) : (
-                    <div key={s.key} className="pl-11 pr-2">
-                      <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
-                    </div>
-                  ),
-                )}
+                      const hideAvatar = turnHasAssistantAvatar
+                      turnHasAssistantAvatar = true
+                      return (
+                        <MessageBubble
+                          key={s.key}
+                          role="assistant"
+                          content={s.content}
+                          reasoning={s.reasoning}
+                          attachments={s.attachments}
+                          hideAvatar={hideAvatar}
+                          onPreview={setPreview}
+                          onRegenerate={
+                            !streaming &&
+                            s.messageId === lastAssistantId
+                              ? regenerate
+                              : undefined
+                          }
+                        />
+                      )
+                    }
+                    return (
+                      <div key={s.key} className="pl-11 pr-2">
+                        <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
+                      </div>
+                    )
+                  })
+                })()}
                 {optimisticUser && (
                   <MessageBubble
                     role="user"
@@ -1071,21 +1103,33 @@ export function ChatArea({
                     </div>
                   </div>
                 )}
-                {streamSegs.map((s) =>
-                  s.kind === 'text' ? (
-                    <MessageBubble
-                      key={s.key}
-                      role="assistant"
-                      content={s.content}
-                      streaming
-                      onPreview={setPreview}
-                    />
-                  ) : s.kind === 'tool' ? (
-                    <div key={s.key} className="pl-11 pr-2">
-                      <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
-                    </div>
-                  ) : null,
-                )}
+                {(() => {
+                  let streamHasAvatar = false
+                  return streamSegs.map((s) => {
+                    if (s.kind === 'text') {
+                      const hideAvatar = streamHasAvatar
+                      streamHasAvatar = true
+                      return (
+                        <MessageBubble
+                          key={s.key}
+                          role="assistant"
+                          content={s.content}
+                          streaming
+                          hideAvatar={hideAvatar}
+                          onPreview={setPreview}
+                        />
+                      )
+                    }
+                    if (s.kind === 'tool') {
+                      return (
+                        <div key={s.key} className="pl-11 pr-2">
+                          <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
+                        </div>
+                      )
+                    }
+                    return null
+                  })
+                })()}
                 {streaming && streamSegs.length === 0 && (
                   <div className="text-xs text-[#747775] pl-11 flex items-center gap-2">
                     <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8]" />
