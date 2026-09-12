@@ -247,18 +247,21 @@ func streamOneRound(
 				finishReason = chunk.FinishReason
 			}
 			if chunk.Content != "" || chunk.ReasoningContent != "" || len(chunk.ToolCalls) > 0 {
-				ev := Event{Type: "delta"}
+				var visible, think string
 				if chunk.Content != "" {
-					if visible, think := tf.Filter(chunk.Content); visible != "" || think != "" {
-						contentBuf.WriteString(visible)
-						ev.Content = visible
-						reasoningBuf.WriteString(think)
-						ev.Reasoning = think
-					}
+					visible, think = tf.Filter(chunk.Content)
 				}
 				if chunk.ReasoningContent != "" {
-					reasoningBuf.WriteString(chunk.ReasoningContent)
-					ev.Reasoning += chunk.ReasoningContent
+					think += chunk.ReasoningContent
+				}
+				// 严格时序：先推送思考增量，再推送正文增量，杜绝二者混入同一事件导致前端打字机交替切碎
+				if think != "" {
+					reasoningBuf.WriteString(think)
+					emit(Event{Type: "delta", Reasoning: think})
+				}
+				if visible != "" {
+					contentBuf.WriteString(visible)
+					emit(Event{Type: "delta", Content: visible})
 				}
 				for _, tc := range chunk.ToolCalls {
 					slot, exists := slots[tc.Index]
@@ -289,9 +292,6 @@ func streamOneRound(
 							Arguments: "",
 						})
 					}
-				}
-				if ev.Content != "" || ev.Reasoning != "" {
-					emit(ev)
 				}
 			}
 		}

@@ -4,6 +4,7 @@ import {
   ArrowDown,
   Brain,
   Check,
+  CheckCircle2,
   ChevronDown,
   ChevronRight,
   Code2,
@@ -65,16 +66,19 @@ interface NoticeTurn {
   content: string
 }
 
-export type TurnItem =
+export type ProcessItem =
   | { kind: 'reasoning'; key: string; content: string }
+  | { kind: 'step_note'; key: string; content: string }
   | { kind: 'tool'; key: string; invocation: ToolInvocation }
-  | { kind: 'text'; key: string; content: string; messageId?: string }
+
+export type TurnItem = ProcessItem
 
 interface AssistantTurn {
   kind: 'assistant'
   key: string
   messageId?: string
-  items: TurnItem[]
+  processItems: ProcessItem[]
+  finalAnswer: string
 }
 
 type ChatTurn = UserTurn | NoticeTurn | AssistantTurn
@@ -100,7 +104,10 @@ function buildTurns(messages: Message[]): ChatTurn[] {
   let currentAssistantTurn: AssistantTurn | null = null
 
   const closeAssistantTurn = () => {
-    if (currentAssistantTurn && currentAssistantTurn.items.length > 0) {
+    if (
+      currentAssistantTurn &&
+      (currentAssistantTurn.processItems.length > 0 || currentAssistantTurn.finalAnswer.trim() !== '')
+    ) {
       turns.push(currentAssistantTurn)
     }
     currentAssistantTurn = null
@@ -124,46 +131,59 @@ function buildTurns(messages: Message[]): ChatTurn[] {
         currentAssistantTurn = {
           kind: 'assistant',
           key: m.id,
-          items: [],
+          processItems: [],
+          finalAnswer: '',
         }
       }
       currentAssistantTurn.messageId = m.id
 
       // 1. 思考过程（即使没有正文 content，思考过程也必须完整保留与展示）
       if (m.reasoning) {
-        currentAssistantTurn.items.push({
+        currentAssistantTurn.processItems.push({
           kind: 'reasoning',
           key: `${m.id}-reasoning`,
           content: m.reasoning,
         })
       }
 
-      // 2. 工具调用卡片
-      if (m.tool_calls) {
-        for (const tc of m.tool_calls) {
-          const inv: ToolInvocation = {
-            id: tc.id,
-            name: tc.function.name,
-            arguments: tc.function.arguments,
-            status: 'pending',
-          }
-          invocationById.set(tc.id, inv)
-          currentAssistantTurn.items.push({
-            kind: 'tool',
-            key: tc.id,
-            invocation: inv,
+      // 2. 判断是否是工具调用轮次
+      const hasToolCalls = Boolean(m.tool_calls && m.tool_calls.length > 0)
+
+      if (hasToolCalls) {
+        // 模型在该轮调用工具前若先输出了导言/说明（如"我帮你重新整理了一份 README..."），
+        // 归类为过程项中的 step_note（阶段说明），纳入折叠面板，绝不污染最终总结正文
+        if (m.content) {
+          currentAssistantTurn.processItems.push({
+            kind: 'step_note',
+            key: `${m.id}-note`,
+            content: m.content,
           })
         }
-      }
 
-      // 3. 正文内容
-      if (m.content) {
-        currentAssistantTurn.items.push({
-          kind: 'text',
-          key: m.id,
-          content: m.content,
-          messageId: m.id,
-        })
+        // 工具调用卡片
+        if (m.tool_calls) {
+          for (const tc of m.tool_calls) {
+            const inv: ToolInvocation = {
+              id: tc.id,
+              name: tc.function.name,
+              arguments: tc.function.arguments,
+              status: 'pending',
+            }
+            invocationById.set(tc.id, inv)
+            currentAssistantTurn.processItems.push({
+              kind: 'tool',
+              key: tc.id,
+              invocation: inv,
+            })
+          }
+        }
+      } else {
+        // 无工具调用的轮次：属于最终交付总结文本
+        if (m.content) {
+          currentAssistantTurn.finalAnswer = currentAssistantTurn.finalAnswer
+            ? `${currentAssistantTurn.finalAnswer}\n\n${m.content}`
+            : m.content
+        }
       }
     } else if (m.role === 'tool' && m.tool_call_id) {
       const inv = invocationById.get(m.tool_call_id)
@@ -216,6 +236,7 @@ function ReasoningBlock({
   return (
     <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
       <button
+        type="button"
         onClick={() => {
           userToggledRef.current = true
           setOpen((o) => !o)
@@ -231,7 +252,7 @@ function ReasoningBlock({
         )}
       </button>
       {open && (
-        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words border-t border-[#e3e3e3]/50 dark:border-[#3c4043]/50 pt-2">
+        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words border-t border-[#e3e3e3]/50 dark:border-[#3c4043]/50 pt-2 font-mono">
           {content}
         </div>
       )}
@@ -239,14 +260,154 @@ function ReasoningBlock({
   )
 }
 
-function AssistantTurnView({
+function ProcessAccordion({
   items,
+  streaming,
+  hasAnswer,
+  onPreview,
+}: {
+  items: ProcessItem[]
+  streaming?: boolean
+  hasAnswer?: boolean
+  onPreview?: (a: Attachment) => void
+}) {
+  // 当流式时默认展开，方便实时查看执行动作；流式结束且有正文交付时，默认折叠
+  const [open, setOpen] = useState(Boolean(streaming || !hasAnswer))
+  const userToggledRef = useRef(false)
+  const prevStreamingRef = useRef(streaming)
+
+  useEffect(() => {
+    // 流式结束且有正文时，若用户没有手动展开/折叠过，自动收起
+    if (prevStreamingRef.current && !streaming && hasAnswer && !userToggledRef.current) {
+      setOpen(false)
+    }
+    prevStreamingRef.current = streaming
+  }, [streaming, hasAnswer])
+
+  const toolCount = useMemo(
+    () => items.filter((i) => i.kind === 'tool').length,
+    [items],
+  )
+
+  const hasError = useMemo(
+    () =>
+      items.some(
+        (i) =>
+          i.kind === 'tool' &&
+          (i.invocation.status === 'error' || Boolean(i.invocation.error)),
+      ),
+    [items],
+  )
+
+  const runningTool = useMemo(() => {
+    if (!streaming) return null
+    for (let i = items.length - 1; i >= 0; i--) {
+      const item = items[i]
+      if (item.kind === 'tool' && item.invocation.status === 'running') {
+        return item.invocation
+      }
+    }
+    return null
+  }, [items, streaming])
+
+  return (
+    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden transition-all duration-200">
+      <button
+        type="button"
+        onClick={() => {
+          userToggledRef.current = true
+          setOpen((o) => !o)
+        }}
+        className="flex w-full items-center justify-between px-3.5 py-2.5 text-xs text-[#444746] dark:text-[#c4c7c5] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+      >
+        <div className="flex items-center gap-2 min-w-0 font-medium">
+          {runningTool ? (
+            <>
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
+              <span className="truncate text-[#1a73e8] dark:text-[#8ab4f8]">
+                正在执行 {runningTool.name}…
+              </span>
+            </>
+          ) : hasError ? (
+            <>
+              <AlertCircle className="w-3.5 h-3.5 text-amber-600 dark:text-amber-400 shrink-0" />
+              <span className="truncate text-amber-700 dark:text-amber-300">
+                已执行 {toolCount} 项操作（含异常）
+              </span>
+            </>
+          ) : (
+            <>
+              <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600 dark:text-emerald-400 shrink-0" />
+              <span className="truncate text-[#1f1f1f] dark:text-[#e3e3e3]">
+                已完成 {toolCount} 项操作与思考
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex items-center gap-1 shrink-0 text-[#747775] dark:text-[#9aa0a6] text-[11px] ml-2">
+          <span>{open ? '收起步骤' : '查看步骤'}</span>
+          {open ? (
+            <ChevronDown className="w-3.5 h-3.5" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5" />
+          )}
+        </div>
+      </button>
+
+      {open && (
+        <div className="px-3.5 py-3 border-t border-[#e3e3e3]/70 dark:border-[#3c4043]/70 space-y-3 bg-[#fdfdfd] dark:bg-[#1b1c1d]">
+          {items.map((item, idx) => {
+            if (item.kind === 'reasoning') {
+              const isLast = idx === items.length - 1
+              return (
+                <ReasoningBlock
+                  key={item.key}
+                  content={item.content}
+                  defaultOpen={streaming && isLast}
+                  autoCollapse={streaming ? !isLast : false}
+                />
+              )
+            }
+            if (item.kind === 'step_note') {
+              return (
+                <div
+                  key={item.key}
+                  className="flex items-start gap-2 px-2.5 py-1.5 rounded-lg bg-[#f0f4f9]/70 dark:bg-[#28292a]/70 text-xs text-[#444746] dark:text-[#c4c7c5] leading-relaxed border-l-2 border-[#1a73e8] dark:border-[#8ab4f8]"
+                >
+                  <span className="font-medium text-[#1a73e8] dark:text-[#8ab4f8] shrink-0 select-none">
+                    阶段说明:
+                  </span>
+                  <span className="break-words select-text">{item.content}</span>
+                </div>
+              )
+            }
+            if (item.kind === 'tool') {
+              return (
+                <ToolCallCard
+                  key={item.key}
+                  invocation={item.invocation}
+                  onPreview={onPreview}
+                />
+              )
+            }
+            return null
+          })}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssistantTurnView({
+  processItems,
+  finalAnswer,
   isLastAssistant,
   streaming,
   onRegenerate,
   onPreview,
 }: {
-  items: TurnItem[]
+  processItems: ProcessItem[]
+  finalAnswer: string
   messageId?: string
   isLastAssistant?: boolean
   streaming?: boolean
@@ -256,17 +417,14 @@ function AssistantTurnView({
   const [copied, setCopied] = useState(false)
 
   const copy = () => {
-    const text = items
-      .filter((i): i is Extract<TurnItem, { kind: 'text' }> => i.kind === 'text')
-      .map((i) => i.content)
-      .join('\n\n')
-    if (!text) return
-    navigator.clipboard.writeText(text)
+    if (!finalAnswer) return
+    navigator.clipboard.writeText(finalAnswer)
     setCopied(true)
     setTimeout(() => setCopied(false), 1500)
   }
 
-  const hasText = items.some((i) => i.kind === 'text' && i.content)
+  const hasTools = processItems.some((i) => i.kind === 'tool')
+  const hasAnswer = Boolean(finalAnswer.trim())
 
   return (
     <div className="group flex gap-4 w-full font-sans animate-fade-in">
@@ -275,71 +433,73 @@ function AssistantTurnView({
         <BrandIcon className="w-6 h-6" />
       </div>
 
-      {/* 回合内容体：思考过程、工具调用卡片、文本段落严格按时间顺序排布 */}
+      {/* 回合内容体 */}
       <div className="flex-1 min-w-0 flex flex-col space-y-3">
-        {items.map((item, idx) => {
-          if (item.kind === 'reasoning') {
-            const hasSubsequent = streaming ? idx < items.length - 1 : true
-            return (
-              <ReasoningBlock
-                key={item.key}
-                content={item.content}
-                defaultOpen={streaming && idx === items.length - 1}
-                autoCollapse={hasSubsequent}
-              />
-            )
-          }
-          if (item.kind === 'tool') {
-            return (
-              <ToolCallCard
-                key={item.key}
-                invocation={item.invocation}
-                onPreview={onPreview}
-              />
-            )
-          }
-          if (item.kind === 'text') {
-            const isLastText = idx === items.length - 1
-            return (
-              <div
-                key={item.key}
-                className="text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#e3e3e3] markdown-body select-text"
-              >
-                <ReactMarkdown
-                  remarkPlugins={[remarkGfm]}
-                  rehypePlugins={[rehypeHighlight]}
-                >
-                  {item.content}
-                </ReactMarkdown>
-                {streaming && isLastText && (
-                  <span className="inline-block w-2 h-4 ml-1 bg-[#1a73e8] dark:bg-[#8ab4f8] animate-pulse align-middle rounded-sm" />
-                )}
-              </div>
-            )
-          }
-          return null
-        })}
+        {/* 1. 若调用了工具：渲染统一折叠面板 ProcessAccordion */}
+        {hasTools && (
+          <ProcessAccordion
+            items={processItems}
+            streaming={streaming}
+            hasAnswer={hasAnswer}
+            onPreview={onPreview}
+          />
+        )}
 
-        {streaming && items.length === 0 && (
+        {/* 2. 若未调用任何工具，但有思考过程：按轻量化 ReasoningBlock 原生展示 */}
+        {!hasTools &&
+          processItems.map((item) => {
+            if (item.kind === 'reasoning') {
+              return (
+                <ReasoningBlock
+                  key={item.key}
+                  content={item.content}
+                  defaultOpen={streaming && !hasAnswer}
+                  autoCollapse={hasAnswer}
+                />
+              )
+            }
+            return null
+          })}
+
+        {/* 3. 最终交付结果（正文） */}
+        {hasAnswer && (
+          <div className="text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#e3e3e3] markdown-body select-text">
+            <ReactMarkdown
+              remarkPlugins={[remarkGfm]}
+              rehypePlugins={[rehypeHighlight]}
+            >
+              {finalAnswer}
+            </ReactMarkdown>
+            {streaming && (
+              <span className="inline-block w-2 h-4 ml-1 bg-[#1a73e8] dark:bg-[#8ab4f8] animate-pulse align-middle rounded-sm" />
+            )}
+          </div>
+        )}
+
+        {/* 4. 流式起始且完全没有内容时的等待中指示 */}
+        {streaming && !hasAnswer && processItems.length === 0 && (
           <div className="text-xs text-[#747775] flex items-center gap-2 pt-1">
             <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8]" />
             <span>思考中…</span>
           </div>
         )}
 
-        {!streaming && hasText && (
+        {/* 5. 底部操作栏：复制（仅复制最终交付正文）与重新生成 */}
+        {!streaming && (hasAnswer || processItems.length > 0) && (
           <div className="flex items-center gap-1 pt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            <button
-              onClick={copy}
-              className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
-              title="复制回答"
-            >
-              {copied ? (
-                <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-              ) : (
-                <Copy className="w-4 h-4" />
-              )}
-            </button>
+            {hasAnswer && (
+              <button
+                onClick={copy}
+                className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
+                title="复制回答"
+              >
+                {copied ? (
+                  <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                ) : (
+                  <Copy className="w-4 h-4" />
+                )}
+              </button>
+            )}
             {isLastAssistant && onRegenerate && (
               <button
                 onClick={onRegenerate}
@@ -374,7 +534,9 @@ export function ChatArea({
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(Boolean(sessionId))
   const [streaming, setStreaming] = useState(false)
-  const [streamItems, setStreamItems] = useState<TurnItem[]>([])
+  const [streamProcessItems, setStreamProcessItems] = useState<ProcessItem[]>([])
+  const [streamFinalText, setStreamFinalText] = useState('')
+  const streamFinalTextRef = useRef('')
   const [optimisticUser, setOptimisticUser] = useState<Message | null>(null)
   const [title, setTitle] = useState('')
   // 启用的 skill + 各自锁定的版本（null = 跟随激活）
@@ -424,7 +586,9 @@ export function ChatArea({
       setMessages([])
       setTitle('新会话')
       setLoading(false)
-      setStreamItems([])
+      setStreamProcessItems([])
+      setStreamFinalText('')
+      streamFinalTextRef.current = ''
       setOptimisticUser(null)
       setStreaming(false)
       setEditingId(null)
@@ -435,7 +599,9 @@ export function ChatArea({
     }
 
     setLoading(true)
-    setStreamItems([])
+    setStreamProcessItems([])
+    setStreamFinalText('')
+    streamFinalTextRef.current = ''
     setOptimisticUser(null)
     api
       .getSession(sessionId)
@@ -595,7 +761,7 @@ export function ChatArea({
   // 流式期间必须用 auto——smooth 动画会被高频更新反复打断，表现为"跟不上底"
   useEffect(() => {
     if (stickRef.current) scrollToBottom(false)
-  }, [messages, streamItems, optimisticUser, streaming, scrollToBottom])
+  }, [messages, streamProcessItems, streamFinalText, optimisticUser, streaming, scrollToBottom])
 
   // 流式期间每帧贴底：思考阶段 delta 极密，逐事件滚动会被浏览器合并丢弃，
   // rAF 每帧强制贴底才能保持跟随，若用户向上滑动则立即停止
@@ -626,21 +792,20 @@ export function ChatArea({
   // 推导实时状态：最近一个 running 工具优先，否则视情况显示思考/生成
   const liveStatus = useMemo(() => {
     if (!streaming) return null
-    for (let i = streamItems.length - 1; i >= 0; i--) {
-      const item = streamItems[i]
+    for (let i = streamProcessItems.length - 1; i >= 0; i--) {
+      const item = streamProcessItems[i]
       if (item.kind === 'tool' && item.invocation.status === 'running') {
         return { label: `正在执行 ${item.invocation.name}`, kind: 'tool' as const }
       }
     }
-    const last = streamItems[streamItems.length - 1]
-    if (last && last.kind === 'text') {
+    if (streamFinalText) {
       return { label: '正在生成…', kind: 'gen' as const }
     }
     return { label: '思考中…', kind: 'think' as const }
-  }, [streaming, streamItems])
+  }, [streaming, streamProcessItems, streamFinalText])
 
   const updateLastReasoning = (delta: string) => {
-    setStreamItems((prev) => {
+    setStreamProcessItems((prev) => {
       const last = prev[prev.length - 1]
       if (last && last.kind === 'reasoning') {
         const next = [...prev]
@@ -653,16 +818,8 @@ export function ChatArea({
   }
 
   const updateLastText = (delta: string) => {
-    setStreamItems((prev) => {
-      const last = prev[prev.length - 1]
-      if (last && last.kind === 'text') {
-        const next = [...prev]
-        next[next.length - 1] = { ...last, content: last.content + delta }
-        return next
-      }
-      const key = `stream-text-${++itemCounterRef.current}`
-      return [...prev, { kind: 'text', key, content: delta }]
-    })
+    streamFinalTextRef.current += delta
+    setStreamFinalText(streamFinalTextRef.current)
   }
 
   // ---- 流式打字机平滑 ----
@@ -675,13 +832,13 @@ export function ChatArea({
 
   const pumpStream = () => {
     if (!pumpActiveRef.current) return
+    // 严格时序：思考过程必须全部吐完排空，才允许吐正文，杜绝二者逐帧交替切碎
     if (pendingReasoningRef.current) {
       const n = Math.max(2, Math.ceil(Array.from(pendingReasoningRef.current).length / 6))
       const [take, rest] = takeRunes(pendingReasoningRef.current, n)
       pendingReasoningRef.current = rest
       updateLastReasoning(take)
-    }
-    if (pendingTextRef.current) {
+    } else if (pendingTextRef.current) {
       const n = Math.max(2, Math.ceil(Array.from(pendingTextRef.current).length / 6))
       const [take, rest] = takeRunes(pendingTextRef.current, n)
       pendingTextRef.current = rest
@@ -726,7 +883,7 @@ export function ChatArea({
     patch: Partial<ToolInvocation>,
     fallback?: ToolInvocation,
   ) => {
-    setStreamItems((prev) => {
+    setStreamProcessItems((prev) => {
       const idx = prev.findIndex(
         (s) => s.kind === 'tool' && s.invocation.id === id,
       )
@@ -740,7 +897,7 @@ export function ChatArea({
         return prev
       }
       const next = [...prev]
-      const item = next[idx] as Extract<TurnItem, { kind: 'tool' }>
+      const item = next[idx] as Extract<ProcessItem, { kind: 'tool' }>
       next[idx] = {
         ...item,
         invocation: { ...item.invocation, ...patch },
@@ -777,7 +934,7 @@ export function ChatArea({
         pendingTextRef.current += ev.content
       }
     } else if (ev.type === 'tool_call_start') {
-      // 工具卡片前的思考过程和文本必须先吐完，否则队列剩余文本会错位到卡片之后
+      // 1. 工具卡片前队列中的思考和文字必须先吐完
       if (pendingReasoningRef.current) {
         updateLastReasoning(pendingReasoningRef.current)
         pendingReasoningRef.current = ''
@@ -785,6 +942,21 @@ export function ChatArea({
       if (pendingTextRef.current) {
         updateLastText(pendingTextRef.current)
         pendingTextRef.current = ''
+      }
+      // 2. 关键时序：若模型在调工具前输出了导言文本（如"我帮你重新整理了一份 README..."），
+      // 将其固化为过程项中的 step_note，正文区清空以备最终交付总结使用
+      const activeText = streamFinalTextRef.current.trim()
+      if (activeText) {
+        streamFinalTextRef.current = ''
+        setStreamFinalText('')
+        setStreamProcessItems((prev) => [
+          ...prev,
+          {
+            kind: 'step_note',
+            key: `stream-note-${++itemCounterRef.current}`,
+            content: activeText,
+          },
+        ])
       }
       const startedAt = Date.now()
       updateInvocation(
@@ -804,13 +976,13 @@ export function ChatArea({
       updateInvocation(ev.id, { status: 'error', error: ev.error })
     } else if (ev.type === 'tool_artifact') {
       // 流式追加：把 artifact 挂到对应 invocation 上
-      setStreamItems((prev) => {
+      setStreamProcessItems((prev) => {
         const idx = prev.findIndex(
           (s) => s.kind === 'tool' && s.invocation.id === ev.tool_call_id,
         )
         if (idx === -1) return prev
         const next = [...prev]
-        const item = next[idx] as Extract<TurnItem, { kind: 'tool' }>
+        const item = next[idx] as Extract<ProcessItem, { kind: 'tool' }>
         next[idx] = {
           ...item,
           invocation: {
@@ -853,7 +1025,9 @@ export function ChatArea({
           setMessages(s.messages)
           // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
           if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
-          setStreamItems([])
+          setStreamProcessItems([])
+          setStreamFinalText('')
+          streamFinalTextRef.current = ''
           setOptimisticUser(null)
           setStreaming(false)
           abortRef.current = null
@@ -884,7 +1058,9 @@ export function ChatArea({
     abortRef.current = ctrl
     setOptimisticUser(optimistic ?? null)
     setStreaming(true)
-    setStreamItems([])
+    setStreamProcessItems([])
+    setStreamFinalText('')
+    streamFinalTextRef.current = ''
     pendingTextRef.current = ''
     pendingReasoningRef.current = ''
     startStreamPump()
@@ -1262,7 +1438,9 @@ export function ChatArea({
                     return (
                       <AssistantTurnView
                         key={turn.key}
-                        items={turn.items}
+                        processItems={turn.processItems}
+                        finalAnswer={turn.finalAnswer}
+                        messageId={turn.messageId}
                         isLastAssistant={turn.messageId === lastAssistantId}
                         streaming={false}
                         onRegenerate={regenerate}
@@ -1282,7 +1460,8 @@ export function ChatArea({
                 )}
                 {streaming && (
                   <AssistantTurnView
-                    items={streamItems}
+                    processItems={streamProcessItems}
+                    finalAnswer={streamFinalText}
                     streaming={true}
                     onPreview={setPreview}
                   />

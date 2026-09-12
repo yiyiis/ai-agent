@@ -119,11 +119,22 @@ func TestRunToolLoopHappyPath(t *testing.T) {
 			t.Fatalf("missing event %q in %v", want, kinds)
 		}
 	}
-	if events[1].Type != "tool_call_start" || events[1].Name != "read_file" || events[1].Arguments != tcArgs {
-		t.Fatalf("tool_call_start wrong: %+v", events[1])
+	var startWithArgs *Event
+	var resultEv *Event
+	for i := range events {
+		ev := &events[i]
+		if ev.Type == "tool_call_start" && ev.Arguments == tcArgs {
+			startWithArgs = ev
+		}
+		if ev.Type == "tool_call_result" {
+			resultEv = ev
+		}
 	}
-	if events[2].Type != "tool_call_result" || events[2].Output != "hello" {
-		t.Fatalf("tool_call_result wrong: %+v", events[2])
+	if startWithArgs == nil || startWithArgs.Name != "read_file" {
+		t.Fatalf("missing tool_call_start with args %s: %+v", tcArgs, events)
+	}
+	if resultEv == nil || resultEv.Output != "hello" {
+		t.Fatalf("tool_call_result wrong: %+v", resultEv)
 	}
 
 	// 落库校验：user + assistant(tool_calls) + tool + assistant(final)，标题自动提取
