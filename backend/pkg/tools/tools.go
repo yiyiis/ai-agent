@@ -107,7 +107,11 @@ func Schemas() []any {
 			"function": map[string]any{
 				"name": "bash",
 				"description": "在工作区内执行一条 bash 命令，返回 stdout / stderr / exit_code。" +
-					"命令看不到工作区以外的文件系统。",
+					"运行环境契约（违反会直接失败，别凭 Unix 惯例猜测）：\n" +
+					"- 宿主是 **Windows + Git Bash**，不是 Linux/macOS；\n" +
+					"- 启动目录就是会话工作区，用户上传与工具产出的文件都在这里；不要 cd 到 /tmp 等系统目录找文件（重定向到 /dev/null 可用）；\n" +
+					"- Python 解释器命令是 `python`；`python3` 是无效的商店占位符，会报 \"Python was not found\"；要跑 Python 优先用 python_exec 工具；\n" +
+					"- 没有 systemd、apt、brew 等，系统依赖不可安装。",
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
