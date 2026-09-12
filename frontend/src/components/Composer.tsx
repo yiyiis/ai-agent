@@ -6,6 +6,7 @@ import {
   Loader2,
   Plus,
   Send,
+  Square,
   Wrench,
   X,
 } from 'lucide-react'
@@ -26,6 +27,8 @@ interface Props {
   currentModel?: string
   onModelChange?: (modelId: string) => void
   placeholder?: string
+  streaming?: boolean
+  onStop?: () => void
 }
 
 interface PendingUpload {
@@ -63,6 +66,8 @@ export function Composer({
   currentModel = '',
   onModelChange,
   placeholder = '输入消息，随时开始...',
+  streaming = false,
+  onStop,
 }: Props) {
   const [value, setValue] = useState(initialValue ?? '')
   const [selIdx, setSelIdx] = useState(0)
@@ -433,20 +438,32 @@ export function Composer({
             </div>
           )}
 
-          {/* 发送按钮 */}
-          <button
-            onClick={submit}
-            disabled={!hasContent || disabled || uploading}
-            className={
-              'p-2.5 rounded-full transition-all duration-150 flex items-center justify-center shrink-0 ' +
-              (hasContent && !disabled && !uploading
-                ? 'bg-[#1a73e8] text-white hover:bg-[#1557b0] shadow-sm'
-                : 'text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] disabled:opacity-40')
-            }
-            title={uploading ? '上传中…' : '发送'}
-          >
-            {hasContent ? <ArrowUp className="w-4 h-4 stroke-[2.5]" /> : <Send className="w-4 h-4" />}
-          </button>
+          {/* 发送 / 停止 按钮 */}
+          {streaming ? (
+            <button
+              type="button"
+              onClick={onStop}
+              className="p-2.5 rounded-full bg-[#1f1f1f] dark:bg-[#28292a] hover:bg-[#37393b] dark:hover:bg-[#3c4043] text-white flex items-center justify-center shrink-0 shadow-sm transition-all duration-150 active:scale-95 group"
+              title="停止生成"
+            >
+              <Square className="w-3.5 h-3.5 fill-current rounded-[2px] transition-transform group-hover:scale-110" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={submit}
+              disabled={!hasContent || disabled || uploading}
+              className={
+                'p-2.5 rounded-full transition-all duration-150 flex items-center justify-center shrink-0 ' +
+                (hasContent && !disabled && !uploading
+                  ? 'bg-[#1a73e8] text-white hover:bg-[#1557b0] shadow-sm'
+                  : 'text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] disabled:opacity-40')
+              }
+              title={uploading ? '上传中…' : '发送'}
+            >
+              {hasContent ? <ArrowUp className="w-4 h-4 stroke-[2.5]" /> : <Send className="w-4 h-4" />}
+            </button>
+          )}
         </div>
       </div>
     </div>

@@ -13,7 +13,6 @@ import {
   Lightbulb,
   Loader2,
   RotateCcw,
-  Square,
   Wrench,
   X,
 } from 'lucide-react'
@@ -807,21 +806,6 @@ export function ChatArea({
     scrollToBottom(true)
   }, [scrollToBottom])
 
-  // 推导实时状态：最近一个 running 工具优先，否则视情况显示思考/生成
-  const liveStatus = useMemo(() => {
-    if (!streaming) return null
-    for (let i = streamProcessItems.length - 1; i >= 0; i--) {
-      const item = streamProcessItems[i]
-      if (item.kind === 'tool' && item.invocation.status === 'running') {
-        return { label: `正在执行 ${item.invocation.name}`, kind: 'tool' as const }
-      }
-    }
-    if (streamFinalText) {
-      return { label: '正在生成…', kind: 'gen' as const }
-    }
-    return { label: '思考中…', kind: 'think' as const }
-  }, [streaming, streamProcessItems, streamFinalText])
-
   const updateLastReasoning = (delta: string) => {
     setStreamProcessItems((prev) => {
       const last = prev[prev.length - 1]
@@ -1365,6 +1349,8 @@ export function ChatArea({
               key={`empty-${composerKey}`}
               onSend={send}
               disabled={streaming}
+              streaming={streaming}
+              onStop={stop}
               skills={enabledSkills}
               models={models}
               currentModel={currentModel}
@@ -1517,27 +1503,6 @@ export function ChatArea({
             )}
           </div>
 
-          {/* 运行中状态浮层 */}
-          {streaming && (
-            <div className="px-6 -mb-2 flex justify-center gap-2 z-10 animate-slide-up">
-              {liveStatus && (
-                <div className="flex items-center gap-2 px-3.5 py-1.5 text-xs bg-white/95 dark:bg-[#1e1f20]/95 backdrop-blur-md border border-[#e3e3e3] dark:border-[#3c4043] rounded-full shadow-md text-[#1f1f1f] dark:text-[#f1f3f4]">
-                  <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8] dark:text-[#8ab4f8]" />
-                  <span className={liveStatus.kind === 'tool' ? 'font-mono text-[#1f1f1f] dark:text-[#f1f3f4] font-medium' : ''}>
-                    {liveStatus.label}
-                  </span>
-                </div>
-              )}
-              <button
-                onClick={stop}
-                className="flex items-center gap-1.5 px-3.5 py-1.5 text-xs bg-white/95 dark:bg-[#1e1f20]/95 backdrop-blur-md border border-[#e3e3e3] dark:border-[#3c4043] rounded-full shadow-md hover:bg-rose-50 dark:hover:bg-rose-950/40 hover:text-rose-600 dark:hover:text-rose-400 hover:border-rose-200 dark:hover:border-rose-900 text-[#444746] dark:text-[#c4c7c5] transition font-medium"
-              >
-                <Square className="w-3 h-3 fill-current" />
-                停止生成
-              </button>
-            </div>
-          )}
-
           {/* 记忆保存通知浮层 */}
           {memoryNotice && (
             <div className="px-6 -mb-2 flex justify-center z-10 animate-slide-up">
@@ -1613,6 +1578,8 @@ export function ChatArea({
               key={`chat-${composerKey}`}
               onSend={send}
               disabled={streaming}
+              streaming={streaming}
+              onStop={stop}
               skills={enabledSkills}
               models={models}
               currentModel={currentModel}
