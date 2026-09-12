@@ -319,13 +319,12 @@ export function ChatArea({
     const maxScrollTop = box.scrollHeight - box.clientHeight
     const distance = maxScrollTop - box.scrollTop
     // 视口上方内容收缩（思考面板收起、代码高亮回流、图片加载等）会带动 scrollTop 回落，
-    // 那是布局噪声不是用户意图——只有 scrollHeight 没变时的向上滚才解除吸附，
-    // 否则流式正文一开始（思考面板自动收起）跟随就断了
+    // 那是布局噪声不是用户意图——只有 scrollHeight 没变时的向上滚才解除吸附
     const shrank = box.scrollHeight < lastHeightRef.current
-    if (!shrank && box.scrollTop < lastTopRef.current - 2) {
+    if (!shrank && box.scrollTop < lastTopRef.current - 4) {
       stickRef.current = false
-    } else if (box.scrollTop > lastTopRef.current + 2 && distance < 24) {
-      // 向下滑动且已非常贴近底部，恢复自动吸附
+    } else if (distance < 8 || (box.scrollTop > lastTopRef.current + 2 && distance < 24)) {
+      // 已贴近底部：无条件恢复吸附（含浏览器 clamp 类回落到贴底位置的情况）
       stickRef.current = true
     }
     lastTopRef.current = box.scrollTop
@@ -333,11 +332,26 @@ export function ChatArea({
     setShowJump(distance >= 48)
   }, [])
 
+  // 滚轮向上脱钩需要"真实意图"：free-spin 滚轮回落、触控板抬手动量都会产生
+  // 微小负向增量，单帧一票否决会让贴底频繁意外脱钩——
+  // 只有 400ms 窗口内累计向上超过 40px（或单次大力上滚）才判定为用户要读历史
+  const wheelUpAccRef = useRef(0)
+  const wheelAtRef = useRef(0)
+
   const handleWheel = useCallback((e: React.WheelEvent<HTMLDivElement>) => {
+    const now = performance.now()
+    if (now - wheelAtRef.current > 400) {
+      wheelUpAccRef.current = 0
+    }
+    wheelAtRef.current = now
+
     if (e.deltaY < 0) {
-      // 向上滚动滚轮：立刻解除吸附并允许自由浏览
-      stickRef.current = false
-      setShowJump(true)
+      wheelUpAccRef.current += e.deltaY
+      if (wheelUpAccRef.current <= -40) {
+        // 持续/大力向上滚动滚轮：解除吸附并允许自由浏览
+        stickRef.current = false
+        setShowJump(true)
+      }
     } else if (e.deltaY > 0) {
       const box = scrollRef.current
       if (box) {
@@ -361,9 +375,10 @@ export function ChatArea({
     }
   }, [])
 
-  // 结构性变化（消息增减/工具卡）立即贴底
+  // 结构性变化（消息增减/工具卡）立即贴底；
+  // 流式期间必须用 auto——smooth 动画会被高频更新反复打断，表现为"跟不上底"
   useEffect(() => {
-    if (stickRef.current) scrollToBottom(streaming)
+    if (stickRef.current) scrollToBottom(false)
   }, [messages, streamSegs, optimisticUser, streaming, scrollToBottom])
 
   // 流式期间每帧贴底：思考阶段 delta 极密，逐事件滚动会被浏览器合并丢弃，
@@ -943,7 +958,7 @@ export function ChatArea({
               onScroll={handleScroll}
               onWheel={handleWheel}
               onTouchStart={handleTouchStart}
-              className="flex-1 overflow-y-auto scrollbar-thin"
+              className="flex-1 overflow-y-auto scrollbar-thin [overflow-anchor:none]"
             >
               <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
                 {historySegs.map((s) =>
