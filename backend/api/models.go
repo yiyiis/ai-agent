@@ -1,10 +1,9 @@
 package api
 
 import (
-	"net/http"
+	"context"
 
 	"backend/config"
-	"github.com/gin-gonic/gin"
 )
 
 type ModelItem struct {
@@ -12,8 +11,10 @@ type ModelItem struct {
 	Name string `json:"name"`
 }
 
+type ListModelsReq struct{}
+
 // ListModels 返回支持的模型矩阵列表 (GET /api/models)
-func ListModels(c *gin.Context) {
+func ListModels(ctx context.Context, _ *ListModelsReq) (*[]ModelItem, error) {
 	conf := config.GetConfig()
 	defaultModel := conf.LLM.DefaultModel
 
@@ -22,10 +23,7 @@ func ListModels(c *gin.Context) {
 
 	// 1. 如果配置了默认模型，优先置顶
 	if defaultModel != "" {
-		models = append(models, ModelItem{
-			ID:   defaultModel,
-			Name: defaultModel,
-		})
+		models = append(models, ModelItem{ID: defaultModel, Name: defaultModel})
 		seen[defaultModel] = true
 	}
 
@@ -33,10 +31,7 @@ func ListModels(c *gin.Context) {
 	for _, p := range conf.LLM.Providers {
 		for _, m := range p.Models {
 			if m != "" && !seen[m] {
-				models = append(models, ModelItem{
-					ID:   m,
-					Name: m,
-				})
+				models = append(models, ModelItem{ID: m, Name: m})
 				seen[m] = true
 			}
 		}
@@ -62,5 +57,5 @@ func ListModels(c *gin.Context) {
 		}
 	}
 
-	c.JSON(http.StatusOK, models)
+	return &models, nil
 }

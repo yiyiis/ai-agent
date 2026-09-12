@@ -1,18 +1,20 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
 	"io"
-	"net/http"
+	"mime"
+	"mime/multipart"
 	"os"
 	"path/filepath"
 	"strings"
 
 	"backend/pkg/agent"
-
-	"github.com/gin-gonic/gin"
+	"backend/pkg/apiwarp"
+	"backend/pkg/errors"
 )
 
 // UploadsRoot 上传文件的本地存储目录（相对后端运行目录；阶段四接入 COS 后替换为对象存储），
@@ -52,13 +54,20 @@ func storedName(orig string) string {
 	return hex.EncodeToString(buf) + "_" + base + ext
 }
 
+type UploadFileReq struct {
+	File *multipart.FileHeader `form:"file" binding:"required"`
+}
+
+type UploadOut struct {
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	Size        int64  `json:"size"`
+	ContentType string `json:"content_type"`
+}
+
 // UploadFile 处理 POST /api/uploads：multipart 字段 file，返回附件元数据
-func UploadFile(c *gin.Context) {
-	fh, err := c.FormFile("file")
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "缺少 file 字段"})
-		return
-	}
+func UploadFile(ctx context.Context, req *UploadFileReq) (*UploadOut, error) {
+	fh := req.File
 
 	orig := fh.Filename
 	if orig == "" {
@@ -66,64 +75,64 @@ func UploadFile(c *gin.Context) {
 	}
 	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(orig)), ".")
 	if blockedExts[ext] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("不支持上传 .%s 类型的文件", ext)})
-		return
+		return nil, errors.NewMsg(fmt.Sprintf("不支持上传 .%s 类型的文件", ext))
 	}
 	if fh.Size > maxUploadBytes {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf("文件超过 %dMB 上限", maxUploadBytes>>20)})
-		return
+		return nil, errors.NewMsg(fmt.Sprintf("文件超过 %dMB 上限", maxUploadBytes>>20))
 	}
 
 	src, err := fh.Open()
 	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "读取上传文件失败"})
-		return
+		return nil, errors.Join(err, errors.New("open upload"), errors.NewMsg("读取上传文件失败"))
 	}
 	defer src.Close()
 
-	name := storedName(orig)
 	if err := os.MkdirAll(UploadsRoot, 0o755); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建存储目录失败"})
-		return
+		return nil, errors.Join(err, errors.New("mkdir uploads"), errors.NewMsg("创建存储目录失败"))
 	}
+	name := storedName(orig)
 	dst, err := os.Create(filepath.Join(UploadsRoot, name))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败"})
-		return
+		return nil, errors.Join(err, errors.New("create upload"), errors.NewMsg("保存文件失败"))
 	}
 	defer dst.Close()
 
 	// 限额拷贝：超限立刻断流，不会先把整个文件读进内存/磁盘
 	written, err := io.Copy(dst, io.LimitReader(src, maxUploadBytes+1))
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "保存文件失败"})
-		return
+		return nil, errors.Join(err, errors.New("copy upload"), errors.NewMsg("保存文件失败"))
 	}
 	if written > maxUploadBytes {
 		_ = os.Remove(filepath.Join(UploadsRoot, name))
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": fmt.Sprintf("文件超过 %dMB 上限", maxUploadBytes>>20)})
-		return
+		return nil, errors.NewMsg(fmt.Sprintf("文件超过 %dMB 上限", maxUploadBytes>>20))
 	}
 
-	c.JSON(http.StatusOK, gin.H{
-		"url":          "/api/uploads/" + name,
-		"filename":     orig,
-		"size":         written,
-		"content_type": fh.Header.Get("Content-Type"),
-	})
+	return &UploadOut{
+		URL:         "/api/uploads/" + name,
+		Filename:    orig,
+		Size:        written,
+		ContentType: fh.Header.Get("Content-Type"),
+	}, nil
+}
+
+type DownloadAttachmentReq struct {
+	Name string `uri:"name"`
 }
 
 // DownloadAttachment 处理 GET /api/uploads/:name（登录态走 cookie 通道，<img>/预览可直接加载）
-func DownloadAttachment(c *gin.Context) {
-	name := filepath.Base(c.Param("name")) // 防路径穿越，只取文件名部分
+func DownloadAttachment(ctx context.Context, req *DownloadAttachmentReq) (*apiwarp.FilePathData, error) {
+	name := filepath.Base(req.Name) // 防路径穿越，只取文件名部分
 	if name == "" || name == "." || name == ".." || strings.ContainsAny(name, `/\`) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "非法文件名"})
-		return
+		return nil, errors.NewMsg("非法文件名")
 	}
 	p := filepath.Join(UploadsRoot, name)
 	if _, err := os.Stat(p); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "文件不存在"})
-		return
+		return nil, errors.NewMsg("文件不存在")
 	}
-	c.File(p)
+
+	fileType := mime.TypeByExtension(filepath.Ext(name))
+	if fileType == "" {
+		fileType = "application/octet-stream"
+	}
+	return &apiwarp.FilePathData{FileType: fileType, Path: p}, nil
 }

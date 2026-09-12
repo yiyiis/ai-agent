@@ -1,29 +1,44 @@
 package api
 
 import (
-	"net/http"
+	"context"
+	"time"
 
 	"backend/pkg/db"
-	"github.com/gin-gonic/gin"
 )
 
-// ListSkills 获取当前可用技能列表 (GET /api/skills)
-func ListSkills(c *gin.Context) {
-	ctx := c.Request.Context()
-	skills, _ := db.Ctx(ctx).Skill.WithContext(ctx).Find()
+type SkillOut struct {
+	ID           int64     `json:"id"`
+	Name         string    `json:"name"`
+	Description  string    `json:"description"`
+	DirName      string    `json:"dir_name"`
+	CreatedAt    time.Time `json:"created_at"`
+	OwnerID      int64     `json:"owner_id"`
+	Confidential bool      `json:"confidential"`
+	Model        *string   `json:"model"`
+}
 
-	res := make([]gin.H, 0, len(skills))
+type ListSkillsReq struct{}
+
+// ListSkills 获取当前可用技能列表 (GET /api/skills)
+func ListSkills(ctx context.Context, _ *ListSkillsReq) (*[]SkillOut, error) {
+	skills, err := db.Ctx(ctx).Skill.WithContext(ctx).Find()
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]SkillOut, 0, len(skills))
 	for _, s := range skills {
-		res = append(res, gin.H{
-			"id":           s.ID,
-			"name":         s.Name,
-			"description":  s.Description,
-			"dir_name":     s.DirName,
-			"created_at":   s.CreatedAt,
-			"owner_id":     s.OwnerID,
-			"confidential": s.Confidential,
-			"model":        s.Model,
+		res = append(res, SkillOut{
+			ID:           s.ID,
+			Name:         s.Name,
+			Description:  s.Description,
+			DirName:      s.DirName,
+			CreatedAt:    s.CreatedAt,
+			OwnerID:      s.OwnerID,
+			Confidential: s.Confidential,
+			Model:        s.Model,
 		})
 	}
-	c.JSON(http.StatusOK, res)
+	return &res, nil
 }

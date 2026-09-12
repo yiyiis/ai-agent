@@ -1,19 +1,21 @@
 package api
 
 import (
-	"net/http"
+	"context"
 	"strings"
 
 	"backend/constants"
 	"backend/dal/model"
+	"backend/pkg/apiwarp"
 	"backend/pkg/db"
+	"backend/pkg/errors"
 	"backend/pkg/jwt"
 	"github.com/gin-gonic/gin"
 )
 
-// Ping 健康检查接口
+// Ping 健康检查：不走 Controller 信封，供负载均衡/探活直读
 func Ping(c *gin.Context) {
-	c.JSON(http.StatusOK, gin.H{
+	c.JSON(200, gin.H{
 		"status":  "ok",
 		"message": "pong",
 	})
@@ -38,37 +40,28 @@ type LoginResp struct {
 	User  UserInfoResp `json:"user"`
 }
 
-// UserLogin 处理用户登录 (POST /api/auth/login)
-func UserLogin(c *gin.Context) {
-	var req LoginReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
-		return
-	}
+func tokenCookie(token string) []apiwarp.SetCookie {
+	return []apiwarp.SetCookie{{Name: "agents_token", Value: token, MaxAge: 7 * 24 * 3600, Path: "/"}}
+}
 
+// UserLogin 处理用户登录 (POST /api/auth/login)
+func UserLogin(ctx context.Context, req *LoginReq) (*apiwarp.CookieResp, error) {
 	account := strings.TrimSpace(req.Account)
 	if account == "" {
 		account = strings.TrimSpace(req.Username)
 	}
 	if account == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "账号或用户名不能为空"})
-		return
+		return nil, errors.NewMsg("账号或用户名不能为空")
 	}
 
 	// 从 user_info 查询用户（软删除由 gorm.DeletedAt 自动过滤）
-	u := db.Ctx(c.Request.Context()).UserInfo
-	user, err := u.WithContext(c.Request.Context()).
+	u := db.Ctx(ctx).UserInfo
+	user, err := u.WithContext(ctx).
 		Where(u.Username.Eq(account)).
 		Or(u.Phone.Eq(account)).
 		First()
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
-		return
-	}
-
-	if user.Password != req.Password {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "账号或密码错误"})
-		return
+	if err != nil || user.Password != req.Password {
+		return nil, errors.NewMsg("账号或密码错误")
 	}
 
 	name := user.Nickname
@@ -83,63 +76,54 @@ func UserLogin(c *gin.Context) {
 		Username:  user.Username,
 		UserType:  constants.UserType(user.UserType),
 	}
-
 	token, err := jwt.GenAccessToken(claims)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "生成登录令牌失败"})
-		return
+		return nil, errors.Join(err, errors.New("gen token"), errors.NewMsg("生成登录令牌失败"))
 	}
 
-	// 注入 Cookie
-	c.SetCookie("agents_token", token, 7*24*3600, "/", "", false, false)
-
-	c.JSON(http.StatusOK, LoginResp{
-		Token: token,
-		User: UserInfoResp{
-			UserID:    int64(user.UserID),
-			CompanyID: 1,
-			Name:      name,
-			Phone:     user.Phone,
-			Username:  user.Username,
+	return &apiwarp.CookieResp{
+		Cookies: tokenCookie(token),
+		Body: LoginResp{
+			Token: token,
+			User: UserInfoResp{
+				UserID:    int64(user.UserID),
+				CompanyID: 1,
+				Name:      name,
+				Phone:     user.Phone,
+				Username:  user.Username,
+			},
 		},
-	})
+	}, nil
 }
 
-// AuthMe 获取当前登录用户信息 (GET /api/auth/me)
-func AuthMe(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
-	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "未登录"})
-		return
-	}
+type AuthMeReq struct{}
 
-	c.JSON(http.StatusOK, UserInfoResp{
+// AuthMe 获取当前登录用户信息 (GET /api/auth/me)
+func AuthMe(ctx context.Context, _ *AuthMeReq) (*UserInfoResp, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
+	if err != nil || identity.UserID == 0 {
+		return nil, errors.NewMsg("登录态已失效")
+	}
+	return &UserInfoResp{
 		UserID:    identity.UserID,
 		CompanyID: identity.CompanyID,
 		Name:      identity.Name,
 		Username:  identity.Username,
-	})
+	}, nil
+}
+
+type UserRegisterReq struct {
+	Username string `json:"username" binding:"required"`
+	Password string `json:"password" binding:"required"`
+	Nickname string `json:"nickname"`
 }
 
 // UserRegister 用户快速注册 (POST /api/auth/register)
-func UserRegister(c *gin.Context) {
-	var req struct {
-		Username string `json:"username" binding:"required"`
-		Password string `json:"password" binding:"required"`
-		Nickname string `json:"nickname"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数无效: " + err.Error()})
-		return
-	}
-
-	u := db.Ctx(c.Request.Context()).UserInfo
-	count, _ := u.WithContext(c.Request.Context()).
-		Where(u.Username.Eq(req.Username)).
-		Count()
+func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieResp, error) {
+	u := db.Ctx(ctx).UserInfo
+	count, _ := u.WithContext(ctx).Where(u.Username.Eq(req.Username)).Count()
 	if count > 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "该用户名已被注册"})
-		return
+		return nil, errors.NewMsg("该用户名已被注册")
 	}
 
 	nickname := req.Nickname
@@ -153,9 +137,8 @@ func UserRegister(c *gin.Context) {
 		Password: req.Password,
 		UserType: int32(constants.User),
 	}
-	if err := db.Ctx(c.Request.Context()).UserInfo.WithContext(c.Request.Context()).Create(&newUser); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "用户创建失败"})
-		return
+	if err := db.Ctx(ctx).UserInfo.WithContext(ctx).Create(&newUser); err != nil {
+		return nil, errors.Join(err, errors.New("create user"), errors.NewMsg("用户创建失败"))
 	}
 
 	claims := jwt.TokenClaims{
@@ -165,22 +148,31 @@ func UserRegister(c *gin.Context) {
 		Username:  newUser.Username,
 		UserType:  constants.User,
 	}
-	token, _ := jwt.GenAccessToken(claims)
-	c.SetCookie("agents_token", token, 7*24*3600, "/", "", false, false)
+	token, err := jwt.GenAccessToken(claims)
+	if err != nil {
+		return nil, errors.Join(err, errors.New("gen token"), errors.NewMsg("生成登录令牌失败"))
+	}
 
-	c.JSON(http.StatusOK, LoginResp{
-		Token: token,
-		User: UserInfoResp{
-			UserID:    int64(newUser.UserID),
-			CompanyID: 1,
-			Name:      nickname,
-			Username:  newUser.Username,
+	return &apiwarp.CookieResp{
+		Cookies: tokenCookie(token),
+		Body: LoginResp{
+			Token: token,
+			User: UserInfoResp{
+				UserID:    int64(newUser.UserID),
+				CompanyID: 1,
+				Name:      nickname,
+				Username:  newUser.Username,
+			},
 		},
-	})
+	}, nil
 }
 
+type UserLogoutReq struct{}
+
 // UserLogout 用户退出登录 (POST /api/auth/logout)
-func UserLogout(c *gin.Context) {
-	c.SetCookie("agents_token", "", -1, "/", "", false, false)
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+func UserLogout(ctx context.Context, _ *UserLogoutReq) (*apiwarp.CookieResp, error) {
+	return &apiwarp.CookieResp{
+		Cookies: []apiwarp.SetCookie{{Name: "agents_token", Value: "", MaxAge: -1, Path: "/"}},
+		Body:    gin.H{"status": "ok"},
+	}, nil
 }

@@ -4,12 +4,17 @@ import (
 	"context"
 	"backend/pkg/errors"
 	"backend/pkg/validate"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"log/slog"
 	"reflect"
 	"strconv"
+
+	stderr "errors"
 )
 
 type FilePathData struct {
@@ -20,6 +25,30 @@ type FilePathData struct {
 type FileBytesData struct {
 	FileType string // 文件类型
 	Data     []byte // 文件数据
+}
+
+// SSEData SSE 流式响应：Controller 识别到该类型后切换为 text/event-stream 长连接。
+// Stream 内每 emit 一个对象，即被 JSON 序列化为一帧 `data: {...}` 写出并立刻 Flush。
+// 流开始后错误已无法转为 HTTP 状态码——Stream 返回的 error 会被包装成
+// {"type":"error","message":...} 事件发给前端后正常收尾。
+type SSEData struct {
+	Stream func(ctx context.Context, emit func(payload any)) error
+}
+
+// SetCookie 随响应写回的 Cookie（登录态注入/清除等）
+type SetCookie struct {
+	Name     string
+	Value    string
+	MaxAge   int // 秒；负数表示删除
+	Path     string
+	Secure   bool
+	HttpOnly bool
+}
+
+// CookieResp 带 Cookie 副作用的标准响应：先落 Cookie，再按默认信封包装 Body
+type CookieResp struct {
+	Cookies []SetCookie
+	Body    any
 }
 
 // bindUriParams 自动将动态路由中的 URL 路径参数（如 /api/user/:id）映射到结构体带有 uri:"xxx" 标签的字段中
@@ -90,13 +119,17 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (*Out, err
 			_ = gCtx.ShouldBindQuery(&in)
 		}
 
-		// 3. 绑定 Body（JSON 或 Form），并在此处触发统一参数校验
-		err := gCtx.ShouldBind(&in)
-		if err != nil {
+		// 3. 绑定 Body（JSON 或 Form），并在此处触发统一参数校验。
+		//    无请求体的调用（如退出登录）跳过绑定；chunked 空体的 io.EOF 同样放行
+		var bindErr error
+		if gCtx.Request != nil && gCtx.Request.Body != nil && gCtx.Request.ContentLength != 0 {
+			bindErr = gCtx.ShouldBind(&in)
+		}
+		if bindErr != nil && !stderr.Is(bindErr, io.EOF) {
 			errMap := make(map[string]string)
 
 			var validatorErr validator.ValidationErrors
-			if errors.As(err, &validatorErr) {
+			if errors.As(bindErr, &validatorErr) {
 				for _, fieldErr := range validatorErr {
 					errMap[fieldErr.Field()] = fieldErr.Translate(validate.GetTranslator())
 				}
@@ -131,8 +164,12 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (*Out, err
 
 		var outAny any = out
 
-		// 多返回值类型支持（支持文件路径流、字节流等特殊响应）
+		// 多返回值类型支持（支持文件路径流、字节流、SSE 流、Cookie 等特殊响应）
 		switch outData := outAny.(type) {
+		case *SSEData:
+			writeSSE(gCtx, outData)
+		case SSEData:
+			writeSSE(gCtx, &outData)
 		case *FilePathData:
 			gCtx.Writer.Header().Set("Content-Type", outData.FileType)
 			gCtx.File(outData.Path)
@@ -143,13 +180,54 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (*Out, err
 			gCtx.Data(200, outData.FileType, outData.Data)
 		case FileBytesData:
 			gCtx.Data(200, outData.FileType, outData.Data)
+		case *CookieResp:
+			writeCookies(gCtx, outData.Cookies)
+			writeEnvelope(gCtx, outData.Body)
+		case CookieResp:
+			writeCookies(gCtx, outData.Cookies)
+			writeEnvelope(gCtx, outData.Body)
 		default:
 			// 默认标准 JSON 响应包装
-			gCtx.JSON(200, map[string]any{
-				"code": 0,
-				"msg":  "",
-				"data": out,
-			})
+			writeEnvelope(gCtx, out)
 		}
+	}
+}
+
+// writeEnvelope 标准响应信封：恒 200 + {code, msg, data}
+func writeEnvelope(gCtx *gin.Context, data any) {
+	gCtx.JSON(200, map[string]any{
+		"code": 0,
+		"msg":  "",
+		"data": data,
+	})
+}
+
+func writeCookies(gCtx *gin.Context, cookies []SetCookie) {
+	for _, ck := range cookies {
+		gCtx.SetCookie(ck.Name, ck.Value, ck.MaxAge, ck.Path, "", ck.Secure, ck.HttpOnly)
+	}
+}
+
+// writeSSE 切换为 text/event-stream 长连接并驱动业务流：
+// 每帧写出后立即 Flush；断连由请求 ctx 取消传导给 Stream。
+func writeSSE(gCtx *gin.Context, sse *SSEData) {
+	h := gCtx.Writer.Header()
+	h.Set("Content-Type", "text/event-stream")
+	h.Set("Cache-Control", "no-cache")
+	h.Set("Connection", "keep-alive")
+	h.Set("X-Accel-Buffering", "no")
+	gCtx.Writer.WriteHeader(http.StatusOK)
+	gCtx.Writer.Flush()
+
+	emit := func(payload any) {
+		b, err := json.Marshal(payload)
+		if err != nil {
+			return
+		}
+		fmt.Fprintf(gCtx.Writer, "data: %s\n\n", b)
+		gCtx.Writer.Flush()
+	}
+	if err := sse.Stream(gCtx.Request.Context(), emit); err != nil {
+		emit(map[string]any{"type": "error", "message": err.Error()})
 	}
 }

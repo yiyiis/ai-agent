@@ -1,16 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
-	"net/http"
 	"strings"
 	"time"
 
 	"backend/config"
 	"backend/dal/model"
 	"backend/dao"
+	"backend/pkg/errors"
 	"backend/pkg/jwt"
-	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
 
@@ -42,20 +42,52 @@ type SessionDetailOut struct {
 	EnabledSkillIDs []int64      `json:"enabled_skill_ids"`
 }
 
-// CreateSession 创建会话 (POST /api/sessions)
-func CreateSession(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
-	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
-	}
+type StatusOKResp struct {
+	Status string `json:"status"`
+}
 
-	var req struct {
-		Title        string  `json:"title"`
-		Model        string  `json:"model"`
-		SystemPrompt *string `json:"system_prompt"`
+// toSessionOut 实体 → 出参（空 system_prompt 输出 null）
+func toSessionOut(s *model.Session) SessionOut {
+	var promptPtr *string
+	if s.SystemPrompt != "" {
+		promptPtr = &s.SystemPrompt
 	}
-	_ = c.ShouldBindJSON(&req)
+	return SessionOut{
+		ID:           s.SessionID,
+		Title:        s.Title,
+		Model:        s.Model,
+		SystemPrompt: promptPtr,
+		AutoSkill:    s.AutoSkill,
+		CreatedAt:    s.CreatedAt.Format(time.RFC3339),
+		UpdatedAt:    s.UpdatedAt.Format(time.RFC3339),
+	}
+}
+
+// loadOwnedSession 加载会话并严格实施用户隔离：
+// 不存在与他人会话统一报"会话不存在"，防存在性探测
+func loadOwnedSession(ctx context.Context, identity jwt.TokenClaims, sessionID string) (*model.Session, error) {
+	session, err := dao.GetSessionBySessionID(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil || session.UserID != identity.UserID {
+		return nil, errors.NewMsg("会话不存在")
+	}
+	return session, nil
+}
+
+type CreateSessionReq struct {
+	Title        string  `json:"title"`
+	Model        string  `json:"model"`
+	SystemPrompt *string `json:"system_prompt"`
+}
+
+// CreateSession 创建会话 (POST /api/sessions)
+func CreateSession(ctx context.Context, req *CreateSessionReq) (*SessionOut, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
+	if err != nil || identity.UserID == 0 {
+		return nil, errors.NewMsg("登录态已失效")
+	}
 
 	title := strings.TrimSpace(req.Title)
 	if title == "" {
@@ -63,23 +95,12 @@ func CreateSession(c *gin.Context) {
 	}
 
 	// 防重复创建机制：若用户存在尚无任何消息的空会话，直接复用返回现有空会话
-	latestEmpty, err := dao.GetLatestEmptySession(c.Request.Context(), identity.UserID)
+	latestEmpty, err := dao.GetLatestEmptySession(ctx, identity.UserID)
 	if err == nil && latestEmpty != nil {
-		var promptPtr *string
-		if latestEmpty.SystemPrompt != "" {
-			promptPtr = &latestEmpty.SystemPrompt
-		}
-		c.JSON(http.StatusOK, SessionOut{
-			ID:           latestEmpty.SessionID,
-			Title:        latestEmpty.Title,
-			Model:        latestEmpty.Model,
-			SystemPrompt: promptPtr,
-			AutoSkill:    latestEmpty.AutoSkill,
-			CreatedAt:    latestEmpty.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:    latestEmpty.UpdatedAt.Format(time.RFC3339),
-		})
-		return
+		out := toSessionOut(latestEmpty)
+		return &out, nil
 	}
+
 	modelName := strings.TrimSpace(req.Model)
 	if modelName == "" {
 		modelName = config.GetConfig().LLM.DefaultModel
@@ -92,10 +113,9 @@ func CreateSession(c *gin.Context) {
 		sysPrompt = *req.SystemPrompt
 	}
 
-	sessionID := uuid.New().String()
 	now := time.Now()
 	session := &model.Session{
-		SessionID:    sessionID,
+		SessionID:    uuid.New().String(),
 		UserID:       identity.UserID,
 		CompanyID:    identity.CompanyID,
 		Title:        title,
@@ -106,85 +126,54 @@ func CreateSession(c *gin.Context) {
 		CreatedAt:    now,
 		UpdatedAt:    now,
 	}
-
-	if err := dao.CreateSession(c.Request.Context(), session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
-		return
+	if err := dao.CreateSession(ctx, session); err != nil {
+		return nil, err
 	}
 
-	var promptPtr *string
-	if sysPrompt != "" {
-		promptPtr = &sysPrompt
-	}
-
-	c.JSON(http.StatusOK, SessionOut{
-		ID:           sessionID,
-		Title:        title,
-		Model:        modelName,
-		SystemPrompt: promptPtr,
-		AutoSkill:    true,
-		CreatedAt:    now.Format(time.RFC3339),
-		UpdatedAt:    now.Format(time.RFC3339),
-	})
+	out := toSessionOut(session)
+	return &out, nil
 }
 
+type ListSessionsReq struct{}
+
 // ListSessions 获取当前用户所有会话列表 (GET /api/sessions)
-func ListSessions(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
+func ListSessions(ctx context.Context, _ *ListSessionsReq) (*[]SessionOut, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessions, _, err := dao.ListSessions(c.Request.Context(), identity.UserID, identity.CompanyID, 100, 0)
+	sessions, _, err := dao.ListSessions(ctx, identity.UserID, identity.CompanyID, 100, 0)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
-		return
+		return nil, err
 	}
 
 	res := make([]SessionOut, 0, len(sessions))
-	for _, s := range sessions {
-		var promptPtr *string
-		if s.SystemPrompt != "" {
-			promptPtr = &s.SystemPrompt
-		}
-		res = append(res, SessionOut{
-			ID:           s.SessionID,
-			Title:        s.Title,
-			Model:        s.Model,
-			SystemPrompt: promptPtr,
-			AutoSkill:    s.AutoSkill,
-			CreatedAt:    s.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:    s.UpdatedAt.Format(time.RFC3339),
-		})
+	for i := range sessions {
+		res = append(res, toSessionOut(&sessions[i]))
 	}
+	return &res, nil
+}
 
-	c.JSON(http.StatusOK, res)
+type GetSessionDetailReq struct {
+	ID string `uri:"id"`
 }
 
 // GetSessionDetail 获取会话详情及历史消息 (GET /api/sessions/:id)
-func GetSessionDetail(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
+func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDetailOut, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessionID := c.Param("id")
-	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
-	if err != nil || session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-	if session.UserID != identity.UserID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-
-	messages, err := dao.ListMessagesBySessionID(c.Request.Context(), sessionID)
+	session, err := loadOwnedSession(ctx, identity, req.ID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
-		return
+		return nil, err
+	}
+
+	messages, err := dao.ListMessagesBySessionID(ctx, req.ID)
+	if err != nil {
+		return nil, err
 	}
 
 	msgOuts := make([]MessageOut, 0, len(messages))
@@ -207,54 +196,31 @@ func GetSessionDetail(c *gin.Context) {
 		msgOuts = append(msgOuts, msgItem)
 	}
 
-	var promptPtr *string
-	if session.SystemPrompt != "" {
-		promptPtr = &session.SystemPrompt
-	}
-
-	c.JSON(http.StatusOK, SessionDetailOut{
-		SessionOut: SessionOut{
-			ID:           session.SessionID,
-			Title:        session.Title,
-			Model:        session.Model,
-			SystemPrompt: promptPtr,
-			AutoSkill:    session.AutoSkill,
-			CreatedAt:    session.CreatedAt.Format(time.RFC3339),
-			UpdatedAt:    session.UpdatedAt.Format(time.RFC3339),
-		},
+	return &SessionDetailOut{
+		SessionOut:      toSessionOut(session),
 		Messages:        msgOuts,
 		EnabledSkillIDs: []int64{},
-	})
+	}, nil
+}
+
+type UpdateSessionReq struct {
+	ID           string  `uri:"id"`
+	Title        *string `json:"title"`
+	SystemPrompt *string `json:"system_prompt"`
+	Model        *string `json:"model"`
+	AutoSkill    *bool   `json:"auto_skill"`
 }
 
 // UpdateSession 更新会话 (PATCH /api/sessions/:id)
-func UpdateSession(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
+func UpdateSession(ctx context.Context, req *UpdateSessionReq) (*SessionOut, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessionID := c.Param("id")
-	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
-	if err != nil || session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-	if session.UserID != identity.UserID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-
-	var req struct {
-		Title        *string `json:"title"`
-		SystemPrompt *string `json:"system_prompt"`
-		Model        *string `json:"model"`
-		AutoSkill    *bool   `json:"auto_skill"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "参数错误: " + err.Error()})
-		return
+	session, err := loadOwnedSession(ctx, identity, req.ID)
+	if err != nil {
+		return nil, err
 	}
 
 	updates := make(map[string]interface{})
@@ -276,75 +242,56 @@ func UpdateSession(c *gin.Context) {
 	}
 
 	if len(updates) > 0 {
-		if err := dao.UpdateSession(c.Request.Context(), sessionID, updates); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
-			return
+		if err := dao.UpdateSession(ctx, req.ID, updates); err != nil {
+			return nil, err
 		}
 	}
 
-	var promptPtr *string
-	if session.SystemPrompt != "" {
-		promptPtr = &session.SystemPrompt
-	}
+	out := toSessionOut(session)
+	out.UpdatedAt = time.Now().Format(time.RFC3339)
+	return &out, nil
+}
 
-	c.JSON(http.StatusOK, SessionOut{
-		ID:           session.SessionID,
-		Title:        session.Title,
-		Model:        session.Model,
-		SystemPrompt: promptPtr,
-		AutoSkill:    session.AutoSkill,
-		CreatedAt:    session.CreatedAt.Format(time.RFC3339),
-		UpdatedAt:    time.Now().Format(time.RFC3339),
-	})
+type DeleteSessionReq struct {
+	ID string `uri:"id"`
 }
 
 // DeleteSession 删除会话 (DELETE /api/sessions/:id)
-func DeleteSession(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
+func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessionID := c.Param("id")
-	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
-	if err != nil || session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-	if session.UserID != identity.UserID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
+	if _, err := loadOwnedSession(ctx, identity, req.ID); err != nil {
+		return nil, err
 	}
 
-	if err := dao.DeleteSession(c.Request.Context(), sessionID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
-		return
+	if err := dao.DeleteSession(ctx, req.ID); err != nil {
+		return nil, err
 	}
+	return &StatusOKResp{Status: "ok"}, nil
+}
 
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+type SetEnabledSkillsReq struct {
+	ID string `uri:"id"`
+	Skills []struct {
+		SkillID             int64  `json:"skill_id"`
+		PinnedVersionNumber *int64 `json:"pinned_version_number"`
+	} `json:"skills"`
 }
 
 // SetEnabledSkills 设置会话启用的技能 (PUT /api/sessions/:id/skills)
-func SetEnabledSkills(c *gin.Context) {
-	identity, err := jwt.GetTokenClaimsFromCtx(c.Request.Context())
+func SetEnabledSkills(ctx context.Context, req *SetEnabledSkillsReq) (*StatusOKResp, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
-		return
+		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessionID := c.Param("id")
-	session, err := dao.GetSessionBySessionID(c.Request.Context(), sessionID)
-	if err != nil || session == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
-	}
-	if session.UserID != identity.UserID {
-		c.JSON(http.StatusNotFound, gin.H{"error": "会话不存在"})
-		return
+	if _, err := loadOwnedSession(ctx, identity, req.ID); err != nil {
+		return nil, err
 	}
 
 	// 预留技能关联同步逻辑
-	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	return &StatusOKResp{Status: "ok"}, nil
 }
-

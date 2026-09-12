@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"backend/api"
@@ -18,6 +19,7 @@ import (
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"backend/pkg/validate"
+	. "backend/pkg/apiwarp"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -49,34 +51,50 @@ func setupTestServer() {
 	engine.Use(jwt.CheckLogin)
 
 	engine.GET("/api/ping", api.Ping)
-	engine.GET("/api/models", api.ListModels)
+	engine.GET("/api/models", Controller(api.ListModels))
 
 	authGroup := engine.Group("/api/auth")
 	{
-		authGroup.POST("/login", api.UserLogin)
-		authGroup.GET("/me", api.AuthMe)
-		authGroup.POST("/register", api.UserRegister)
-		authGroup.POST("/logout", api.UserLogout)
+		authGroup.POST("/login", Controller(api.UserLogin))
+		authGroup.GET("/me", Controller(api.AuthMe))
+		authGroup.POST("/register", Controller(api.UserRegister))
+		authGroup.POST("/logout", Controller(api.UserLogout))
 	}
 
 	sessionGroup := engine.Group("/api/sessions")
 	{
-		sessionGroup.POST("", api.CreateSession)
-		sessionGroup.GET("", api.ListSessions)
-		sessionGroup.GET("/:id", api.GetSessionDetail)
-		sessionGroup.PATCH("/:id", api.UpdateSession)
-		sessionGroup.DELETE("/:id", api.DeleteSession)
-		sessionGroup.PUT("/:id/skills", api.SetEnabledSkills)
-		sessionGroup.POST("/:id/messages", api.SendMessageStream)
+		sessionGroup.POST("", Controller(api.CreateSession))
+		sessionGroup.GET("", Controller(api.ListSessions))
+		sessionGroup.GET("/:id", Controller(api.GetSessionDetail))
+		sessionGroup.PATCH("/:id", Controller(api.UpdateSession))
+		sessionGroup.DELETE("/:id", Controller(api.DeleteSession))
+		sessionGroup.PUT("/:id/skills", Controller(api.SetEnabledSkills))
+		sessionGroup.POST("/:id/messages", Controller(api.SendMessageStream))
 	}
 
 	testEngine = engine
 }
 
+// envelope 标准响应信封；业务数据在 data 字段
+type envelope struct {
+	Code int             `json:"code"`
+	Msg  string          `json:"msg"`
+	Data json.RawMessage `json:"data"`
+}
+
+func decodeEnvelope(t *testing.T, w *httptest.ResponseRecorder) envelope {
+	t.Helper()
+	var env envelope
+	if err := json.Unmarshal(w.Body.Bytes(), &env); err != nil {
+		t.Fatalf("响应不是合法信封 JSON: %v\nbody: %s", err, w.Body.String())
+	}
+	return env
+}
+
 func TestPingAndModels(t *testing.T) {
 	setupTestServer()
 
-	// 1. Test Ping
+	// 1. Test Ping（探活接口不走信封）
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", "/api/ping", nil)
 	testEngine.ServeHTTP(w, req)
@@ -91,8 +109,12 @@ func TestPingAndModels(t *testing.T) {
 	if w.Code != http.StatusOK {
 		t.Fatalf("expected models 200, got %d", w.Code)
 	}
+	env := decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("expected code 0, got %d msg %s", env.Code, env.Msg)
+	}
 	var models []api.ModelItem
-	if err := json.Unmarshal(w.Body.Bytes(), &models); err != nil {
+	if err := json.Unmarshal(env.Data, &models); err != nil {
 		t.Fatalf("failed to decode models: %v", err)
 	}
 	if len(models) == 0 {
@@ -165,11 +187,12 @@ func TestUserIsolation(t *testing.T) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("x-token", token1)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("User 1 failed to create session: status=%d body=%s", w.Code, w.Body.String())
+	env := decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("User 1 failed to create session: code=%d msg=%s", env.Code, env.Msg)
 	}
 	var s1 api.SessionOut
-	if err := json.Unmarshal(w.Body.Bytes(), &s1); err != nil {
+	if err := json.Unmarshal(env.Data, &s1); err != nil {
 		t.Fatalf("failed to parse session: %v", err)
 	}
 	if s1.ID == "" {
@@ -190,11 +213,12 @@ func TestUserIsolation(t *testing.T) {
 	req, _ = http.NewRequest("GET", "/api/sessions", nil)
 	req.Header.Set("x-token", token1)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("User 1 list sessions failed: %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("User 1 list sessions failed: %s", env.Msg)
 	}
 	var list1 []api.SessionOut
-	_ = json.Unmarshal(w.Body.Bytes(), &list1)
+	_ = json.Unmarshal(env.Data, &list1)
 	found1 := false
 	for _, s := range list1 {
 		if s.ID == s1.ID {
@@ -211,60 +235,60 @@ func TestUserIsolation(t *testing.T) {
 	req, _ = http.NewRequest("GET", "/api/sessions", nil)
 	req.Header.Set("x-token", token2)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("User 2 list sessions failed: %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("User 2 list sessions failed: %s", env.Msg)
 	}
 	var list2 []api.SessionOut
-	_ = json.Unmarshal(w.Body.Bytes(), &list2)
+	_ = json.Unmarshal(env.Data, &list2)
 	for _, s := range list2 {
 		if s.ID == s1.ID {
 			t.Fatalf("Security breach: User 2 saw User 1's session %s in list", s1.ID)
 		}
 	}
 
-	// 4. User 2 尝试直接探测或访问 User 1 的会话详情 -> 必须返回 404 (禁止泄露存在性)
-	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("GET", "/api/sessions/"+s1.ID, nil)
-	req.Header.Set("x-token", token2)
-	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("Security breach: User 2 received status %d instead of 404 for User 1's session", w.Code)
+	// 隔离断言：越权访问/修改/删除统一返回 code=1 + "会话不存在"（不泄露存在性）
+	assertSessionHidden := func(method, path, token string) {
+		t.Helper()
+		w := httptest.NewRecorder()
+		var body *bytes.Reader
+		if method == "PATCH" {
+			body = bytes.NewReader([]byte(`{"title":"恶意越权修改"}`))
+		} else {
+			body = bytes.NewReader(nil)
+		}
+		req, _ := http.NewRequest(method, path, body)
+		if method == "PATCH" {
+			req.Header.Set("Content-Type", "application/json")
+		}
+		req.Header.Set("x-token", token)
+		testEngine.ServeHTTP(w, req)
+		env := decodeEnvelope(t, w)
+		if env.Code == 0 || !strings.Contains(env.Msg, "会话不存在") {
+			t.Fatalf("Security breach: %s %s got code=%d msg=%q, want code=1 + 会话不存在", method, path, env.Code, env.Msg)
+		}
 	}
 
-	// 5. User 2 尝试修改 User 1 的会话 -> 必须返回 404
-	patchBody, _ := json.Marshal(map[string]string{"title": "恶意越权修改"})
-	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("PATCH", "/api/sessions/"+s1.ID, bytes.NewReader(patchBody))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-token", token2)
-	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("Security breach: User 2 received status %d instead of 404 when patching User 1's session", w.Code)
-	}
-
-	// 6. User 2 尝试删除 User 1 的会话 -> 必须返回 404
-	w = httptest.NewRecorder()
-	req, _ = http.NewRequest("DELETE", "/api/sessions/"+s1.ID, nil)
-	req.Header.Set("x-token", token2)
-	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("Security breach: User 2 received status %d instead of 404 when deleting User 1's session", w.Code)
-	}
+	// 4-6. User 2 探测详情 / 越权修改 / 越权删除
+	assertSessionHidden("GET", "/api/sessions/"+s1.ID, token2)
+	assertSessionHidden("PATCH", "/api/sessions/"+s1.ID, token2)
+	assertSessionHidden("DELETE", "/api/sessions/"+s1.ID, token2)
 
 	// 7. User 1 正常删除自己的会话
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("DELETE", "/api/sessions/"+s1.ID, nil)
 	req.Header.Set("x-token", token1)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("User 1 failed to delete own session: %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("User 1 failed to delete own session: %s", env.Msg)
 	}
 }
 
 func TestAuthFlow(t *testing.T) {
 	setupTestServer()
 
-	// 1. 错误密码登录 -> 401
+	// 1. 错误密码登录 -> code=1 + 账号或密码错误
 	badLogin, _ := json.Marshal(map[string]string{
 		"account":  "admin",
 		"password": "wrong_password",
@@ -273,11 +297,12 @@ func TestAuthFlow(t *testing.T) {
 	req, _ := http.NewRequest("POST", "/api/auth/login", bytes.NewReader(badLogin))
 	req.Header.Set("Content-Type", "application/json")
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusUnauthorized {
-		t.Fatalf("expected 401 for bad password, got %d", w.Code)
+	env := decodeEnvelope(t, w)
+	if env.Code == 0 || !strings.Contains(env.Msg, "账号或密码错误") {
+		t.Fatalf("expected code=1 + 账号或密码错误 for bad login, got code=%d msg=%q", env.Code, env.Msg)
 	}
 
-	// 2. 正确密码登录 -> 200，并返回 JWT
+	// 2. 正确密码登录 -> code=0，data 携带 JWT
 	goodLogin, _ := json.Marshal(map[string]string{
 		"account":  "admin",
 		"password": "your_password",
@@ -286,11 +311,12 @@ func TestAuthFlow(t *testing.T) {
 	req, _ = http.NewRequest("POST", "/api/auth/login", bytes.NewReader(goodLogin))
 	req.Header.Set("Content-Type", "application/json")
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for good login, got %d (body: %s)", w.Code, w.Body.String())
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("expected code=0 for good login, got %d (%s)", env.Code, env.Msg)
 	}
 	var loginRes api.LoginResp
-	if err := json.Unmarshal(w.Body.Bytes(), &loginRes); err != nil {
+	if err := json.Unmarshal(env.Data, &loginRes); err != nil {
 		t.Fatalf("failed to decode login response: %v", err)
 	}
 	if loginRes.Token == "" {
@@ -318,18 +344,19 @@ func TestAuthFlow(t *testing.T) {
 	req, _ = http.NewRequest("GET", "/api/auth/me", nil)
 	req.Header.Set("x-token", loginRes.Token)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected 200 for /api/auth/me, got %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("expected code=0 for /api/auth/me, got %d (%s)", env.Code, env.Msg)
 	}
 	var meRes api.UserInfoResp
-	if err := json.Unmarshal(w.Body.Bytes(), &meRes); err != nil {
+	if err := json.Unmarshal(env.Data, &meRes); err != nil {
 		t.Fatalf("failed to decode auth me: %v", err)
 	}
 	if meRes.Username != "admin" {
 		t.Fatalf("expected me.Username == 'admin', got '%s'", meRes.Username)
 	}
 
-	// 4. 用户注册
+	// 4. 用户注册（允许首次创建或已被注册）
 	registerBody, _ := json.Marshal(map[string]string{
 		"username": "tester_dev",
 		"password": "password123",
@@ -339,17 +366,17 @@ func TestAuthFlow(t *testing.T) {
 	req, _ = http.NewRequest("POST", "/api/auth/register", bytes.NewReader(registerBody))
 	req.Header.Set("Content-Type", "application/json")
 	testEngine.ServeHTTP(w, req)
-	// 允许 200 (首次创建) 或 409 (已被注册过)
-	if w.Code != http.StatusOK && w.Code != http.StatusConflict {
-		t.Fatalf("expected register 200 or 409, got %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 && !strings.Contains(env.Msg, "已被注册") {
+		t.Fatalf("expected register ok or already-registered, got code=%d msg=%q", env.Code, env.Msg)
 	}
 
 	// 5. 退出登录
 	w = httptest.NewRecorder()
 	req, _ = http.NewRequest("POST", "/api/auth/logout", nil)
 	testEngine.ServeHTTP(w, req)
-	if w.Code != http.StatusOK {
-		t.Fatalf("expected logout 200, got %d", w.Code)
+	env = decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("expected logout code=0, got %d (%s)", env.Code, env.Msg)
 	}
 }
-
