@@ -252,9 +252,8 @@ export function ChatArea({
         if (cancelled) return
         loadedIdRef.current = null
         const msg = String(err)
-        if (msg.includes('403')) {
-          onSessionNotFound?.('无权访问该会话，会话不属于当前用户')
-        } else if (msg.includes('404')) {
+        // 后端对"不存在"与"无权"统一报会话不存在（防存在性探测）
+        if (msg.includes('会话不存在')) {
           onSessionNotFound?.('该会话不存在或已被删除')
         } else {
           onSessionNotFound?.(`加载会话失败：${msg}`)

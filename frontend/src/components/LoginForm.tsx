@@ -19,8 +19,8 @@ export function LoginForm({ onSuccess }: { onSuccess: (token: string) => void })
       const { token } = await api.login(account.trim(), password)
       onSuccess(token)
     } catch (err) {
-      const msg = String(err)
-      setError(msg.includes('401') ? '账号或密码错误' : msg)
+      // 信封错误已带业务文案（如"账号或密码错误"），直接展示
+      setError(String(err))
     } finally {
       setLoading(false)
     }

@@ -51,7 +51,17 @@ async function http<T>(path: string, init?: RequestInit): Promise<T> {
   }
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
   if (res.status === 204) return undefined as T
-  return res.json()
+  return unwrapEnvelope<T>(res)
+}
+
+// 后端统一信封 {code, msg, data}：code!==0 视为业务失败，抛出 msg
+async function unwrapEnvelope<T>(res: Response): Promise<T> {
+  const body = await res.json()
+  if (body && typeof body === 'object' && 'code' in body) {
+    if (body.code !== 0) throw new Error(body.msg || '系统异常')
+    return (body.data ?? undefined) as T
+  }
+  return body as T
 }
 
 export const api = {
@@ -330,7 +340,7 @@ export const api = {
       throw new Error('unauthorized')
     }
     if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
-    return res.json()
+    return unwrapEnvelope<Attachment>(res)
   },
 
   // 启动时 ping 一下，确认登录态并拿到 user_id / company_id
@@ -371,6 +381,13 @@ async function consumeStream(
 ) {
   if (!res.ok || !res.body) {
     onEvent({ type: 'error', message: `HTTP ${res.status}` })
+    return
+  }
+  // 流开始前的失败（鉴权/会话隔离等）以标准信封 JSON 返回，而非 SSE 帧
+  const ct = res.headers.get('content-type') || ''
+  if (ct.includes('application/json')) {
+    const body = await res.json().catch(() => null)
+    onEvent({ type: 'error', message: body?.msg || `HTTP ${res.status}` })
     return
   }
   const reader = res.body.getReader()
