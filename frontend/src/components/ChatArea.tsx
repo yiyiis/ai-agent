@@ -434,26 +434,69 @@ function AssistantTurnView({
 
       {/* 回合内容体 */}
       <div className="flex-1 min-w-0 flex flex-col space-y-3">
-        {/* 1. 若调用了工具：渲染统一折叠面板 ProcessAccordion */}
-        {hasTools && (
+        {/* 1. 流式进行中：各步骤平铺呈现，绝无中途突然套大框的视觉突变 */}
+        {streaming && (
+          <div className="space-y-3">
+            {processItems.map((item, idx) => {
+              if (item.kind === 'reasoning') {
+                const isLast = idx === processItems.length - 1
+                return (
+                  <ReasoningBlock
+                    key={item.key}
+                    content={item.content}
+                    defaultOpen={isLast}
+                    autoCollapse={!isLast}
+                  />
+                )
+              }
+              if (item.kind === 'step_note') {
+                return (
+                  <div
+                    key={item.key}
+                    className="flex items-start gap-2 px-2.5 py-1.5 rounded-lg bg-[#f0f4f9]/70 dark:bg-[#28292a]/70 text-xs text-[#444746] dark:text-[#c4c7c5] leading-relaxed border-l-2 border-[#1a73e8] dark:border-[#8ab4f8]"
+                  >
+                    <span className="font-medium text-[#1a73e8] dark:text-[#8ab4f8] shrink-0 select-none">
+                      阶段说明:
+                    </span>
+                    <span className="break-words select-text">{item.content}</span>
+                  </div>
+                )
+              }
+              if (item.kind === 'tool') {
+                return (
+                  <ToolCallCard
+                    key={item.key}
+                    invocation={item.invocation}
+                    onPreview={onPreview}
+                  />
+                )
+              }
+              return null
+            })}
+          </div>
+        )}
+
+        {/* 2. 流式结束后：若调用过工具，将所有中间步骤归纳折叠入卡片（最后才框起来） */}
+        {!streaming && hasTools && (
           <ProcessAccordion
             items={processItems}
-            streaming={streaming}
+            streaming={false}
             hasAnswer={hasAnswer}
             onPreview={onPreview}
           />
         )}
 
-        {/* 2. 若未调用任何工具，但有思考过程：按轻量化 ReasoningBlock 原生展示 */}
-        {!hasTools &&
+        {/* 3. 流式结束后：若未调用工具但有思考过程，按轻量化折叠条展示 */}
+        {!streaming &&
+          !hasTools &&
           processItems.map((item) => {
             if (item.kind === 'reasoning') {
               return (
                 <ReasoningBlock
                   key={item.key}
                   content={item.content}
-                  defaultOpen={streaming && !hasAnswer}
-                  autoCollapse={hasAnswer}
+                  defaultOpen={false}
+                  autoCollapse={true}
                 />
               )
             }
@@ -701,6 +744,7 @@ export function ChatArea({
   // 贴底跟随：滚轮向上/触摸/滚动条上拖都视为"用户要阅读"，立即释放跟随；
   // 只有真正回到距底 24px 内才重新吸附。程序化滚动不触发这些意图信号。
   const stickRef = useRef(true)
+  const isProgrammaticScrollRef = useRef(false)
   const lastTopRef = useRef(0)
   const lastHeightRef = useRef(0)
   const [showJump, setShowJump] = useState(false)
@@ -709,6 +753,7 @@ export function ChatArea({
     const box = scrollRef.current
     if (!box) return
     const targetTop = box.scrollHeight - box.clientHeight
+    isProgrammaticScrollRef.current = true
     box.scrollTo({ top: targetTop, behavior: smooth ? 'smooth' : 'auto' })
     lastTopRef.current = targetTop
   }, [])
@@ -717,6 +762,16 @@ export function ChatArea({
     const box = e.currentTarget
     const maxScrollTop = box.scrollHeight - box.clientHeight
     const distance = maxScrollTop - box.scrollTop
+
+    // 若当前滚动是由内部程序化贴底触发的，不应误判为用户意图脱钩
+    if (isProgrammaticScrollRef.current) {
+      isProgrammaticScrollRef.current = false
+      lastTopRef.current = box.scrollTop
+      lastHeightRef.current = box.scrollHeight
+      setShowJump(distance >= 48)
+      return
+    }
+
     // 视口上方内容收缩（思考面板收起、代码高亮回流、图片加载等）会带动 scrollTop 回落，
     // 那是布局噪声不是用户意图——只有 scrollHeight 没变时的向上滚才解除吸附
     const shrank = box.scrollHeight < lastHeightRef.current
@@ -786,12 +841,18 @@ export function ChatArea({
     if (!streaming) return
     let raf = 0
     const tick = () => {
-      if (stickRef.current) scrollToBottom(false)
+      if (stickRef.current) {
+        const box = scrollRef.current
+        if (box) {
+          isProgrammaticScrollRef.current = true
+          box.scrollTop = box.scrollHeight - box.clientHeight
+        }
+      }
       raf = requestAnimationFrame(tick)
     }
     raf = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(raf)
-  }, [streaming, scrollToBottom])
+  }, [streaming])
 
   // 切会话时复位粘底
   useEffect(() => {
