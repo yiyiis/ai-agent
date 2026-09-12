@@ -90,6 +90,16 @@ export function Composer({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialValue])
 
+  // 当组件启用（disabled 变为 false）且有恢复内容时，保证光标聚焦在文本末尾
+  useEffect(() => {
+    if (!disabled && initialValue !== undefined && ref.current) {
+      requestAnimationFrame(() => {
+        ref.current?.focus()
+        ref.current?.setSelectionRange(ref.current.value.length, ref.current.value.length)
+      })
+    }
+  }, [disabled, initialValue])
+
   const slashMatch = /^\/([^\s]*)$/.exec(value)
   const menuOpen = slashMatch !== null
   const query = slashMatch?.[1]?.toLowerCase() ?? ''

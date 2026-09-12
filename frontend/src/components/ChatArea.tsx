@@ -565,6 +565,18 @@ export function ChatArea({
   const itemCounterRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
 
+  // 停止生成 / 异常中断时把提问还原到输入框的状态
+  const lastAskRef = useRef<{ content: string; attachments: Attachment[] } | null>(null)
+  const [composerKey, setComposerKey] = useState(0)
+  const [composerValue, setComposerValue] = useState<string | undefined>(undefined)
+  const [composerAttachments, setComposerAttachments] = useState<Attachment[] | null>(null)
+
+  const restoreComposer = (content: string, attachments?: Attachment[] | null) => {
+    setComposerValue(content)
+    setComposerAttachments(attachments ?? null)
+    setComposerKey((k) => k + 1) // 重复恢复同一段内容时也强制重挂载
+  }
+
   // 内部维护当前实际会话 ID（草稿态为 null，首次发送消息后切换为生成的 ID）
   const activeIdRef = useRef<string | null>(sessionId)
   // 记录当前已成功加载就绪的会话 ID，避免草稿态转正或重复切换时重复拉取，同时保证页面初次载入或 F5 刷新时正常请求
@@ -579,6 +591,12 @@ export function ChatArea({
     }
 
     activeIdRef.current = sessionId
+
+    // 切换会话时（无论切去草稿态还是切到其它已有会话），必须彻底清理上一会话的输入框还原态与记录，杜绝串到新会话
+    setComposerValue(undefined)
+    setComposerAttachments(null)
+    setComposerKey((k) => k + 1)
+    lastAskRef.current = null
 
     if (!sessionId) {
       loadedIdRef.current = null
@@ -1035,6 +1053,14 @@ export function ChatArea({
             setTitle(s.title)
             onTitleChange()
           }
+          // 服务端悬空轮回滚兜底：如果外部中断或网络异常导致生成中断，且当前输入框未被填充，还原提问
+          if (s.pending_question?.content && !composerValue) {
+            restoreComposer(s.pending_question.content, s.pending_question.attachments)
+            setNoticeBanner('上一轮对话未完成，提问已还原到输入框')
+            if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+            noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
+          }
+          lastAskRef.current = null
         })
       }
       if (ev.type === 'error') {
@@ -1087,6 +1113,10 @@ export function ChatArea({
 
   const send = async (content: string, attachments: Attachment[] = []) => {
     if (streaming) return
+
+    // 成功发送新提问时，清除之前的恢复暂存，防止多轮混淆
+    setComposerValue(undefined)
+    setComposerAttachments(null)
 
     let currentId = activeIdRef.current
     if (!currentId) {
@@ -1161,6 +1191,11 @@ export function ChatArea({
   ) => {
     if (streaming || !activeIdRef.current) return
     setEditingId(null)
+    // 记录编辑后的提问，确保中断时能还原
+    lastAskRef.current = {
+      content,
+      attachments: attachments?.length ? attachments : [],
+    }
     // 本地立即截断：被编辑的提问及其后全部记录先从界面消失
     setMessages((prev) => {
       const idx = prev.findIndex((m) => m.id === messageId)
@@ -1183,19 +1218,10 @@ export function ChatArea({
   }
 
   // 停止生成：中断流（服务端会回滚这轮未完成的记录），并把提问还原到输入框
-  const lastAskRef = useRef<{ content: string; attachments: Attachment[] } | null>(null)
-  const [composerKey, setComposerKey] = useState(0)
-  const [composerValue, setComposerValue] = useState<string | undefined>(undefined)
-  const [composerAttachments, setComposerAttachments] = useState<Attachment[] | null>(null)
-
-  const restoreComposer = (content: string, attachments?: Attachment[] | null) => {
-    setComposerValue(content)
-    setComposerAttachments(attachments ?? null)
-    setComposerKey((k) => k + 1) // 重复恢复同一段内容时也强制重挂载
-  }
-
   const stop = () => {
     abortRef.current?.abort()
+    stopStreamPump()
+    setStreaming(false)
     if (lastAskRef.current) {
       restoreComposer(lastAskRef.current.content, lastAskRef.current.attachments)
       lastAskRef.current = null
@@ -1205,6 +1231,13 @@ export function ChatArea({
   // 重新生成：本地截断旧回答，调用 /regenerate 端点重新流式生成
   const regenerate = async () => {
     if (streaming || !activeIdRef.current) return
+    const lastUser = [...messages].reverse().find((m) => m.role === 'user')
+    if (lastUser) {
+      lastAskRef.current = {
+        content: lastUser.content,
+        attachments: lastUser.attachments ?? [],
+      }
+    }
     setMessages((prev) => {
       let lastUserIdx = -1
       for (let i = prev.length - 1; i >= 0; i--) {
@@ -1329,6 +1362,7 @@ export function ChatArea({
           </h1>
           <div className="w-full max-w-2xl mb-8">
             <Composer
+              key={`empty-${composerKey}`}
               onSend={send}
               disabled={streaming}
               skills={enabledSkills}
@@ -1336,6 +1370,8 @@ export function ChatArea({
               currentModel={currentModel}
               onModelChange={handleModelChange}
               placeholder="输入消息，随时开始..."
+              initialValue={composerValue}
+              initialAttachments={composerAttachments}
             />
           </div>
 
@@ -1574,7 +1610,7 @@ export function ChatArea({
           {/* 底部输入区域 */}
           <div className="max-w-3xl mx-auto w-full px-6 pb-4 pt-2 shrink-0">
             <Composer
-              key={composerKey}
+              key={`chat-${composerKey}`}
               onSend={send}
               disabled={streaming}
               skills={enabledSkills}
