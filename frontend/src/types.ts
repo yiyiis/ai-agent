@@ -49,6 +49,11 @@ export interface SessionDetail extends Session {
   messages: Message[]
   enabled_skill_ids: number[]
   enabled_skills?: EnabledSkillEntry[]
+  /** 读取时回滚掉的悬空提问（中断/中止留下的无回答轮次），应还原到输入框 */
+  pending_question?: {
+    content: string
+    attachments?: Attachment[] | null
+  } | null
 }
 
 export interface Skill {

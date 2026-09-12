@@ -247,6 +247,13 @@ export function ChatArea({
         lastRoundModelRef.current = s.model
         // 老后端没有这个字段——按默认开处理
         setAutoSkill(s.auto_skill !== false)
+        // 悬空轮回滚还原：服务中断/中止留下的提问回到输入框
+        if (s.pending_question?.content) {
+          restoreComposer(s.pending_question.content, s.pending_question.attachments)
+          setNoticeBanner('上一轮对话未完成，提问已还原到输入框')
+          if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+          noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
+        }
       })
       .catch((err) => {
         if (cancelled) return
@@ -712,6 +719,9 @@ export function ChatArea({
     setShowJump(false)
     scrollToBottom(false)
 
+    // 记录本轮提问：停止生成/中断时用于还原到输入框
+    lastAskRef.current = { content, attachments }
+
     // 新一轮开始：清空上一轮的思考过程展示与打字机缓冲
     setStreamReasoning('')
     setReasoningOpen(true)
@@ -739,21 +749,7 @@ export function ChatArea({
     }
     lastRoundModelRef.current = currentModel
 
-    if (editingId) {
-      const msgId = editingId
-      setEditingId(null)
-      await runStream(
-        (onEvent, opts) =>
-          editUserMessage(currentId!, msgId, content, onEvent, opts),
-        {
-          id: `temp-${Date.now()}`,
-          role: 'user',
-          content,
-          created_at: new Date().toISOString(),
-        },
-      )
-      return
-    }
+    if (editingId) return // 就地编辑在气泡内提交，不走底部输入框
     await runStream(
       (onEvent, opts) =>
         streamMessage(currentId!, content, onEvent, { ...opts, attachments }),
@@ -767,6 +763,35 @@ export function ChatArea({
     )
   }
 
+  // 就地编辑任意历史提问：截断其后全部记录，以编辑后内容重开一轮
+  const submitEdit = async (
+    messageId: string,
+    content: string,
+    attachments: Attachment[] | null,
+  ) => {
+    if (streaming || !activeIdRef.current) return
+    setEditingId(null)
+    // 本地立即截断：被编辑的提问及其后全部记录先从界面消失
+    setMessages((prev) => {
+      const idx = prev.findIndex((m) => m.id === messageId)
+      return idx === -1 ? prev : prev.slice(0, idx)
+    })
+    await runStream(
+      (onEvent, opts) =>
+        editUserMessage(activeIdRef.current!, messageId, content, onEvent, {
+          ...opts,
+          attachments: attachments?.length ? attachments : undefined,
+        }),
+      {
+        id: `temp-${Date.now()}`,
+        role: 'user',
+        content,
+        attachments: attachments?.length ? attachments : null,
+        created_at: new Date().toISOString(),
+      },
+    )
+  }
+
   const regenerate = async () => {
     if (streaming || !activeIdRef.current) return
     await runStream((onEvent, opts) =>
@@ -774,8 +799,24 @@ export function ChatArea({
     )
   }
 
+  // 停止生成：中断流（服务端会回滚这轮未完成的记录），并把提问还原到输入框
+  const lastAskRef = useRef<{ content: string; attachments: Attachment[] } | null>(null)
+  const [composerKey, setComposerKey] = useState(0)
+  const [composerValue, setComposerValue] = useState<string | undefined>(undefined)
+  const [composerAttachments, setComposerAttachments] = useState<Attachment[] | null>(null)
+
+  const restoreComposer = (content: string, attachments?: Attachment[] | null) => {
+    setComposerValue(content)
+    setComposerAttachments(attachments ?? null)
+    setComposerKey((k) => k + 1) // 重复恢复同一段内容时也强制重挂载
+  }
+
   const stop = () => {
     abortRef.current?.abort()
+    if (lastAskRef.current) {
+      restoreComposer(lastAskRef.current.content, lastAskRef.current.attachments)
+      lastAskRef.current = null
+    }
   }
 
   const historySegs = buildSegments(messages)
@@ -787,13 +828,7 @@ export function ChatArea({
     }
   }, [isEmpty, loading, onEmptyChange])
 
-  // 最后一条 user 消息允许编辑；最后一条助手消息允许重生成
-  const lastUserId = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') return messages[i].id
-    }
-    return null
-  }, [messages])
+  // 任意 user 消息均可就地编辑；最后一条助手消息允许重生成
   const lastAssistantId = useMemo(() => {
     for (let i = messages.length - 1; i >= 0; i--) {
       if (messages[i].role === 'assistant') return messages[i].id
@@ -978,8 +1013,16 @@ export function ChatArea({
                       reasoning={s.reasoning}
                       attachments={s.attachments}
                       onPreview={setPreview}
+                      isEditing={s.role === 'user' && s.messageId === editingId}
+                      onSubmitEdit={
+                        !streaming && s.role === 'user' && s.messageId
+                          ? (content) =>
+                              submitEdit(s.messageId!, content, s.attachments ?? null)
+                          : undefined
+                      }
+                      onCancelEdit={editingId ? () => setEditingId(null) : undefined}
                       onEdit={
-                        !streaming && s.role === 'user' && s.messageId === lastUserId
+                        !streaming && s.role === 'user' && s.messageId && s.content
                           ? () => setEditingId(s.messageId!)
                           : undefined
                       }
@@ -1157,19 +1200,15 @@ export function ChatArea({
           {/* 底部输入区域 */}
           <div className="max-w-3xl mx-auto w-full px-6 pb-4 pt-2 shrink-0">
             <Composer
+              key={composerKey}
               onSend={send}
               disabled={streaming}
               skills={enabledSkills}
               models={models}
               currentModel={currentModel}
               onModelChange={handleModelChange}
-              editingHint={editingId ? '编辑后回车重新发送' : null}
-              onCancelEdit={editingId ? () => setEditingId(null) : undefined}
-              initialValue={
-                editingId
-                  ? messages.find((m) => m.id === editingId)?.content ?? ''
-                  : undefined
-              }
+              initialValue={composerValue}
+              initialAttachments={composerAttachments}
             />
             <div className="text-center mt-2 text-[11px] text-[#747775] dark:text-[#9aa0a6]">
               AI 可能会显示不准确的信息，请仔细核对重要事实与关键结论。

@@ -457,15 +457,17 @@ export async function editUserMessage(
   messageId: string,
   content: string,
   onEvent: (ev: StreamEvent) => void,
-  opts?: StreamOptions,
+  opts?: StreamOptions & { attachments?: Attachment[] },
 ) {
+  const body: Record<string, unknown> = { content }
+  if (opts?.attachments?.length) body.attachments = opts.attachments
   const res = await fetch(
     `${BASE}/sessions/${sessionId}/messages/${messageId}`,
     {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json', ...authHeaders() },
       credentials: 'include',
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(body),
       signal: opts?.signal,
     },
   )

@@ -12,7 +12,7 @@ import {
   Pencil,
   RotateCcw,
 } from 'lucide-react'
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Attachment } from '../types'
 import { cn } from '../lib/utils'
 import { isPreviewable } from './FilePreviewModal'
@@ -27,6 +27,10 @@ interface Props {
   onRegenerate?: () => void
   onEdit?: () => void
   onPreview?: (a: Attachment) => void
+  /** 就地编辑状态：为真时气泡本身变为编辑框 */
+  isEditing?: boolean
+  onSubmitEdit?: (content: string) => void
+  onCancelEdit?: () => void
 }
 
 function fmtSize(n?: number | null) {
@@ -146,10 +150,37 @@ export function MessageBubble({
   onRegenerate,
   onEdit,
   onPreview,
+  isEditing,
+  onSubmitEdit,
+  onCancelEdit,
 }: Props) {
   const [copied, setCopied] = useState(false)
   const [reasoningOpen, setReasoningOpen] = useState(false)
+  const [draft, setDraft] = useState(content)
+  const editRef = useRef<HTMLTextAreaElement>(null)
   const isUser = role === 'user'
+
+  // 进入编辑态时聚焦并把光标移到末尾
+  useEffect(() => {
+    if (isEditing) {
+      setDraft(content)
+      requestAnimationFrame(() => {
+        const el = editRef.current
+        if (el) {
+          el.focus()
+          el.setSelectionRange(content.length, content.length)
+          el.style.height = 'auto'
+          el.style.height = `${el.scrollHeight}px`
+        }
+      })
+    }
+  }, [isEditing, content])
+
+  const submitEdit = () => {
+    const text = draft.trim()
+    if (!text || !onSubmitEdit) return
+    onSubmitEdit(text)
+  }
 
   const copy = async () => {
     try {
@@ -161,8 +192,58 @@ export function MessageBubble({
     }
   }
 
-  // 用户消息：Gemini 圆角气泡（支持深色模式）
+  // 用户消息：Gemini 圆角气泡（支持深色模式）；编辑态时就地变为输入框
   if (isUser) {
+    if (isEditing) {
+      return (
+        <div className="group flex flex-col items-end gap-1.5 max-w-[82%] ml-auto font-sans w-full">
+          {attachments && attachments.length > 0 && (
+            <AttachmentList items={attachments} align="end" onPreview={onPreview} />
+          )}
+          <div className="w-full rounded-[22px] rounded-br-[6px] bg-[#f0f4f9] dark:bg-[#28292a] border border-[#1a73e8]/40 dark:border-[#8ab4f8]/40 p-3">
+            <textarea
+              ref={editRef}
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value)
+                e.target.style.height = 'auto'
+                e.target.style.height = `${e.target.scrollHeight}px`
+              }}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
+                  e.preventDefault()
+                  submitEdit()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  onCancelEdit?.()
+                }
+              }}
+              rows={1}
+              className="w-full resize-none bg-transparent outline-none text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#f1f3f4] placeholder:text-[#747775] max-h-72"
+              placeholder="修改这条提问…"
+            />
+            <div className="flex items-center justify-end gap-2 mt-2">
+              <span className="mr-auto text-[11px] text-[#747775] dark:text-[#9aa0a6]">
+                重新提问会删除这条之后的所有对话记录
+              </span>
+              <button
+                onClick={onCancelEdit}
+                className="px-3 py-1.5 rounded-full text-xs text-[#1f1f1f] dark:text-[#f1f3f4] hover:bg-white/70 dark:hover:bg-[#333537] transition-colors"
+              >
+                取消
+              </button>
+              <button
+                onClick={submitEdit}
+                disabled={!draft.trim()}
+                className="px-3 py-1.5 rounded-full text-xs bg-[#1a73e8] hover:bg-[#1666d0] text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+              >
+                重新提问
+              </button>
+            </div>
+          </div>
+        </div>
+      )
+    }
     return (
       <div className="group flex flex-col items-end gap-1.5 max-w-[82%] ml-auto font-sans">
         {attachments && attachments.length > 0 && (
@@ -189,7 +270,7 @@ export function MessageBubble({
               <button
                 onClick={onEdit}
                 className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
-                title="编辑"
+                title="编辑并重新提问"
               >
                 <Pencil className="w-3.5 h-3.5" />
               </button>

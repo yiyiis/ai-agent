@@ -20,6 +20,8 @@ interface Props {
   editingHint?: string | null
   onCancelEdit?: () => void
   initialValue?: string
+  /** 与 initialValue 配套：恢复输入时一并带回附件（停止生成/悬空轮还原） */
+  initialAttachments?: Attachment[] | null
   models?: Model[]
   currentModel?: string
   onModelChange?: (modelId: string) => void
@@ -56,25 +58,26 @@ export function Composer({
   editingHint,
   onCancelEdit,
   initialValue,
+  initialAttachments,
   models = [],
   currentModel = '',
   onModelChange,
   placeholder = '输入消息，随时开始...',
 }: Props) {
-  const [value, setValue] = useState('')
+  const [value, setValue] = useState(initialValue ?? '')
   const [selIdx, setSelIdx] = useState(0)
   const [pickedSkill, setPickedSkill] = useState<Skill | null>(null)
-  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const [attachments, setAttachments] = useState<Attachment[]>(initialAttachments ?? [])
   const [pending, setPending] = useState<PendingUpload[]>([])
   const ref = useRef<HTMLTextAreaElement>(null)
   const fileRef = useRef<HTMLInputElement>(null)
 
-  // 进入/退出编辑模式时同步输入框
+  // 外部注入恢复内容时同步输入框（停止生成还原提问 / 悬空轮还原）
   useEffect(() => {
     if (initialValue !== undefined) {
       setValue(initialValue)
       setPickedSkill(null)
-      setAttachments([])
+      setAttachments(initialAttachments ?? [])
       setPending([])
       requestAnimationFrame(() => {
         const el = ref.current
@@ -84,6 +87,7 @@ export function Composer({
         }
       })
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [initialValue])
 
   const slashMatch = /^\/([^\s]*)$/.exec(value)
