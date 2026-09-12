@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 
 	"backend/dal/model"
 	"backend/dao"
@@ -56,6 +57,62 @@ func SendMessageStream(ctx context.Context, req *SendMessageReq) (*apiwarp.SSEDa
 	}
 
 	return runTurnStream(ctx, session, history, req.Content, req.Attachments)
+}
+
+type RegenerateMessageReq struct {
+	SessionID string `uri:"id"`
+}
+
+// RegenerateLastMessage 重新生成会话中最新一轮的回答 (POST /api/sessions/:id/messages/regenerate)：
+// 找到该会话中最后一条 user 提问，将其后的所有消息（含被中断或已完成的 assistant 与 tool 记录）截断，
+// 并以该条提问的内容和附件重新开启一轮流式回答。
+func RegenerateLastMessage(ctx context.Context, req *RegenerateMessageReq) (*apiwarp.SSEData, error) {
+	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
+	if err != nil || identity.UserID == 0 {
+		return nil, errors.NewMsg("登录态已失效")
+	}
+
+	session, err := dao.GetSessionBySessionID(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+	if session == nil || session.UserID != identity.UserID {
+		return nil, errors.NewMsg("会话不存在")
+	}
+
+	msgs, err := dao.ListMessagesBySessionID(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	// 逆序查找最后一条 user 消息
+	var lastUserMsg *model.Message
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			lastUserMsg = &msgs[i]
+			break
+		}
+	}
+	if lastUserMsg == nil {
+		return nil, errors.NewMsg("未找到可重新生成的提问")
+	}
+
+	// 截断：被重新生成的提问及其后全部记录删除（runTurnStream 内部会重新落库该提问）
+	if err := dao.DeleteMessagesFromRowID(ctx, req.SessionID, lastUserMsg.ID); err != nil {
+		return nil, err
+	}
+
+	history, err := dao.ListMessagesBySessionID(ctx, req.SessionID)
+	if err != nil {
+		return nil, err
+	}
+
+	var attachments []agent.Attachment
+	if lastUserMsg.Attachments != nil && *lastUserMsg.Attachments != "" {
+		_ = json.Unmarshal([]byte(*lastUserMsg.Attachments), &attachments)
+	}
+
+	return runTurnStream(ctx, session, history, lastUserMsg.Content, attachments)
 }
 
 type EditMessageReq struct {

@@ -3,19 +3,26 @@ import {
   AlertCircle,
   ArrowDown,
   Brain,
+  Check,
   ChevronDown,
   ChevronRight,
   Code2,
+  Copy,
   FileText,
   Lightbulb,
   Loader2,
+  RotateCcw,
   Square,
   Wrench,
   X,
 } from 'lucide-react'
+import ReactMarkdown from 'react-markdown'
+import remarkGfm from 'remark-gfm'
+import rehypeHighlight from 'rehype-highlight'
 import {
   api,
   editUserMessage,
+  regenerateMessage,
   streamMessage,
   type StreamEvent,
 } from '../api/client'
@@ -44,18 +51,33 @@ interface Props {
   onSessionCreated?: (newSessionId: string) => void
 }
 
-type Segment =
-  | {
-      kind: 'text'
-      key: string
-      role: 'user' | 'assistant'
-      content: string
-      reasoning?: string | null
-      messageId?: string
-      attachments?: Attachment[] | null
-    }
+interface UserTurn {
+  kind: 'user'
+  key: string
+  messageId: string
+  content: string
+  attachments?: Attachment[] | null
+}
+
+interface NoticeTurn {
+  kind: 'notice'
+  key: string
+  content: string
+}
+
+export type TurnItem =
+  | { kind: 'reasoning'; key: string; content: string }
   | { kind: 'tool'; key: string; invocation: ToolInvocation }
-  | { kind: 'notice'; key: string; content: string }
+  | { kind: 'text'; key: string; content: string; messageId?: string }
+
+interface AssistantTurn {
+  kind: 'assistant'
+  key: string
+  messageId?: string
+  items: TurnItem[]
+}
+
+type ChatTurn = UserTurn | NoticeTurn | AssistantTurn
 
 /** 与后端 tools.errorPrefixes 保持一致：工具结果以这些前缀开头时按失败渲染 */
 const TOOL_ERROR_PREFIXES = [
@@ -72,34 +94,51 @@ function isToolError(content: string): boolean {
   return TOOL_ERROR_PREFIXES.some((p) => content.startsWith(p))
 }
 
-/** 把后端返回的扁平消息列表展开成 UI 渲染段。 */
-function buildSegments(messages: Message[]): Segment[] {
-  const segs: Segment[] = []
+function buildTurns(messages: Message[]): ChatTurn[] {
+  const turns: ChatTurn[] = []
   const invocationById = new Map<string, ToolInvocation>()
+  let currentAssistantTurn: AssistantTurn | null = null
+
+  const closeAssistantTurn = () => {
+    if (currentAssistantTurn && currentAssistantTurn.items.length > 0) {
+      turns.push(currentAssistantTurn)
+    }
+    currentAssistantTurn = null
+  }
 
   for (const m of messages) {
     if (m.role === 'notice') {
-      segs.push({ kind: 'notice', key: m.id, content: m.content })
+      closeAssistantTurn()
+      turns.push({ kind: 'notice', key: m.id, content: m.content })
     } else if (m.role === 'user') {
-      segs.push({
-        kind: 'text',
+      closeAssistantTurn()
+      turns.push({
+        kind: 'user',
         key: m.id,
-        role: 'user',
-        content: m.content,
         messageId: m.id,
+        content: m.content,
         attachments: m.attachments,
       })
     } else if (m.role === 'assistant') {
-      if (m.content) {
-        segs.push({
-          kind: 'text',
+      if (!currentAssistantTurn) {
+        currentAssistantTurn = {
+          kind: 'assistant',
           key: m.id,
-          role: 'assistant',
-          content: m.content,
-          reasoning: m.reasoning,
-          messageId: m.id,
+          items: [],
+        }
+      }
+      currentAssistantTurn.messageId = m.id
+
+      // 1. 思考过程（即使没有正文 content，思考过程也必须完整保留与展示）
+      if (m.reasoning) {
+        currentAssistantTurn.items.push({
+          kind: 'reasoning',
+          key: `${m.id}-reasoning`,
+          content: m.reasoning,
         })
       }
+
+      // 2. 工具调用卡片
       if (m.tool_calls) {
         for (const tc of m.tool_calls) {
           const inv: ToolInvocation = {
@@ -109,8 +148,22 @@ function buildSegments(messages: Message[]): Segment[] {
             status: 'pending',
           }
           invocationById.set(tc.id, inv)
-          segs.push({ kind: 'tool', key: tc.id, invocation: inv })
+          currentAssistantTurn.items.push({
+            kind: 'tool',
+            key: tc.id,
+            invocation: inv,
+          })
         }
+      }
+
+      // 3. 正文内容
+      if (m.content) {
+        currentAssistantTurn.items.push({
+          kind: 'text',
+          key: m.id,
+          content: m.content,
+          messageId: m.id,
+        })
       }
     } else if (m.role === 'tool' && m.tool_call_id) {
       const inv = invocationById.get(m.tool_call_id)
@@ -128,14 +181,179 @@ function buildSegments(messages: Message[]): Segment[] {
       }
     }
   }
-  // 中断轮遗留的悬挂调用（流式中断/刷新/重启，没有对应 tool 消息）不能永远转圈
+
+  closeAssistantTurn()
+
+  // 中断轮遗留的悬挂调用处理
   for (const inv of invocationById.values()) {
     if (inv.status === 'pending' || inv.status === 'running') {
       inv.status = 'error'
       inv.error = '[中断] 该轮对话未完成（连接中断或服务重启）'
     }
   }
-  return segs
+
+  return turns
+}
+
+function ReasoningBlock({
+  content,
+  defaultOpen = false,
+  autoCollapse = false,
+}: {
+  content: string
+  defaultOpen?: boolean
+  autoCollapse?: boolean
+}) {
+  const [open, setOpen] = useState(defaultOpen)
+  const userToggledRef = useRef(false)
+
+  useEffect(() => {
+    if (autoCollapse && !userToggledRef.current) {
+      setOpen(false)
+    }
+  }, [autoCollapse])
+
+  return (
+    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
+      <button
+        onClick={() => {
+          userToggledRef.current = true
+          setOpen((o) => !o)
+        }}
+        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+      >
+        <Brain className="w-3.5 h-3.5 text-[#1a73e8] dark:text-[#8ab4f8]" />
+        <span className="font-medium">思考过程</span>
+        {open ? (
+          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
+        ) : (
+          <ChevronRight className="w-3.5 h-3.5 ml-auto" />
+        )}
+      </button>
+      {open && (
+        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words border-t border-[#e3e3e3]/50 dark:border-[#3c4043]/50 pt-2">
+          {content}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function AssistantTurnView({
+  items,
+  isLastAssistant,
+  streaming,
+  onRegenerate,
+  onPreview,
+}: {
+  items: TurnItem[]
+  messageId?: string
+  isLastAssistant?: boolean
+  streaming?: boolean
+  onRegenerate?: () => void
+  onPreview?: (a: Attachment) => void
+}) {
+  const [copied, setCopied] = useState(false)
+
+  const copy = () => {
+    const text = items
+      .filter((i): i is Extract<TurnItem, { kind: 'text' }> => i.kind === 'text')
+      .map((i) => i.content)
+      .join('\n\n')
+    if (!text) return
+    navigator.clipboard.writeText(text)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  const hasText = items.some((i) => i.kind === 'text' && i.content)
+
+  return (
+    <div className="group flex gap-4 w-full font-sans animate-fade-in">
+      {/* 助手专属头像：整个回答轮次的最顶端只显示一次 */}
+      <div className="shrink-0 pt-0.5">
+        <BrandIcon className="w-6 h-6" />
+      </div>
+
+      {/* 回合内容体：思考过程、工具调用卡片、文本段落严格按时间顺序排布 */}
+      <div className="flex-1 min-w-0 flex flex-col space-y-3">
+        {items.map((item, idx) => {
+          if (item.kind === 'reasoning') {
+            const hasSubsequent = streaming ? idx < items.length - 1 : true
+            return (
+              <ReasoningBlock
+                key={item.key}
+                content={item.content}
+                defaultOpen={streaming && idx === items.length - 1}
+                autoCollapse={hasSubsequent}
+              />
+            )
+          }
+          if (item.kind === 'tool') {
+            return (
+              <ToolCallCard
+                key={item.key}
+                invocation={item.invocation}
+                onPreview={onPreview}
+              />
+            )
+          }
+          if (item.kind === 'text') {
+            const isLastText = idx === items.length - 1
+            return (
+              <div
+                key={item.key}
+                className="text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#e3e3e3] markdown-body select-text"
+              >
+                <ReactMarkdown
+                  remarkPlugins={[remarkGfm]}
+                  rehypePlugins={[rehypeHighlight]}
+                >
+                  {item.content}
+                </ReactMarkdown>
+                {streaming && isLastText && (
+                  <span className="inline-block w-2 h-4 ml-1 bg-[#1a73e8] dark:bg-[#8ab4f8] animate-pulse align-middle rounded-sm" />
+                )}
+              </div>
+            )
+          }
+          return null
+        })}
+
+        {streaming && items.length === 0 && (
+          <div className="text-xs text-[#747775] flex items-center gap-2 pt-1">
+            <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8]" />
+            <span>思考中…</span>
+          </div>
+        )}
+
+        {!streaming && hasText && (
+          <div className="flex items-center gap-1 pt-1 opacity-0 group-hover:opacity-100 transition-opacity">
+            <button
+              onClick={copy}
+              className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
+              title="复制回答"
+            >
+              {copied ? (
+                <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+              ) : (
+                <Copy className="w-4 h-4" />
+              )}
+            </button>
+            {isLastAssistant && onRegenerate && (
+              <button
+                onClick={onRegenerate}
+                className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
+                title="重新生成"
+              >
+                <RotateCcw className="w-4 h-4" />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
 }
 
 /** 把字符串按 rune 切成 [前 n 个, 剩余]，避免切断代理对 */
@@ -156,7 +374,7 @@ export function ChatArea({
   const [messages, setMessages] = useState<Message[]>([])
   const [loading, setLoading] = useState(Boolean(sessionId))
   const [streaming, setStreaming] = useState(false)
-  const [streamSegs, setStreamSegs] = useState<Segment[]>([])
+  const [streamItems, setStreamItems] = useState<TurnItem[]>([])
   const [optimisticUser, setOptimisticUser] = useState<Message | null>(null)
   const [title, setTitle] = useState('')
   // 启用的 skill + 各自锁定的版本（null = 跟随激活）
@@ -166,10 +384,6 @@ export function ChatArea({
   const [currentModel, setCurrentModel] = useState<string>('')
   // 上一轮对话实际使用的模型：用于在模型真正变化的那一轮展示切换分隔条
   const lastRoundModelRef = useRef<string>('')
-  // 流式思考过程（如 MiniMax-M3 的 <think> 块）：流式期间展开，正文开始后自动收起
-  const [streamReasoning, setStreamReasoning] = useState('')
-  const [reasoningOpen, setReasoningOpen] = useState(true)
-  const sawReasoningRef = useRef(false)
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [autoSkill, setAutoSkill] = useState(true)
   const [editingId, setEditingId] = useState<string | null>(null)
@@ -186,7 +400,7 @@ export function ChatArea({
   const errorTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const noticeTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
-  const segCounterRef = useRef(0)
+  const itemCounterRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
 
   // 内部维护当前实际会话 ID（草稿态为 null，首次发送消息后切换为生成的 ID）
@@ -210,23 +424,19 @@ export function ChatArea({
       setMessages([])
       setTitle('新会话')
       setLoading(false)
-      setStreamSegs([])
+      setStreamItems([])
       setOptimisticUser(null)
       setStreaming(false)
       setEditingId(null)
       setEnabledEntries([])
       setAutoSkill(true)
       lastRoundModelRef.current = ''
-      setStreamReasoning('')
-      setReasoningOpen(true)
       return
     }
 
     setLoading(true)
-    setStreamSegs([])
+    setStreamItems([])
     setOptimisticUser(null)
-    setStreamReasoning('')
-    setReasoningOpen(true)
     api
       .getSession(sessionId)
       .then((s) => {
@@ -385,7 +595,7 @@ export function ChatArea({
   // 流式期间必须用 auto——smooth 动画会被高频更新反复打断，表现为"跟不上底"
   useEffect(() => {
     if (stickRef.current) scrollToBottom(false)
-  }, [messages, streamSegs, optimisticUser, streaming, scrollToBottom])
+  }, [messages, streamItems, optimisticUser, streaming, scrollToBottom])
 
   // 流式期间每帧贴底：思考阶段 delta 极密，逐事件滚动会被浏览器合并丢弃，
   // rAF 每帧强制贴底才能保持跟随，若用户向上滑动则立即停止
@@ -416,32 +626,42 @@ export function ChatArea({
   // 推导实时状态：最近一个 running 工具优先，否则视情况显示思考/生成
   const liveStatus = useMemo(() => {
     if (!streaming) return null
-    for (let i = streamSegs.length - 1; i >= 0; i--) {
-      const seg = streamSegs[i]
-      if (seg.kind === 'tool' && seg.invocation.status === 'running') {
-        return { label: `正在执行 ${seg.invocation.name}`, kind: 'tool' as const }
+    for (let i = streamItems.length - 1; i >= 0; i--) {
+      const item = streamItems[i]
+      if (item.kind === 'tool' && item.invocation.status === 'running') {
+        return { label: `正在执行 ${item.invocation.name}`, kind: 'tool' as const }
       }
     }
-    const last = streamSegs[streamSegs.length - 1]
-    if (last && last.kind === 'text' && last.role === 'assistant') {
+    const last = streamItems[streamItems.length - 1]
+    if (last && last.kind === 'text') {
       return { label: '正在生成…', kind: 'gen' as const }
     }
     return { label: '思考中…', kind: 'think' as const }
-  }, [streaming, streamSegs])
+  }, [streaming, streamItems])
 
-  const updateLastText = (delta: string) => {
-    setStreamSegs((prev) => {
+  const updateLastReasoning = (delta: string) => {
+    setStreamItems((prev) => {
       const last = prev[prev.length - 1]
-      if (last && last.kind === 'text' && last.role === 'assistant') {
+      if (last && last.kind === 'reasoning') {
         const next = [...prev]
         next[next.length - 1] = { ...last, content: last.content + delta }
         return next
       }
-      const key = `seg-${++segCounterRef.current}`
-      return [
-        ...prev,
-        { kind: 'text', key, role: 'assistant', content: delta },
-      ]
+      const key = `stream-reasoning-${++itemCounterRef.current}`
+      return [...prev, { kind: 'reasoning', key, content: delta }]
+    })
+  }
+
+  const updateLastText = (delta: string) => {
+    setStreamItems((prev) => {
+      const last = prev[prev.length - 1]
+      if (last && last.kind === 'text') {
+        const next = [...prev]
+        next[next.length - 1] = { ...last, content: last.content + delta }
+        return next
+      }
+      const key = `stream-text-${++itemCounterRef.current}`
+      return [...prev, { kind: 'text', key, content: delta }]
     })
   }
 
@@ -455,17 +675,17 @@ export function ChatArea({
 
   const pumpStream = () => {
     if (!pumpActiveRef.current) return
+    if (pendingReasoningRef.current) {
+      const n = Math.max(2, Math.ceil(Array.from(pendingReasoningRef.current).length / 6))
+      const [take, rest] = takeRunes(pendingReasoningRef.current, n)
+      pendingReasoningRef.current = rest
+      updateLastReasoning(take)
+    }
     if (pendingTextRef.current) {
       const n = Math.max(2, Math.ceil(Array.from(pendingTextRef.current).length / 6))
       const [take, rest] = takeRunes(pendingTextRef.current, n)
       pendingTextRef.current = rest
       updateLastText(take)
-    }
-    if (pendingReasoningRef.current) {
-      const n = Math.max(2, Math.ceil(Array.from(pendingReasoningRef.current).length / 6))
-      const [take, rest] = takeRunes(pendingReasoningRef.current, n)
-      pendingReasoningRef.current = rest
-      setStreamReasoning((prev) => prev + take)
     }
     rafRef.current = requestAnimationFrame(pumpStream)
   }
@@ -476,19 +696,21 @@ export function ChatArea({
     rafRef.current = requestAnimationFrame(pumpStream)
   }
 
-  // 停泵并把剩余正文缓冲一次性吐完（done/error/停止生成时调用，保证内容完整）；
-  // 思考缓冲直接丢弃——此时实时面板即将被落库的折叠面板替代
+  // 停泵并把剩余缓冲一次性吐完（done/error/停止生成时调用，保证内容完整）
   const stopStreamPump = () => {
     pumpActiveRef.current = false
     if (rafRef.current != null) {
       cancelAnimationFrame(rafRef.current)
       rafRef.current = null
     }
+    if (pendingReasoningRef.current) {
+      updateLastReasoning(pendingReasoningRef.current)
+      pendingReasoningRef.current = ''
+    }
     if (pendingTextRef.current) {
       updateLastText(pendingTextRef.current)
       pendingTextRef.current = ''
     }
-    pendingReasoningRef.current = ''
   }
 
   // 组件卸载时停掉 rAF，避免泄漏
@@ -504,7 +726,7 @@ export function ChatArea({
     patch: Partial<ToolInvocation>,
     fallback?: ToolInvocation,
   ) => {
-    setStreamSegs((prev) => {
+    setStreamItems((prev) => {
       const idx = prev.findIndex(
         (s) => s.kind === 'tool' && s.invocation.id === id,
       )
@@ -518,10 +740,10 @@ export function ChatArea({
         return prev
       }
       const next = [...prev]
-      const seg = next[idx] as Extract<Segment, { kind: 'tool' }>
+      const item = next[idx] as Extract<TurnItem, { kind: 'tool' }>
       next[idx] = {
-        ...seg,
-        invocation: { ...seg.invocation, ...patch },
+        ...item,
+        invocation: { ...item.invocation, ...patch },
       }
       return next
     })
@@ -532,35 +754,34 @@ export function ChatArea({
       // 后台标签页 rAF 冻结，打字机泵不转：直接落屏，避免回来时文字停在老位置。
       // 先冲掉队列残留，保证与直写文本的先后顺序。
       if (document.hidden) {
+        if (pendingReasoningRef.current) {
+          updateLastReasoning(pendingReasoningRef.current)
+          pendingReasoningRef.current = ''
+        }
         if (pendingTextRef.current) {
           updateLastText(pendingTextRef.current)
           pendingTextRef.current = ''
         }
-        if (pendingReasoningRef.current) {
-          setStreamReasoning((prev) => prev + pendingReasoningRef.current)
-          pendingReasoningRef.current = ''
-        }
         if (ev.reasoning) {
-          sawReasoningRef.current = true
-          setStreamReasoning((prev) => prev + ev.reasoning)
+          updateLastReasoning(ev.reasoning)
         }
         if (ev.content) {
-          if (sawReasoningRef.current) setReasoningOpen(false)
           updateLastText(ev.content)
         }
         return
       }
       if (ev.reasoning) {
-        sawReasoningRef.current = true
         pendingReasoningRef.current += ev.reasoning
       }
       if (ev.content) {
         pendingTextRef.current += ev.content
-        // 思考结束、正文开始输出：思考面板自动收起
-        if (sawReasoningRef.current) setReasoningOpen(false)
       }
     } else if (ev.type === 'tool_call_start') {
-      // 工具卡片前的文本必须先吐完，否则队列剩余文本会错位到卡片之后
+      // 工具卡片前的思考过程和文本必须先吐完，否则队列剩余文本会错位到卡片之后
+      if (pendingReasoningRef.current) {
+        updateLastReasoning(pendingReasoningRef.current)
+        pendingReasoningRef.current = ''
+      }
       if (pendingTextRef.current) {
         updateLastText(pendingTextRef.current)
         pendingTextRef.current = ''
@@ -568,7 +789,7 @@ export function ChatArea({
       const startedAt = Date.now()
       updateInvocation(
         ev.id,
-        { status: 'running', startedAt },
+        { status: 'running', startedAt, name: ev.name, arguments: ev.arguments },
         {
           id: ev.id,
           name: ev.name,
@@ -583,18 +804,18 @@ export function ChatArea({
       updateInvocation(ev.id, { status: 'error', error: ev.error })
     } else if (ev.type === 'tool_artifact') {
       // 流式追加：把 artifact 挂到对应 invocation 上
-      setStreamSegs((prev) => {
+      setStreamItems((prev) => {
         const idx = prev.findIndex(
           (s) => s.kind === 'tool' && s.invocation.id === ev.tool_call_id,
         )
         if (idx === -1) return prev
         const next = [...prev]
-        const seg = next[idx] as Extract<Segment, { kind: 'tool' }>
+        const item = next[idx] as Extract<TurnItem, { kind: 'tool' }>
         next[idx] = {
-          ...seg,
+          ...item,
           invocation: {
-            ...seg.invocation,
-            attachments: [...(seg.invocation.attachments || []), ev.attachment],
+            ...item.invocation,
+            attachments: [...(item.invocation.attachments || []), ev.attachment],
           },
         }
         return next
@@ -624,18 +845,15 @@ export function ChatArea({
         isUpdate: Boolean(ev.is_update),
       })
     } else if (ev.type === 'done' || ev.type === 'error') {
-      // 流结束：停泵并吐完剩余缓冲，落库的思考过程以折叠面板形式留在回答上方
+      // 流结束：停泵并吐完剩余缓冲
       stopStreamPump()
-      setStreamReasoning('')
-      setReasoningOpen(true)
-      sawReasoningRef.current = false
       const currentId = activeIdRef.current
       if (currentId) {
         api.getSession(currentId).then((s) => {
           setMessages(s.messages)
           // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
           if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
-          setStreamSegs([])
+          setStreamItems([])
           setOptimisticUser(null)
           setStreaming(false)
           abortRef.current = null
@@ -646,7 +864,7 @@ export function ChatArea({
         })
       }
       if (ev.type === 'error') {
-        // 错误信息以横幅形式独立展示，避免在 streamSegs 里被 getSession.then 清掉一闪而过。
+        // 错误信息以横幅形式独立展示，避免被清掉一闪而过。
         // 8s 后自动消失；用户也可手动 ×。
         setErrorBanner(ev.message)
         if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
@@ -666,7 +884,7 @@ export function ChatArea({
     abortRef.current = ctrl
     setOptimisticUser(optimistic ?? null)
     setStreaming(true)
-    setStreamSegs([])
+    setStreamItems([])
     pendingTextRef.current = ''
     pendingReasoningRef.current = ''
     startStreamPump()
@@ -721,10 +939,7 @@ export function ChatArea({
     // 记录本轮提问：停止生成/中断时用于还原到输入框
     lastAskRef.current = { content, attachments }
 
-    // 新一轮开始：清空上一轮的思考过程展示与打字机缓冲
-    setStreamReasoning('')
-    setReasoningOpen(true)
-    sawReasoningRef.current = false
+    // 新一轮开始：清空上一轮的打字机缓冲
     pendingTextRef.current = ''
     pendingReasoningRef.current = ''
 
@@ -811,23 +1026,27 @@ export function ChatArea({
     }
   }
 
-  // 重试 = 原样重发最后一条提问：先在本地立刻移除旧一轮（提问+回答），
-  // 再走编辑重发端点截断重流——不等网络返回，旧答案瞬间消失
+  // 重新生成：本地截断旧回答，调用 /regenerate 端点重新流式生成
   const regenerate = async () => {
     if (streaming || !activeIdRef.current) return
-    let lastUser: Message | undefined
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') {
-        lastUser = messages[i]
-        break
+    setMessages((prev) => {
+      let lastUserIdx = -1
+      for (let i = prev.length - 1; i >= 0; i--) {
+        if (prev[i].role === 'user') {
+          lastUserIdx = i
+          break
+        }
       }
-    }
-    if (!lastUser) return
-    await submitEdit(lastUser.id, lastUser.content, lastUser.attachments ?? null)
+      if (lastUserIdx === -1) return prev
+      return prev.slice(0, lastUserIdx + 1)
+    })
+    await runStream(
+      (onEvent, opts) => regenerateMessage(activeIdRef.current!, onEvent, opts),
+    )
   }
 
-  const historySegs = buildSegments(messages)
-  const isEmpty = !loading && historySegs.length === 0 && !optimisticUser && !streaming
+  const historyTurns = useMemo(() => buildTurns(messages), [messages])
+  const isEmpty = !loading && historyTurns.length === 0 && !optimisticUser && !streaming
 
   useEffect(() => {
     if (!loading) {
@@ -1003,75 +1222,56 @@ export function ChatArea({
               className="flex-1 overflow-y-auto scrollbar-thin [overflow-anchor:none]"
             >
               <div className="max-w-3xl mx-auto px-6 py-6 space-y-6">
-                {(() => {
-                  let turnHasAssistantAvatar = false
-                  return historySegs.map((s) => {
-                    if (s.kind === 'notice') {
-                      turnHasAssistantAvatar = false
-                      return (
-                        <div key={s.key} className="flex items-center gap-3 py-1 select-none" aria-hidden>
-                          <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
-                          <span className="text-[11px] text-[#747775] dark:text-[#9aa0a6] whitespace-nowrap">
-                            {s.content}
-                          </span>
-                          <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
-                        </div>
-                      )
-                    }
-                    if (s.kind === 'text') {
-                      if (s.role === 'user') {
-                        turnHasAssistantAvatar = false
-                        return (
-                          <MessageBubble
-                            key={s.key}
-                            role="user"
-                            content={s.content}
-                            reasoning={s.reasoning}
-                            attachments={s.attachments}
-                            onPreview={setPreview}
-                            isEditing={s.messageId === editingId}
-                            onSubmitEdit={
-                              !streaming && s.messageId
-                                ? (content) =>
-                                    submitEdit(s.messageId!, content, s.attachments ?? null)
-                                : undefined
-                            }
-                            onCancelEdit={editingId ? () => setEditingId(null) : undefined}
-                            onEdit={
-                              !streaming && s.messageId && s.content
-                                ? () => setEditingId(s.messageId!)
-                                : undefined
-                            }
-                          />
-                        )
-                      }
-                      const hideAvatar = turnHasAssistantAvatar
-                      turnHasAssistantAvatar = true
-                      return (
-                        <MessageBubble
-                          key={s.key}
-                          role="assistant"
-                          content={s.content}
-                          reasoning={s.reasoning}
-                          attachments={s.attachments}
-                          hideAvatar={hideAvatar}
-                          onPreview={setPreview}
-                          onRegenerate={
-                            !streaming &&
-                            s.messageId === lastAssistantId
-                              ? regenerate
-                              : undefined
-                          }
-                        />
-                      )
-                    }
+                {historyTurns.map((turn) => {
+                  if (turn.kind === 'notice') {
                     return (
-                      <div key={s.key} className="pl-11 pr-2">
-                        <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
+                      <div key={turn.key} className="flex items-center gap-3 py-1 select-none" aria-hidden>
+                        <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
+                        <span className="text-[11px] text-[#747775] dark:text-[#9aa0a6] whitespace-nowrap">
+                          {turn.content}
+                        </span>
+                        <div className="flex-1 h-px bg-[#e3e3e3] dark:bg-[#3c4043]" />
                       </div>
                     )
-                  })
-                })()}
+                  }
+                  if (turn.kind === 'user') {
+                    return (
+                      <MessageBubble
+                        key={turn.key}
+                        role="user"
+                        content={turn.content}
+                        attachments={turn.attachments}
+                        onPreview={setPreview}
+                        isEditing={turn.messageId === editingId}
+                        onSubmitEdit={
+                          !streaming && turn.messageId
+                            ? (content) =>
+                                submitEdit(turn.messageId, content, turn.attachments ?? null)
+                            : undefined
+                        }
+                        onCancelEdit={editingId ? () => setEditingId(null) : undefined}
+                        onEdit={
+                          !streaming && turn.messageId && turn.content
+                            ? () => setEditingId(turn.messageId)
+                            : undefined
+                        }
+                      />
+                    )
+                  }
+                  if (turn.kind === 'assistant') {
+                    return (
+                      <AssistantTurnView
+                        key={turn.key}
+                        items={turn.items}
+                        isLastAssistant={turn.messageId === lastAssistantId}
+                        streaming={false}
+                        onRegenerate={regenerate}
+                        onPreview={setPreview}
+                      />
+                    )
+                  }
+                  return null
+                })}
                 {optimisticUser && (
                   <MessageBubble
                     role="user"
@@ -1080,61 +1280,12 @@ export function ChatArea({
                     onPreview={setPreview}
                   />
                 )}
-                {streamReasoning && (
-                  <div className="pl-11 pr-2">
-                    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
-                      <button
-                        onClick={() => setReasoningOpen((o) => !o)}
-                        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
-                      >
-                        <Brain className="w-3.5 h-3.5" />
-                        <span className="font-medium">思考过程</span>
-                        {reasoningOpen ? (
-                          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
-                        ) : (
-                          <ChevronRight className="w-3.5 h-3.5 ml-auto" />
-                        )}
-                      </button>
-                      {reasoningOpen && (
-                        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words">
-                          {streamReasoning}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                )}
-                {(() => {
-                  let streamHasAvatar = false
-                  return streamSegs.map((s) => {
-                    if (s.kind === 'text') {
-                      const hideAvatar = streamHasAvatar
-                      streamHasAvatar = true
-                      return (
-                        <MessageBubble
-                          key={s.key}
-                          role="assistant"
-                          content={s.content}
-                          streaming
-                          hideAvatar={hideAvatar}
-                          onPreview={setPreview}
-                        />
-                      )
-                    }
-                    if (s.kind === 'tool') {
-                      return (
-                        <div key={s.key} className="pl-11 pr-2">
-                          <ToolCallCard invocation={s.invocation} onPreview={setPreview} />
-                        </div>
-                      )
-                    }
-                    return null
-                  })
-                })()}
-                {streaming && streamSegs.length === 0 && (
-                  <div className="text-xs text-[#747775] pl-11 flex items-center gap-2">
-                    <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8]" />
-                    <span>思考中…</span>
-                  </div>
+                {streaming && (
+                  <AssistantTurnView
+                    items={streamItems}
+                    streaming={true}
+                    onPreview={setPreview}
+                  />
                 )}
               </div>
             </div>

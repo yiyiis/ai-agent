@@ -133,14 +133,15 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// buildContext 装配 system 提示与历史消息（注入当前模型说明，对冲历史人设污染）
+// buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史人设污染）
 func buildContext(session *model.Session, history []model.Message) []provider.ChatMessage {
 	modelNote := fmt.Sprintf("当前对话由模型 %s 提供支持。如果用户询问你是什么模型，如实回答自己是 %s。", session.Model, session.Model)
+	toolNote := "## 文件操作规范\n- 修改已有文件时，优先使用 edit_file 进行局部精确替换，不要用 write_file 重写整个文件。\n- write_file 仅用于新建文件或写入短文本（<3KB）；避免在 write_file 的 content 参数中塞入超长大段内容。"
 	systemPrompt := session.SystemPrompt
 	if systemPrompt == "" {
-		systemPrompt = modelNote
+		systemPrompt = modelNote + "\n\n" + toolNote
 	} else {
-		systemPrompt += "\n\n" + modelNote
+		systemPrompt += "\n\n" + modelNote + "\n\n" + toolNote
 	}
 
 	msgs := []provider.ChatMessage{{Role: "system", Content: systemPrompt}}
@@ -225,6 +226,7 @@ func streamOneRound(
 	var contentBuf, reasoningBuf strings.Builder
 	slots := map[int]*savedCall{}
 	var order []int
+	startedSlots := map[int]bool{}
 
 	for {
 		select {
@@ -272,6 +274,21 @@ func streamOneRound(
 						slot.Function.Name = tc.Name
 					}
 					slot.Function.Arguments += tc.Arguments
+
+					if slot.Function.Name != "" && !startedSlots[tc.Index] {
+						id := slot.ID
+						if id == "" {
+							id = fmt.Sprintf("call_idx_%d", tc.Index)
+							slot.ID = id
+						}
+						startedSlots[tc.Index] = true
+						emit(Event{
+							Type:      "tool_call_start",
+							ID:        id,
+							Name:      slot.Function.Name,
+							Arguments: "",
+						})
+					}
 				}
 				if ev.Content != "" || ev.Reasoning != "" {
 					emit(ev)

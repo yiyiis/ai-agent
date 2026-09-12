@@ -459,3 +459,22 @@ export async function editUserMessage(
   if (res.status === 401 && onUnauthorized) onUnauthorized()
   await consumeStream(res, onEvent, opts?.signal)
 }
+
+export async function regenerateMessage(
+  sessionId: string,
+  onEvent: (ev: StreamEvent) => void,
+  opts?: StreamOptions,
+) {
+  const res = await fetch(
+    `${BASE}/sessions/${sessionId}/messages/regenerate`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...authHeaders() },
+      credentials: 'include',
+      signal: opts?.signal,
+    },
+  )
+  if (res.status === 401 && onUnauthorized) onUnauthorized()
+  await consumeStream(res, onEvent, opts?.signal)
+}
+
