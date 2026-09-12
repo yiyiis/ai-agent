@@ -137,10 +137,10 @@ timeline
 - [x] 标准 SSE 实时流式传输：支持 `user_message_id`、`delta`、`done`、`error` 增量分发
 
 ### 阶段二：ReAct 循环与内置工具系统 (ReAct Loop & Workspace Tools)
-- [ ] 核心 Agent 执行器：多轮 ReAct (Reasoning + Acting) 闭环与并发工具执行
-- [ ] 内置工作区工具集：`read_file`、`write_file`、`edit_file`、`bash`、`python_exec`
-- [ ] 熔断守卫机制 (Loop Guard)：相同参数调用 3 次告警、4 次强制熔断；输出超限自动截断
-- [ ] 工具调用前端协议扩展：`tool_call_start`、`tool_call_result`、`tool_call_error`
+- [x] 核心 Agent 执行器：多轮 ReAct (Reasoning + Acting) 闭环与并发工具执行
+- [x] 内置工作区工具集：`read_file`、`write_file`、`edit_file`、`bash`、`python_exec`
+- [x] 熔断守卫机制 (Loop Guard)：相同参数调用 3 次告警、4 次强制熔断；输出超限自动截断
+- [x] 工具调用前端协议扩展：`tool_call_start`、`tool_call_result`、`tool_call_error`
 
 ### 阶段三：异步执行流与会话解耦 (Decoupled Background Turn Runner)
 - [ ] 核心执行与连接解耦：Turn 跑在后台 Goroutine 中，客户端刷新或掉线任务不中断

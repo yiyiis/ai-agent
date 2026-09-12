@@ -6,7 +6,8 @@ import (
 
 	"backend/dal/model"
 	"backend/pkg/db"
-	"github.com/pkg/errors"
+	"backend/pkg/errors"
+
 	"gorm.io/gen"
 	"gorm.io/gorm"
 )
@@ -20,7 +21,7 @@ func CreateSession(ctx context.Context, session *model.Session) error {
 		session.UpdatedAt = time.Now()
 	}
 	if err := db.Ctx(ctx).Session.WithContext(ctx).Create(session); err != nil {
-		return errors.Wrap(err, "创建会话记录失败")
+		return errors.Join(err, errors.New("创建会话记录失败"), errors.NewMsg("系统异常"))
 	}
 	return nil
 }
@@ -35,7 +36,7 @@ func GetSessionBySessionID(ctx context.Context, sessionID string) (*model.Sessio
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "查询会话失败")
+		return nil, errors.Join(err, errors.New("查询会话失败"), errors.NewMsg("系统异常"))
 	}
 	return session, nil
 }
@@ -53,7 +54,7 @@ func GetLatestEmptySession(ctx context.Context, userID int64) (*model.Session, e
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "查询空会话失败")
+		return nil, errors.Join(err, errors.New("查询空会话失败"), errors.NewMsg("系统异常"))
 	}
 	return session, nil
 }
@@ -78,7 +79,7 @@ func ListSessions(ctx context.Context, userID, companyID int64, limit, offset in
 
 	total, err := sq.Where(conds()...).Count()
 	if err != nil {
-		return nil, 0, errors.Wrap(err, "统计会话数量失败")
+		return nil, 0, errors.Join(err, errors.New("统计会话数量失败"), errors.NewMsg("系统异常"))
 	}
 
 	if limit <= 0 {
@@ -90,7 +91,7 @@ func ListSessions(ctx context.Context, userID, companyID int64, limit, offset in
 		Offset(offset).
 		Find()
 	if err != nil {
-		return nil, 0, errors.Wrap(err, "获取会话列表失败")
+		return nil, 0, errors.Join(err, errors.New("获取会话列表失败"), errors.NewMsg("系统异常"))
 	}
 
 	sessions := make([]model.Session, 0, len(list))
@@ -115,7 +116,7 @@ func UpdateSession(ctx context.Context, sessionID string, updates map[string]int
 		Where(s.SessionID.Eq(sessionID)).
 		Updates(updates)
 	if err != nil {
-		return errors.Wrap(err, "更新会话失败")
+		return errors.Join(err, errors.New("更新会话失败"), errors.NewMsg("系统异常"))
 	}
 	return nil
 }
@@ -127,14 +128,14 @@ func DeleteSession(ctx context.Context, sessionID string) error {
 		if _, err := m.WithContext(txCtx).
 			Where(m.SessionID.Eq(sessionID)).
 			Delete(); err != nil {
-			return err
+			return errors.Join(err, errors.New("删除会话消息失败"), errors.NewMsg("系统异常"))
 		}
 
 		s := db.Ctx(txCtx).Session
 		if _, err := s.WithContext(txCtx).
 			Where(s.SessionID.Eq(sessionID)).
 			Delete(); err != nil {
-			return err
+			return errors.Join(err, errors.New("删除会话记录失败"), errors.NewMsg("系统异常"))
 		}
 		return nil
 	})

@@ -6,7 +6,7 @@ import (
 
 	"backend/dal/model"
 	"backend/pkg/db"
-	"github.com/pkg/errors"
+	"backend/pkg/errors"
 	"gorm.io/gorm"
 )
 
@@ -16,7 +16,7 @@ func CreateMessage(ctx context.Context, msg *model.Message) error {
 		msg.CreatedAt = time.Now()
 	}
 	if err := db.Ctx(ctx).Message.WithContext(ctx).Create(msg); err != nil {
-		return errors.Wrap(err, "插入消息记录失败")
+		return errors.Join(err, errors.New("插入消息记录失败"), errors.NewMsg("系统异常"))
 	}
 	return nil
 }
@@ -29,7 +29,7 @@ func ListMessagesBySessionID(ctx context.Context, sessionID string) ([]model.Mes
 		Order(m.ID).
 		Find()
 	if err != nil {
-		return nil, errors.Wrap(err, "查询会话消息历史失败")
+		return nil, errors.Join(err, errors.New("查询会话消息历史失败"), errors.NewMsg("系统异常"))
 	}
 
 	msgs := make([]model.Message, 0, len(list))
@@ -49,7 +49,7 @@ func GetMessageByMessageID(ctx context.Context, messageID string) (*model.Messag
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return nil, nil
 		}
-		return nil, errors.Wrap(err, "查询消息失败")
+		return nil, errors.Join(err, errors.New("查询消息失败"), errors.NewMsg("系统异常"))
 	}
 	return msg, nil
 }
@@ -57,7 +57,11 @@ func GetMessageByMessageID(ctx context.Context, messageID string) (*model.Messag
 // CountMessagesBySessionID 统计指定会话的消息总数
 func CountMessagesBySessionID(ctx context.Context, sessionID string) (int64, error) {
 	m := db.Ctx(ctx).Message
-	return m.WithContext(ctx).
+	count, err := m.WithContext(ctx).
 		Where(m.SessionID.Eq(sessionID)).
 		Count()
+	if err != nil {
+		return 0, errors.Join(err, errors.New("统计会话消息数量失败"), errors.NewMsg("系统异常"))
+	}
+	return count, nil
 }

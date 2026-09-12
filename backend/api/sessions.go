@@ -108,7 +108,7 @@ func CreateSession(c *gin.Context) {
 	}
 
 	if err := dao.CreateSession(c.Request.Context(), session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建会话失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
 		return
 	}
 
@@ -138,7 +138,7 @@ func ListSessions(c *gin.Context) {
 
 	sessions, _, err := dao.ListSessions(c.Request.Context(), identity.UserID, identity.CompanyID, 100, 0)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "查询会话失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
 		return
 	}
 
@@ -183,7 +183,7 @@ func GetSessionDetail(c *gin.Context) {
 
 	messages, err := dao.ListMessagesBySessionID(c.Request.Context(), sessionID)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "获取历史消息失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
 		return
 	}
 
@@ -277,7 +277,7 @@ func UpdateSession(c *gin.Context) {
 
 	if len(updates) > 0 {
 		if err := dao.UpdateSession(c.Request.Context(), sessionID, updates); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "更新失败: " + err.Error()})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
 			return
 		}
 	}
@@ -318,7 +318,7 @@ func DeleteSession(c *gin.Context) {
 	}
 
 	if err := dao.DeleteSession(c.Request.Context(), sessionID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除会话失败: " + err.Error()})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": failMsg(err)})
 		return
 	}
 

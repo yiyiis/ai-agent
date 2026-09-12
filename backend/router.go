@@ -43,6 +43,10 @@ func RegisterRouter(engine *gin.Engine) {
 	engine.GET("/api/memories/status", api.MemoryStatus)
 	engine.GET("/api/memories", api.ListMemories)
 
+	// 聊天附件上传与下载
+	engine.POST("/api/uploads", api.UploadFile)
+	engine.GET("/api/uploads/:name", api.DownloadAttachment)
+
 	// 兼容中台与管理端接口
 	engine.GET("/api/user/info", TimeOut(time.Second*3), Controller(api.UserInfoDetail))
 	engine.POST("/api/user/password", TimeOut(time.Second*3), Controller(api.UpdatePassword))
