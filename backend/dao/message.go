@@ -65,3 +65,47 @@ func CountMessagesBySessionID(ctx context.Context, sessionID string) (int64, err
 	}
 	return count, nil
 }
+
+// DeleteMessagesFromRowID 删除会话内自增 id >= fromRowID 的全部消息。
+// 编辑历史提问重发时，从被编辑的那条起整段截断。
+func DeleteMessagesFromRowID(ctx context.Context, sessionID string, fromRowID int64) error {
+	m := db.Ctx(ctx).Message
+	if _, err := m.WithContext(ctx).
+		Where(m.SessionID.Eq(sessionID), m.ID.Gte(fromRowID)).
+		Delete(); err != nil {
+		return errors.Join(err, errors.New("截断会话消息失败"), errors.NewMsg("系统异常"))
+	}
+	return nil
+}
+
+// RollbackDanglingTurn 回滚会话末尾的"悬空轮"：最后一个 user 消息之后没有任何
+// 实质回复（既无带正文的 assistant、也无 tool 结果）。服务中断/用户中止都可能
+// 留下这种只有提问没有回答的轮次——读取会话时统一清理，让问题回到输入框重发。
+// 幂等：无事可做时返回 nil。
+func RollbackDanglingTurn(ctx context.Context, sessionID string) *model.Message {
+	msgs, err := ListMessagesBySessionID(ctx, sessionID)
+	if err != nil || len(msgs) == 0 {
+		return nil
+	}
+
+	lastUserIdx, substantive := -1, false
+	for i, m := range msgs {
+		switch {
+		case m.Role == "user":
+			lastUserIdx, substantive = i, false
+		case m.Role == "tool":
+			substantive = true
+		case m.Role == "assistant" && m.Content != "":
+			substantive = true
+		}
+	}
+	if lastUserIdx < 0 || substantive {
+		return nil
+	}
+
+	victim := msgs[lastUserIdx]
+	if err := DeleteMessagesFromRowID(ctx, sessionID, victim.ID); err != nil {
+		return nil
+	}
+	return &victim
+}

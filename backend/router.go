@@ -36,6 +36,8 @@ func RegisterRouter(engine *gin.Engine) {
 
 		// SSE 流式对话长连接
 		sessionGroup.POST("/:id/messages", Controller(api.SendMessageStream))
+		// 编辑历史提问重发（截断其后全部记录再重开一轮）
+		sessionGroup.PUT("/:id/messages/:mid", Controller(api.EditUserMessage))
 	}
 
 	// 技能与记忆模块

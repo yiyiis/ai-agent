@@ -40,6 +40,14 @@ type SessionDetailOut struct {
 	SessionOut
 	Messages        []MessageOut `json:"messages"`
 	EnabledSkillIDs []int64      `json:"enabled_skill_ids"`
+	// 读取时回滚掉的悬空提问（服务中断/中止留下的无回答轮次），
+	// 前端应把它还原到输入框让用户重发
+	PendingQuestion *PendingQuestionOut `json:"pending_question,omitempty"`
+}
+
+type PendingQuestionOut struct {
+	Content     string          `json:"content"`
+	Attachments json.RawMessage `json:"attachments,omitempty"`
 }
 
 type StatusOKResp struct {
@@ -159,7 +167,8 @@ type GetSessionDetailReq struct {
 	ID string `uri:"id"`
 }
 
-// GetSessionDetail 获取会话详情及历史消息 (GET /api/sessions/:id)
+// GetSessionDetail 获取会话详情及历史消息 (GET /api/sessions/:id)。
+// 顺带回滚末尾悬空轮（只有提问没有回答的轮次），被回滚的提问经 pending_question 返回。
 func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDetailOut, error) {
 	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
@@ -169,6 +178,14 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 	session, err := loadOwnedSession(ctx, identity, req.ID)
 	if err != nil {
 		return nil, err
+	}
+
+	var pending *PendingQuestionOut
+	if victim := dao.RollbackDanglingTurn(ctx, req.ID); victim != nil {
+		pending = &PendingQuestionOut{Content: victim.Content}
+		if victim.Attachments != nil && *victim.Attachments != "" {
+			pending.Attachments = json.RawMessage(*victim.Attachments)
+		}
 	}
 
 	messages, err := dao.ListMessagesBySessionID(ctx, req.ID)
@@ -200,6 +217,7 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		SessionOut:      toSessionOut(session),
 		Messages:        msgOuts,
 		EnabledSkillIDs: []int64{},
+		PendingQuestion: pending,
 	}, nil
 }
 

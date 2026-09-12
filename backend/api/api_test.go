@@ -285,6 +285,51 @@ func TestUserIsolation(t *testing.T) {
 	}
 }
 
+func TestRollbackDanglingTurn(t *testing.T) {
+	setupTestServer()
+	ctx := context.Background()
+
+	sid := uuid.NewString()
+	_ = dao.CreateSession(db.WithContext(ctx), &model.Session{
+		SessionID: sid, UserID: 101, CompanyID: 1, Title: "t", Model: "MiniMax-M3",
+	})
+	t.Cleanup(func() { _ = dao.DeleteSession(db.WithContext(ctx), sid) })
+
+	insert := func(role, content string) {
+		_ = dao.CreateMessage(db.WithContext(ctx), &model.Message{
+			MessageID: uuid.NewString(), SessionID: sid, Role: role, Content: content,
+		})
+	}
+
+	// 只有提问：悬空，应回滚并返回该提问
+	insert("user", "悬空的提问")
+	if v := dao.RollbackDanglingTurn(db.WithContext(ctx), sid); v == nil || v.Content != "悬空的提问" {
+		t.Fatalf("应回滚悬空轮并返回提问，got %+v", v)
+	}
+	msgs, _ := dao.ListMessagesBySessionID(db.WithContext(ctx), sid)
+	if len(msgs) != 0 {
+		t.Fatalf("回滚后应无剩余消息，got %d", len(msgs))
+	}
+
+	// 提问 + 带正文的回答：完整轮，不回滚
+	insert("user", "正常提问")
+	insert("assistant", "正常回答")
+	if v := dao.RollbackDanglingTurn(db.WithContext(ctx), sid); v != nil {
+		t.Fatalf("完整轮不应回滚，got %+v", v)
+	}
+
+	// 提问 + 空回答（中断的 tool_calls 轮）：悬空，应回滚
+	insert("user", "第二轮提问")
+	insert("assistant", "")
+	if v := dao.RollbackDanglingTurn(db.WithContext(ctx), sid); v == nil || v.Content != "第二轮提问" {
+		t.Fatalf("空回答轮应回滚，got %+v", v)
+	}
+	msgs, _ = dao.ListMessagesBySessionID(db.WithContext(ctx), sid)
+	if len(msgs) != 2 {
+		t.Fatalf("回滚后应剩 2 条（第一轮），got %d", len(msgs))
+	}
+}
+
 func TestAuthFlow(t *testing.T) {
 	setupTestServer()
 
