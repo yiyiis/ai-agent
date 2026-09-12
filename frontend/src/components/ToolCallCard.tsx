@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { AlertCircle, CheckCircle2, FileText, Loader2, Terminal } from 'lucide-react'
+import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, FileText, Loader2, Terminal } from 'lucide-react'
 import type { Attachment, ToolInvocation } from '../types'
 
 const STATUS_CONFIG = {
@@ -57,11 +57,12 @@ interface Props {
 }
 
 export function ToolCallCard({ invocation, onPreview }: Props) {
-  const { name, arguments: args, status, error, attachments, startedAt } = invocation
+  const { name, arguments: args, status, error, output, attachments, startedAt } = invocation
   const summary = summaryFrom(args)
   const elapsed = useElapsedSeconds(startedAt, status === 'running')
   const slow = status === 'running' && elapsed >= 30
   const statusInfo = STATUS_CONFIG[status]
+  const [outputOpen, setOutputOpen] = useState(false)
 
   return (
     <div className="border border-[#e3e3e3] dark:border-[#3c4043] rounded-2xl bg-[#f0f4f9] dark:bg-[#1e1f20] text-xs overflow-hidden transition-all duration-200 hover:border-[#b4d7fe] dark:hover:border-[#1a73e8]">
@@ -109,6 +110,28 @@ export function ToolCallCard({ invocation, onPreview }: Props) {
               <span className="truncate max-w-[200px]">{a.filename}</span>
             </button>
           ))}
+        </div>
+      )}
+      {output && (
+        <div className="border-t border-[#e3e3e3] dark:border-[#3c4043]">
+          <button
+            type="button"
+            onClick={() => setOutputOpen((o) => !o)}
+            className="flex w-full items-center gap-1.5 px-3.5 py-1.5 text-[11px] text-[#747775] dark:text-[#9aa0a6] hover:bg-[#e8f0fe]/50 dark:hover:bg-[#28292a]/60 transition-colors"
+          >
+            {outputOpen ? (
+              <ChevronDown className="w-3.5 h-3.5" />
+            ) : (
+              <ChevronRight className="w-3.5 h-3.5" />
+            )}
+            <span className="font-medium">输出</span>
+            <span className="ml-auto font-mono tabular-nums">{output.length} 字符</span>
+          </button>
+          {outputOpen && (
+            <pre className="px-3.5 pb-2.5 pt-0.5 text-[11px] font-mono text-[#444746] dark:text-[#c4c7c5] whitespace-pre-wrap break-words leading-relaxed max-h-72 overflow-y-auto scrollbar-thin">
+              {output}
+            </pre>
+          )}
         </div>
       )}
       {status === 'error' && error && (

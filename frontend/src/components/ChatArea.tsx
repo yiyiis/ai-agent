@@ -58,6 +58,21 @@ type Segment =
   | { kind: 'tool'; key: string; invocation: ToolInvocation }
   | { kind: 'notice'; key: string; content: string }
 
+/** 与后端 tools.errorPrefixes 保持一致：工具结果以这些前缀开头时按失败渲染 */
+const TOOL_ERROR_PREFIXES = [
+  '[执行失败]',
+  '[超时]',
+  '[未读取]',
+  '[未改动]',
+  '[参数缺失]',
+  '[参数解析失败]',
+  '[参数超限]',
+]
+
+function isToolError(content: string): boolean {
+  return TOOL_ERROR_PREFIXES.some((p) => content.startsWith(p))
+}
+
 /** 把后端返回的扁平消息列表展开成 UI 渲染段。 */
 function buildSegments(messages: Message[]): Segment[] {
   const segs: Segment[] = []
@@ -101,9 +116,9 @@ function buildSegments(messages: Message[]): Segment[] {
     } else if (m.role === 'tool' && m.tool_call_id) {
       const inv = invocationById.get(m.tool_call_id)
       if (inv) {
-        if (m.content.startsWith('[error]')) {
+        if (isToolError(m.content)) {
           inv.status = 'error'
-          inv.error = m.content.replace(/^\[error\]\s*/, '')
+          inv.error = m.content
         } else {
           inv.status = 'success'
           inv.output = m.content
@@ -114,7 +129,21 @@ function buildSegments(messages: Message[]): Segment[] {
       }
     }
   }
+  // 中断轮遗留的悬挂调用（流式中断/刷新/重启，没有对应 tool 消息）不能永远转圈
+  for (const inv of invocationById.values()) {
+    if (inv.status === 'pending' || inv.status === 'running') {
+      inv.status = 'error'
+      inv.error = '[中断] 该轮对话未完成（连接中断或服务重启）'
+    }
+  }
   return segs
+}
+
+/** 把字符串按 rune 切成 [前 n 个, 剩余]，避免切断代理对 */
+function takeRunes(s: string, n: number): [string, string] {
+  const runes = Array.from(s)
+  if (runes.length <= n) return [s, '']
+  return [runes.slice(0, n).join(''), runes.slice(n).join('')]
 }
 
 export function ChatArea({
@@ -275,6 +304,7 @@ export function ChatArea({
   // 只有真正回到距底 24px 内才重新吸附。程序化滚动不触发这些意图信号。
   const stickRef = useRef(true)
   const lastTopRef = useRef(0)
+  const lastHeightRef = useRef(0)
   const [showJump, setShowJump] = useState(false)
 
   const scrollToBottom = useCallback((smooth = false) => {
@@ -289,16 +319,18 @@ export function ChatArea({
     const box = e.currentTarget
     const maxScrollTop = box.scrollHeight - box.clientHeight
     const distance = maxScrollTop - box.scrollTop
-
-    // 向上滑动：明确是用户意图阅读历史消息，立刻解除自动吸附
-    if (box.scrollTop < lastTopRef.current - 2) {
+    // 视口上方内容收缩（思考面板收起、代码高亮回流、图片加载等）会带动 scrollTop 回落，
+    // 那是布局噪声不是用户意图——只有 scrollHeight 没变时的向上滚才解除吸附，
+    // 否则流式正文一开始（思考面板自动收起）跟随就断了
+    const shrank = box.scrollHeight < lastHeightRef.current
+    if (!shrank && box.scrollTop < lastTopRef.current - 2) {
       stickRef.current = false
     } else if (box.scrollTop > lastTopRef.current + 2 && distance < 24) {
       // 向下滑动且已非常贴近底部，恢复自动吸附
       stickRef.current = true
     }
-
     lastTopRef.current = box.scrollTop
+    lastHeightRef.current = box.scrollHeight
     setShowJump(distance >= 48)
   }, [])
 
@@ -393,6 +425,60 @@ export function ChatArea({
     })
   }
 
+  // ---- 流式打字机平滑 ----
+  // 上游 SSE 的 chunk 是短语级大块，直接渲染会"一段一段蹦"；
+  // 这里把 delta 入队，由 rAF 每帧小口吐字，积压越多每帧吐越多（约 6 帧追平）
+  const pendingTextRef = useRef('')
+  const pendingReasoningRef = useRef('')
+  const rafRef = useRef<number | null>(null)
+  const pumpActiveRef = useRef(false)
+
+  const pumpStream = () => {
+    if (!pumpActiveRef.current) return
+    if (pendingTextRef.current) {
+      const n = Math.max(2, Math.ceil(Array.from(pendingTextRef.current).length / 6))
+      const [take, rest] = takeRunes(pendingTextRef.current, n)
+      pendingTextRef.current = rest
+      updateLastText(take)
+    }
+    if (pendingReasoningRef.current) {
+      const n = Math.max(2, Math.ceil(Array.from(pendingReasoningRef.current).length / 6))
+      const [take, rest] = takeRunes(pendingReasoningRef.current, n)
+      pendingReasoningRef.current = rest
+      setStreamReasoning((prev) => prev + take)
+    }
+    rafRef.current = requestAnimationFrame(pumpStream)
+  }
+
+  const startStreamPump = () => {
+    if (pumpActiveRef.current) return
+    pumpActiveRef.current = true
+    rafRef.current = requestAnimationFrame(pumpStream)
+  }
+
+  // 停泵并把剩余正文缓冲一次性吐完（done/error/停止生成时调用，保证内容完整）；
+  // 思考缓冲直接丢弃——此时实时面板即将被落库的折叠面板替代
+  const stopStreamPump = () => {
+    pumpActiveRef.current = false
+    if (rafRef.current != null) {
+      cancelAnimationFrame(rafRef.current)
+      rafRef.current = null
+    }
+    if (pendingTextRef.current) {
+      updateLastText(pendingTextRef.current)
+      pendingTextRef.current = ''
+    }
+    pendingReasoningRef.current = ''
+  }
+
+  // 组件卸载时停掉 rAF，避免泄漏
+  useEffect(() => {
+    return () => {
+      pumpActiveRef.current = false
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
+    }
+  }, [])
+
   const updateInvocation = (
     id: string,
     patch: Partial<ToolInvocation>,
@@ -423,16 +509,42 @@ export function ChatArea({
 
   const handleEvent = (ev: StreamEvent) => {
     if (ev.type === 'delta') {
+      // 后台标签页 rAF 冻结，打字机泵不转：直接落屏，避免回来时文字停在老位置。
+      // 先冲掉队列残留，保证与直写文本的先后顺序。
+      if (document.hidden) {
+        if (pendingTextRef.current) {
+          updateLastText(pendingTextRef.current)
+          pendingTextRef.current = ''
+        }
+        if (pendingReasoningRef.current) {
+          setStreamReasoning((prev) => prev + pendingReasoningRef.current)
+          pendingReasoningRef.current = ''
+        }
+        if (ev.reasoning) {
+          sawReasoningRef.current = true
+          setStreamReasoning((prev) => prev + ev.reasoning)
+        }
+        if (ev.content) {
+          if (sawReasoningRef.current) setReasoningOpen(false)
+          updateLastText(ev.content)
+        }
+        return
+      }
       if (ev.reasoning) {
         sawReasoningRef.current = true
-        setStreamReasoning((prev) => prev + ev.reasoning)
+        pendingReasoningRef.current += ev.reasoning
       }
       if (ev.content) {
-        updateLastText(ev.content)
+        pendingTextRef.current += ev.content
         // 思考结束、正文开始输出：思考面板自动收起
         if (sawReasoningRef.current) setReasoningOpen(false)
       }
     } else if (ev.type === 'tool_call_start') {
+      // 工具卡片前的文本必须先吐完，否则队列剩余文本会错位到卡片之后
+      if (pendingTextRef.current) {
+        updateLastText(pendingTextRef.current)
+        pendingTextRef.current = ''
+      }
       const startedAt = Date.now()
       updateInvocation(
         ev.id,
@@ -492,7 +604,8 @@ export function ChatArea({
         isUpdate: Boolean(ev.is_update),
       })
     } else if (ev.type === 'done' || ev.type === 'error') {
-      // 流结束：实时思考面板清空，落库的思考过程以折叠面板形式留在回答上方
+      // 流结束：停泵并吐完剩余缓冲，落库的思考过程以折叠面板形式留在回答上方
+      stopStreamPump()
       setStreamReasoning('')
       setReasoningOpen(true)
       sawReasoningRef.current = false
@@ -534,6 +647,9 @@ export function ChatArea({
     setOptimisticUser(optimistic ?? null)
     setStreaming(true)
     setStreamSegs([])
+    pendingTextRef.current = ''
+    pendingReasoningRef.current = ''
+    startStreamPump()
     let sawDone = false
     // 包一层 handleEvent，记录是否见过 done/error——后端任何路径若漏 yield done，
     // 末尾的兜底会补发，确保 setStreaming(false) 一定被触发。
@@ -582,10 +698,12 @@ export function ChatArea({
     setShowJump(false)
     scrollToBottom(false)
 
-    // 新一轮开始：清空上一轮的思考过程展示
+    // 新一轮开始：清空上一轮的思考过程展示与打字机缓冲
     setStreamReasoning('')
     setReasoningOpen(true)
     sawReasoningRef.current = false
+    pendingTextRef.current = ''
+    pendingReasoningRef.current = ''
 
     // 模型切换分隔条：对比上一轮实际使用的模型，真正发生变化才展示。
     // A→B→A 连续切换但中间没有对话时，上一轮与这一轮同为 A，不展示。
