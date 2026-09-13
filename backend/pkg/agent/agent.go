@@ -102,13 +102,13 @@ func saveMessage(ctx context.Context, sessionID, role, content, reasoning string
 		MessageID:  uuid.New().String(),
 		SessionID:  sessionID,
 		Role:       role,
-		Content:    content,
+		Content:    strings.ToValidUTF8(content, ""),
 		ToolCallID: strPtr(toolCallID),
 		Name:       strPtr(name),
 		CreatedAt:  time.Now(),
 	}
 	if reasoning != "" {
-		msg.Reasoning = strPtr(reasoning)
+		msg.Reasoning = strPtr(strings.ToValidUTF8(reasoning, ""))
 	}
 	if len(calls) > 0 {
 		if b, err := json.Marshal(calls); err == nil {

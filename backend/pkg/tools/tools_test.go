@@ -159,3 +159,4 @@ func TestBashToolIfAvailable(t *testing.T) {
 		t.Fatalf("bash output wrong: %s", out)
 	}
 }
+

@@ -359,7 +359,7 @@ func runSubprocess(ctx context.Context, name string, argv []string, dir string) 
 			exitCode = -1
 		}
 	}
-	return stdout.String(), stderr.String(), exitCode, killed
+	return strings.ToValidUTF8(stdout.String(), ""), strings.ToValidUTF8(stderr.String(), ""), exitCode, killed
 }
 
 func randHex(n int) string {

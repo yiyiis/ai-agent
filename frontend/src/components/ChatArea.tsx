@@ -1400,7 +1400,7 @@ export function ChatArea({
           </span>
         </div>
       ) : isEmpty ? (
-        /* Gemini 经典居中欢迎态（忠实还原用户截图） */
+        /* 居中欢迎态 */
         <div className="flex-1 flex flex-col items-center justify-center -mt-10 px-4 max-w-3xl w-full mx-auto animate-fade-in">
           <h1 className="text-3xl md:text-4xl font-normal text-[#1f1f1f] dark:text-[#f1f3f4] tracking-tight mb-8 text-center select-none">
             {userName ? `${userName}，有什么我可以协助你的？` : '你好，有什么我可以协助你的？'}
