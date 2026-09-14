@@ -9,6 +9,7 @@ import {
   ChevronRight,
   Code2,
   Copy,
+  Cpu,
   FileText,
   Lightbulb,
   Loader2,
@@ -76,8 +77,18 @@ interface AssistantTurn {
   kind: 'assistant'
   key: string
   messageId?: string
+  modelName?: string
   processItems: ProcessItem[]
   finalAnswer: string
+}
+
+function getLastAssistantModel(msgs: Message[]): string | null {
+  for (let i = msgs.length - 1; i >= 0; i--) {
+    if (msgs[i].role === 'assistant' && msgs[i].name) {
+      return msgs[i].name ?? null
+    }
+  }
+  return null
 }
 
 type ChatTurn = UserTurn | NoticeTurn | AssistantTurn
@@ -97,10 +108,13 @@ function isToolError(content: string): boolean {
   return TOOL_ERROR_PREFIXES.some((p) => content.startsWith(p))
 }
 
-function buildTurns(messages: Message[]): ChatTurn[] {
+function buildTurns(messages: Message[], models: Model[] = []): ChatTurn[] {
   const turns: ChatTurn[] = []
   const invocationById = new Map<string, ToolInvocation>()
   let currentAssistantTurn: AssistantTurn | null = null
+  let lastAssistantModel: string | null = null
+
+  const nameOf = (id: string) => models.find((m) => m.id === id)?.name ?? id
 
   const closeAssistantTurn = () => {
     if (
@@ -108,6 +122,9 @@ function buildTurns(messages: Message[]): ChatTurn[] {
       (currentAssistantTurn.processItems.length > 0 || currentAssistantTurn.finalAnswer.trim() !== '')
     ) {
       turns.push(currentAssistantTurn)
+      if (currentAssistantTurn.modelName) {
+        lastAssistantModel = currentAssistantTurn.modelName
+      }
     }
     currentAssistantTurn = null
   }
@@ -127,14 +144,47 @@ function buildTurns(messages: Message[]): ChatTurn[] {
       })
     } else if (m.role === 'assistant') {
       if (!currentAssistantTurn) {
+        const curModel = m.name || undefined
+        if (
+          lastAssistantModel &&
+          curModel &&
+          lastAssistantModel !== curModel &&
+          nameOf(lastAssistantModel) !== nameOf(curModel)
+        ) {
+          const hasRecentNotice = turns.some(
+            (t) => t.kind === 'notice' && t.content.includes(nameOf(curModel)),
+          )
+          if (!hasRecentNotice) {
+            const noticeContent = `模型从 ${nameOf(lastAssistantModel)} 切换为 ${nameOf(curModel)}`
+            const lastTurn = turns[turns.length - 1]
+            if (lastTurn && lastTurn.kind === 'user') {
+              turns.splice(turns.length - 1, 0, {
+                kind: 'notice',
+                key: `switch-hist-${m.id}`,
+                content: noticeContent,
+              })
+            } else {
+              turns.push({
+                kind: 'notice',
+                key: `switch-hist-${m.id}`,
+                content: noticeContent,
+              })
+            }
+          }
+        }
+
         currentAssistantTurn = {
           kind: 'assistant',
           key: m.id,
+          modelName: curModel,
           processItems: [],
           finalAnswer: '',
         }
       }
       currentAssistantTurn.messageId = m.id
+      if (m.name && !currentAssistantTurn.modelName) {
+        currentAssistantTurn.modelName = m.name
+      }
 
       // 1. 思考过程（即使没有正文 content，思考过程也必须完整保留与展示）
       if (m.reasoning) {
@@ -400,6 +450,7 @@ function ProcessAccordion({
 function AssistantTurnView({
   processItems,
   finalAnswer,
+  modelName,
   isLastAssistant,
   streaming,
   onRegenerate,
@@ -407,6 +458,7 @@ function AssistantTurnView({
 }: {
   processItems: ProcessItem[]
   finalAnswer: string
+  modelName?: string
   messageId?: string
   isLastAssistant?: boolean
   streaming?: boolean
@@ -434,6 +486,14 @@ function AssistantTurnView({
 
       {/* 回合内容体 */}
       <div className="flex-1 min-w-0 flex flex-col space-y-3">
+        {modelName && (
+          <div className="flex items-center gap-2 select-none -mb-1">
+            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#f0f4f9] dark:bg-[#28292a] text-[#5f6368] dark:text-[#9aa0a6] border border-[#e3e3e3]/70 dark:border-[#3c4043]/70">
+              <Cpu className="w-3 h-3 text-[#1a73e8] dark:text-[#8ab4f8]" />
+              {modelName}
+            </span>
+          </div>
+        )}
         {/* 1. 流式进行中：各步骤平铺呈现，绝无中途突然套大框的视觉突变 */}
         {streaming && (
           <div className="space-y-3">
@@ -679,7 +739,8 @@ export function ChatArea({
             })),
         )
         setCurrentModel(s.model)
-        lastRoundModelRef.current = s.model
+        const lastModel = getLastAssistantModel(s.messages)
+        lastRoundModelRef.current = lastModel || s.model
         // 老后端没有这个字段——按默认开处理
         setAutoSkill(s.auto_skill !== false)
         // 悬空轮回滚还原：服务中断/中止留下的提问回到输入框
@@ -1085,7 +1146,13 @@ export function ChatArea({
       const currentId = activeIdRef.current
       if (currentId) {
         api.getSession(currentId).then((s) => {
-          setMessages(s.messages)
+          setMessages((prev) => {
+            const notices = prev.filter((m) => m.role === 'notice')
+            if (notices.length === 0) return s.messages
+            return [...s.messages, ...notices].sort(
+              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+            )
+          })
           // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
           if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
           setStreamProcessItems([])
@@ -1098,6 +1165,8 @@ export function ChatArea({
             setTitle(s.title)
             onTitleChange()
           }
+          const lastModel = getLastAssistantModel(s.messages)
+          lastRoundModelRef.current = lastModel || s.model
           // 服务端悬空轮回滚兜底：如果外部中断或网络异常导致生成中断，且当前输入框未被填充，还原提问
           if (s.pending_question?.content && !composerValue) {
             restoreComposer(s.pending_question.content, s.pending_question.attachments)
@@ -1156,6 +1225,35 @@ export function ChatArea({
     }
   }
 
+  const nameOf = useCallback(
+    (id: string) => models.find((m) => m.id === id)?.name ?? id,
+    [models],
+  )
+
+  const checkAndInsertModelNotice = useCallback(
+    (fromModel: string | null | undefined, toModel: string) => {
+      if (
+        fromModel &&
+        toModel &&
+        fromModel !== toModel &&
+        nameOf(fromModel) !== nameOf(toModel)
+      ) {
+        setMessages((prev) => [
+          ...prev,
+          {
+            id: `switch-${Date.now()}`,
+            role: 'notice',
+            content: `模型从 ${nameOf(fromModel)} 切换为 ${nameOf(toModel)}`,
+            created_at: new Date().toISOString(),
+          },
+        ])
+        return true
+      }
+      return false
+    },
+    [nameOf],
+  )
+
   const send = async (content: string, attachments: Attachment[] = []) => {
     if (streaming) return
 
@@ -1194,24 +1292,9 @@ export function ChatArea({
     pendingTextRef.current = ''
     pendingReasoningRef.current = ''
 
-    // 模型切换分隔条：对比上一轮实际使用的模型，真正发生变化才展示。
-    // A→B→A 连续切换但中间没有对话时，上一轮与这一轮同为 A，不展示。
-    if (
-      lastRoundModelRef.current &&
-      currentModel &&
-      lastRoundModelRef.current !== currentModel
-    ) {
-      const nameOf = (id: string) => models.find((m) => m.id === id)?.name ?? id
-      setMessages((prev) => [
-        ...prev,
-        {
-          id: `switch-${Date.now()}`,
-          role: 'notice',
-          content: `模型从 ${nameOf(lastRoundModelRef.current)} 切换为 ${nameOf(currentModel)}`,
-          created_at: new Date().toISOString(),
-        },
-      ])
-    }
+    // 模型切换分隔条：对比上一轮实际使用的模型，真正发生变化才展示
+    const prevModel = getLastAssistantModel(messages) || lastRoundModelRef.current
+    checkAndInsertModelNotice(prevModel, currentModel)
     lastRoundModelRef.current = currentModel
 
     if (editingId) return // 就地编辑在气泡内提交，不走底部输入框
@@ -1241,11 +1324,19 @@ export function ChatArea({
       content,
       attachments: attachments?.length ? attachments : [],
     }
+    const editIdx = messages.findIndex((m) => m.id === messageId)
     // 本地立即截断：被编辑的提问及其后全部记录先从界面消失
     setMessages((prev) => {
-      const idx = prev.findIndex((m) => m.id === messageId)
-      return idx === -1 ? prev : prev.slice(0, idx)
+      return editIdx === -1 ? prev : prev.slice(0, editIdx)
     })
+    // 如果编辑的不是第一条提问 (editIdx > 0)，且切换了模型，呈现切换提示
+    if (editIdx > 0) {
+      const prevAssistant = messages.slice(0, editIdx).reverse().find((m) => m.role === 'assistant')
+      const prevModel = prevAssistant?.name || lastRoundModelRef.current
+      checkAndInsertModelNotice(prevModel, currentModel)
+    }
+    lastRoundModelRef.current = currentModel
+
     await runStream(
       (onEvent, opts) =>
         editUserMessage(activeIdRef.current!, messageId, content, onEvent, {
@@ -1283,6 +1374,9 @@ export function ChatArea({
         attachments: lastUser.attachments ?? [],
       }
     }
+    const lastAssistant = [...messages].reverse().find((m) => m.role === 'assistant')
+    const prevModel = lastAssistant?.name || lastRoundModelRef.current
+
     setMessages((prev) => {
       let lastUserIdx = -1
       for (let i = prev.length - 1; i >= 0; i--) {
@@ -1294,12 +1388,17 @@ export function ChatArea({
       if (lastUserIdx === -1) return prev
       return prev.slice(0, lastUserIdx + 1)
     })
+
+    // 重新生成时若切换了模型，立即呈现切换提示
+    checkAndInsertModelNotice(prevModel, currentModel)
+    lastRoundModelRef.current = currentModel
+
     await runStream(
       (onEvent, opts) => regenerateMessage(activeIdRef.current!, onEvent, opts),
     )
   }
 
-  const historyTurns = useMemo(() => buildTurns(messages), [messages])
+  const historyTurns = useMemo(() => buildTurns(messages, models), [messages, models])
   const isEmpty = !loading && historyTurns.length === 0 && !optimisticUser && !streaming
 
   useEffect(() => {
@@ -1523,6 +1622,7 @@ export function ChatArea({
                         key={turn.key}
                         processItems={turn.processItems}
                         finalAnswer={turn.finalAnswer}
+                        modelName={turn.modelName}
                         messageId={turn.messageId}
                         isLastAssistant={turn.messageId === lastAssistantId}
                         streaming={false}
@@ -1545,6 +1645,7 @@ export function ChatArea({
                   <AssistantTurnView
                     processItems={streamProcessItems}
                     finalAnswer={streamFinalText}
+                    modelName={currentModel}
                     streaming={true}
                     onPreview={setPreview}
                   />

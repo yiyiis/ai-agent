@@ -102,19 +102,23 @@ func CreateSession(ctx context.Context, req *CreateSessionReq) (*SessionOut, err
 		title = "新会话"
 	}
 
-	// 防重复创建机制：若用户存在尚无任何消息的空会话，直接复用返回现有空会话
-	latestEmpty, err := dao.GetLatestEmptySession(ctx, identity.UserID)
-	if err == nil && latestEmpty != nil {
-		out := toSessionOut(latestEmpty)
-		return &out, nil
-	}
-
 	modelName := strings.TrimSpace(req.Model)
 	if modelName == "" {
 		modelName = config.GetConfig().LLM.DefaultModel
 	}
 	if modelName == "" {
 		modelName = "MiniMax-Text-01"
+	}
+
+	// 防重复创建机制：若用户存在尚无任何消息的空会话，直接复用返回现有空会话
+	latestEmpty, err := dao.GetLatestEmptySession(ctx, identity.UserID)
+	if err == nil && latestEmpty != nil {
+		if modelName != "" && latestEmpty.Model != modelName {
+			_ = dao.UpdateSession(ctx, latestEmpty.SessionID, map[string]interface{}{"model": modelName})
+			latestEmpty.Model = modelName
+		}
+		out := toSessionOut(latestEmpty)
+		return &out, nil
 	}
 	sysPrompt := ""
 	if req.SystemPrompt != nil {

@@ -434,13 +434,13 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 		if streamErr != nil {
 			note := fmt.Sprintf("[对话因异常中止：%v]", streamErr)
-			text := strings.TrimRight(content, "\n")
-			if text != "" {
-				text += "\n\n" + note
+			var text string
+			if content != "" {
+				text = content + "\n\n[回答因服务异常中断: " + streamErr.Error() + "]"
 			} else {
 				text = note
 			}
-			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
+			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", session.Model, nil)
 			emit(Event{Type: "error", Error: streamErr.Error()})
 			emit(Event{Type: "done", ID: errID})
 			return nil
@@ -449,13 +449,13 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		// finish=length 时 tool_calls 是被截断的半截 JSON，不能执行
 		if finish == "length" {
 			text := content + "\n\n[模型输出被 token 上限截断]"
-			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
+			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", session.Model, nil)
 			emit(Event{Type: "error", Error: "回答被 token 上限截断，可重试或拆小任务"})
 			emit(Event{Type: "done", ID: id})
 			return nil
 		}
 
-		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", "", nil)
+		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", session.Model, nil)
 		if err != nil {
 			return err
 		}
@@ -521,7 +521,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 		if killed {
 			killID, _ := saveMessage(ctx, sessionID, "assistant",
-				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", "", nil)
+				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", session.Model, nil)
 			emit(Event{Type: "error", Error: "已停止：检测到工具死循环（相同调用返回相同结果）"})
 			emit(Event{Type: "done", ID: killID})
 			return nil
