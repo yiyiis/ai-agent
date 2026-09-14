@@ -267,10 +267,12 @@ function ReasoningBlock({
   content,
   defaultOpen = false,
   autoCollapse = false,
+  streaming = false,
 }: {
   content: string
   defaultOpen?: boolean
   autoCollapse?: boolean
+  streaming?: boolean
 }) {
   const [open, setOpen] = useState(defaultOpen)
   const userToggledRef = useRef(false)
@@ -282,25 +284,34 @@ function ReasoningBlock({
   }, [autoCollapse])
 
   return (
-    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden">
+    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] w-full max-w-3xl flex flex-col relative transition-all duration-200">
       <button
         type="button"
         onClick={() => {
           userToggledRef.current = true
           setOpen((o) => !o)
         }}
-        className="flex w-full items-center gap-2 px-3 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+        className={`sticky top-0 z-10 flex w-full items-center gap-2 px-3.5 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] bg-[#f8f9fa]/95 dark:bg-[#1e1f20]/95 backdrop-blur-md hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors rounded-t-xl ${
+          open ? 'border-b border-[#e3e3e3]/50 dark:border-[#3c4043]/50 shadow-sm' : 'rounded-b-xl'
+        }`}
       >
-        <Brain className="w-3.5 h-3.5 text-[#1a73e8] dark:text-[#8ab4f8]" />
-        <span className="font-medium">思考过程</span>
-        {open ? (
-          <ChevronDown className="w-3.5 h-3.5 ml-auto" />
-        ) : (
-          <ChevronRight className="w-3.5 h-3.5 ml-auto" />
-        )}
+        <Brain className="w-3.5 h-3.5 text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
+        <span className="font-medium text-[#444746] dark:text-[#c4c7c5]">思考过程</span>
+        <div className="ml-auto flex items-center gap-1 text-[11px] text-[#747775] dark:text-[#9aa0a6]">
+          <span>{open ? '收起' : '展开'}</span>
+          {open ? (
+            <ChevronDown className="w-3.5 h-3.5" />
+          ) : (
+            <ChevronRight className="w-3.5 h-3.5" />
+          )}
+        </div>
       </button>
       {open && (
-        <div className="px-3 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words border-t border-[#e3e3e3]/50 dark:border-[#3c4043]/50 pt-2 font-mono">
+        <div
+          className={`px-3.5 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words pt-2 font-mono rounded-b-xl ${
+            streaming ? '' : 'max-h-[420px] overflow-y-auto scrollbar-thin'
+          }`}
+        >
           {content}
         </div>
       )}
@@ -359,14 +370,16 @@ function ProcessAccordion({
   }, [items, streaming])
 
   return (
-    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] overflow-hidden transition-all duration-200">
+    <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] transition-all duration-200 w-full max-w-3xl flex flex-col relative">
       <button
         type="button"
         onClick={() => {
           userToggledRef.current = true
           setOpen((o) => !o)
         }}
-        className="flex w-full items-center justify-between px-3.5 py-2.5 text-xs text-[#444746] dark:text-[#c4c7c5] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors"
+        className={`sticky top-0 z-10 flex w-full items-center justify-between px-3.5 py-2.5 text-xs text-[#444746] dark:text-[#c4c7c5] bg-[#f8f9fa]/95 dark:bg-[#1e1f20]/95 backdrop-blur-md hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors rounded-t-xl ${
+          open ? 'border-b border-[#e3e3e3]/70 dark:border-[#3c4043]/70 shadow-sm' : 'rounded-b-xl'
+        }`}
       >
         <div className="flex items-center gap-2 min-w-0 font-medium">
           {runningTool ? (
@@ -403,16 +416,16 @@ function ProcessAccordion({
       </button>
 
       {open && (
-        <div className="px-3.5 py-3 border-t border-[#e3e3e3]/70 dark:border-[#3c4043]/70 space-y-3 bg-[#fdfdfd] dark:bg-[#1b1c1d]">
-          {items.map((item, idx) => {
+        <div className="px-3.5 py-3 space-y-3 bg-[#fdfdfd] dark:bg-[#1b1c1d] rounded-b-xl max-h-[500px] overflow-y-auto scrollbar-thin">
+          {items.map((item) => {
             if (item.kind === 'reasoning') {
-              const isLast = idx === items.length - 1
               return (
                 <ReasoningBlock
                   key={item.key}
                   content={item.content}
-                  defaultOpen={streaming && isLast}
-                  autoCollapse={streaming ? !isLast : false}
+                  defaultOpen={false}
+                  autoCollapse={true}
+                  streaming={false}
                 />
               )
             }
@@ -484,16 +497,18 @@ function AssistantTurnView({
       <div className="flex-1 min-w-0 flex flex-col space-y-3">
         {/* 1. 流式进行中：各步骤平铺呈现，绝无中途突然套大框的视觉突变 */}
         {streaming && (
-          <div className="space-y-3">
+          <div className="space-y-3 w-full max-w-3xl">
             {processItems.map((item, idx) => {
               if (item.kind === 'reasoning') {
                 const isLast = idx === processItems.length - 1
+                const autoCollapse = !isLast || hasAnswer
                 return (
                   <ReasoningBlock
                     key={item.key}
                     content={item.content}
-                    defaultOpen={isLast}
-                    autoCollapse={!isLast}
+                    defaultOpen={isLast && !hasAnswer}
+                    autoCollapse={autoCollapse}
+                    streaming={streaming && !hasAnswer}
                   />
                 )
               }
@@ -524,8 +539,8 @@ function AssistantTurnView({
           </div>
         )}
 
-        {/* 2. 流式结束后：若调用过工具，将所有中间步骤归纳折叠入卡片（最后才框起来） */}
-        {!streaming && hasTools && (
+        {/* 2. 流式结束后：若调用过工具或包含阶段说明，将所有中间步骤归纳折叠入卡片（最后才框起来） */}
+        {!streaming && (hasTools || processItems.some((i) => i.kind === 'step_note')) && (
           <ProcessAccordion
             items={processItems}
             streaming={false}
@@ -534,9 +549,10 @@ function AssistantTurnView({
           />
         )}
 
-        {/* 3. 流式结束后：若未调用工具但有思考过程，按轻量化折叠条展示 */}
+        {/* 3. 流式结束后：纯思考过程（无工具及阶段说明），按轻量化折叠条展示 */}
         {!streaming &&
           !hasTools &&
+          !processItems.some((i) => i.kind === 'step_note') &&
           processItems.map((item) => {
             if (item.kind === 'reasoning') {
               return (
@@ -545,6 +561,7 @@ function AssistantTurnView({
                   content={item.content}
                   defaultOpen={false}
                   autoCollapse={true}
+                  streaming={false}
                 />
               )
             }
