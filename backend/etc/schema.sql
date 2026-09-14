@@ -124,7 +124,7 @@ CREATE TABLE `api_keys` (
   `is_active` tinyint(1) NOT NULL DEFAULT '1',
   `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
   PRIMARY KEY (`id`),
-  UNIQUE KEY `idx_api_keys_key` (`key`),
+  UNIQUE KEY `idx_api_keys_key` (`api_key`),
   KEY `idx_api_keys_company_id` (`company_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
