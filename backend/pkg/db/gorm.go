@@ -11,7 +11,7 @@ import (
 var defaultQ *query.Query
 
 // InitDb 初始化数据库连接与默认查询门面
-// 表结构由 etc/schema.sql 维护并先行建表（DB-first），此处只负责连接
+// 表结构由 deploy/sql/schema.sql 维护并先行建表（DB-first），此处只负责连接
 func InitDb(conf Config) {
 	if defaultQ != nil {
 		panic("全局db只能初始化一次")

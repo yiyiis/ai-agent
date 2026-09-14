@@ -1,5 +1,5 @@
 // GORM GEN 代码生成器（DB-first 流程）
-// 表结构由 etc/schema.sql 维护并先行建表，本程序从库逆向生成 model 与强类型 query。
+// 表结构由 deploy/sql/schema.sql 维护并先行建表，本程序从库逆向生成 model 与强类型 query。
 // 运行（在 dal 目录下）：go run .
 package main
 

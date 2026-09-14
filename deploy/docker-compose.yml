@@ -11,7 +11,7 @@ services:
       - "${DB_PORT:-3306}:3306"
     volumes:
       - mysql-data:/var/lib/mysql
-      - ../backend/etc/schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
     healthcheck:
       test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-p${MYSQL_ROOT_PASSWORD}"]
       interval: 5s

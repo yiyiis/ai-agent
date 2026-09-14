@@ -82,10 +82,10 @@ go mod tidy
 
 ### 2. 初始化数据库
 
-表结构以 `etc/schema.sql` 为唯一源头（DB-first）：修改表结构先改本文件，再执行建表：
+表结构以 `deploy/sql/schema.sql` 为唯一源头（DB-first）：修改表结构先改本文件，再执行建表：
 
 ```bash
-docker exec -i ai-agent-mysql mysql -uroot -p"你的密码" --default-character-set=utf8mb4 < backend/etc/schema.sql
+docker exec -i ai-agent-mysql mysql -uroot -p"你的密码" --default-character-set=utf8mb4 < deploy/sql/schema.sql
 ```
 
 > 注意：脚本包含 `DROP TABLE` 与 `USE` 语句，执行会清空目标库中的表数据，执行前请确认连接的库名。
