@@ -15,7 +15,7 @@ ARG CADDY_IMAGE=caddy:2-alpine
 
 FROM ${NODE_IMAGE} AS builder
 
-ARG NPM_REGISTRY=https://registry.npmjs.org
+ARG NPM_REGISTRY=https://registry.npmmirror.com
 
 WORKDIR /src
 

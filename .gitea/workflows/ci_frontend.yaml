@@ -1,0 +1,86 @@
+# 前端流水线：只在 frontend/ 变动时触发，构建 → 推 Gitea Registry → SSH 远程只重启 frontend。
+# 后端改动不会走到这里。
+name: CI Frontend
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'frontend/**'
+      - '.gitea/workflows/ci_frontend.yaml'
+
+env:
+  REGISTRY: 43.138.247.132:3000
+  IMAGE: 43.138.247.132:3000/qqlhjt/ai-agent-frontend
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Docker API Version
+        run: echo "DOCKER_API_VERSION=1.43" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: http://43.138.247.132:3000/mirroractions/checkout@main
+        with:
+          persist-credentials: false
+
+      - name: Compute tags
+        run: echo "SHA=$(echo ${{ github.sha }} | cut -c1-12)" >> $GITHUB_ENV
+
+      - name: Setup Docker Buildx
+        uses: http://43.138.247.132:3000/mirroractions/setup-buildx-action@master
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["https://mirror.ccs.tencentyun.com"]
+            [registry."${{ env.REGISTRY }}"]
+              http = true
+              insecure = true
+
+      - name: Log in to Gitea Registry
+        uses: http://43.138.247.132:3000/mirroractions/login-action@master
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        uses: http://43.138.247.132:3000/mirroractions/build-push-action@master
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:main
+            ${{ env.IMAGE }}:${{ env.SHA }}
+
+      - name: Deploy to Server
+        uses: http://43.138.247.132:3000/mirroractions/ssh-action@master
+        if: ${{ secrets.SERVER_HOST != '' }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+            if [ ! -d "/data/ai-agent/deploy" ]; then
+              echo "⚠️ 部署目录 /data/ai-agent/deploy 尚未就绪（首次发布请先在服务器执行 git clone 并配置 .env），跳过本次容器重启！"
+              exit 0
+            fi
+            cd /data/ai-agent/deploy
+            docker login ${{ env.REGISTRY }} \
+              -u ${{ secrets.REGISTRY_USERNAME }} -p ${{ secrets.REGISTRY_PASSWORD }}
+
+            touch .env
+            if grep -q "^FRONTEND_TAG=" .env; then
+              sed -i "s|^FRONTEND_TAG=.*|FRONTEND_TAG=${{ env.SHA }}|" .env
+            else
+              echo "FRONTEND_TAG=${{ env.SHA }}" >> .env
+            fi
+
+            docker compose pull frontend
+            docker compose up -d frontend
+
+            docker compose ps frontend
+            docker image prune -f

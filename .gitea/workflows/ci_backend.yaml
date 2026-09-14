@@ -1,0 +1,89 @@
+# 后端流水线：只在 backend/ 变动时触发，构建 → 推 Gitea Registry → SSH 远程只重启 backend。
+# 前端改动不会走到这里，因此修改页面不会重启后端、不会打断在途 Agent 对话。
+name: CI Backend
+
+on:
+  push:
+    branches: [main, master]
+    paths:
+      - 'backend/**'
+      - '.gitea/workflows/ci_backend.yaml'
+
+env:
+  REGISTRY: 43.138.247.132:3000
+  IMAGE: 43.138.247.132:3000/qqlhjt/ai-agent-backend
+
+jobs:
+  build-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set Docker API Version
+        run: echo "DOCKER_API_VERSION=1.43" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: http://43.138.247.132:3000/mirroractions/checkout@main
+        with:
+          persist-credentials: false
+
+      # 提交号做不可变 tag：main 会被每次构建覆盖，SHA 用于回滚
+      - name: Compute tags
+        run: echo "SHA=$(echo ${{ github.sha }} | cut -c1-12)" >> $GITHUB_ENV
+
+      - name: Setup Docker Buildx
+        uses: http://43.138.247.132:3000/mirroractions/setup-buildx-action@master
+        with:
+          buildkitd-config-inline: |
+            [registry."docker.io"]
+              mirrors = ["https://mirror.ccs.tencentyun.com"]
+            [registry."${{ env.REGISTRY }}"]
+              http = true
+              insecure = true
+
+      - name: Log in to Gitea Registry
+        uses: http://43.138.247.132:3000/mirroractions/login-action@master
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
+
+      - name: Build and push
+        uses: http://43.138.247.132:3000/mirroractions/build-push-action@master
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:main
+            ${{ env.IMAGE }}:${{ env.SHA }}
+
+      - name: Deploy to Server
+        uses: http://43.138.247.132:3000/mirroractions/ssh-action@master
+        if: ${{ secrets.SERVER_HOST != '' }}
+        with:
+          host: ${{ secrets.SERVER_HOST }}
+          username: ${{ secrets.SERVER_USER }}
+          key: ${{ secrets.SERVER_SSH_KEY }}
+          script: |
+            set -e
+            if [ ! -d "/data/ai-agent/deploy" ]; then
+              echo "⚠️ 部署目录 /data/ai-agent/deploy 尚未就绪（首次发布请先在服务器执行 git clone 并配置 .env），跳过本次容器重启！"
+              exit 0
+            fi
+            cd /data/ai-agent/deploy
+            docker login ${{ env.REGISTRY }} \
+              -u ${{ secrets.REGISTRY_USERNAME }} -p ${{ secrets.REGISTRY_PASSWORD }}
+
+            # 记录本次部署的版本 SHA，方便随时在服务器上回滚
+            touch .env
+            if grep -q "^BACKEND_TAG=" .env; then
+              sed -i "s|^BACKEND_TAG=.*|BACKEND_TAG=${{ env.SHA }}|" .env
+            else
+              echo "BACKEND_TAG=${{ env.SHA }}" >> .env
+            fi
+
+            docker compose pull backend
+            # 只重建 backend 容器，前端与数据库不受任何影响
+            docker compose up -d backend
+
+            docker compose ps backend
+            docker image prune -f
