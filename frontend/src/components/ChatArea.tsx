@@ -265,38 +265,34 @@ function buildTurns(messages: Message[], models: Model[] = []): ChatTurn[] {
 
 function ReasoningBlock({
   content,
-  defaultOpen = false,
-  autoCollapse = false,
-  streaming = false,
+  isThinking = false,
 }: {
   content: string
-  defaultOpen?: boolean
-  autoCollapse?: boolean
-  streaming?: boolean
+  isThinking?: boolean
 }) {
-  const [open, setOpen] = useState(defaultOpen)
-  const userToggledRef = useRef(false)
-
-  useEffect(() => {
-    if (autoCollapse && !userToggledRef.current) {
-      setOpen(false)
-    }
-  }, [autoCollapse])
+  // userExpanded: null 表示跟随系统自动逻辑；true/false 表示用户手动点击了展开/收起
+  const [userExpanded, setUserExpanded] = useState<boolean | null>(null)
+  const open = userExpanded !== null ? userExpanded : isThinking
 
   return (
     <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] w-full max-w-3xl flex flex-col relative transition-all duration-200">
       <button
         type="button"
         onClick={() => {
-          userToggledRef.current = true
-          setOpen((o) => !o)
+          setUserExpanded(!open)
         }}
         className={`sticky top-0 z-10 flex w-full items-center gap-2 px-3.5 py-2 text-xs text-[#747775] dark:text-[#9aa0a6] bg-[#f8f9fa]/95 dark:bg-[#1e1f20]/95 backdrop-blur-md hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] transition-colors rounded-t-xl ${
           open ? 'border-b border-[#e3e3e3]/50 dark:border-[#3c4043]/50 shadow-sm' : 'rounded-b-xl'
         }`}
       >
-        <Brain className="w-3.5 h-3.5 text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
-        <span className="font-medium text-[#444746] dark:text-[#c4c7c5]">思考过程</span>
+        {isThinking ? (
+          <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
+        ) : (
+          <Brain className="w-3.5 h-3.5 text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
+        )}
+        <span className="font-medium text-[#444746] dark:text-[#c4c7c5]">
+          {isThinking ? '正在深度思考…' : '思考过程'}
+        </span>
         <div className="ml-auto flex items-center gap-1 text-[11px] text-[#747775] dark:text-[#9aa0a6]">
           <span>{open ? '收起' : '展开'}</span>
           {open ? (
@@ -309,7 +305,7 @@ function ReasoningBlock({
       {open && (
         <div
           className={`px-3.5 pb-2.5 text-xs leading-relaxed text-[#747775] dark:text-[#9aa0a6] whitespace-pre-wrap break-words pt-2 font-mono rounded-b-xl ${
-            streaming ? '' : 'max-h-[420px] overflow-y-auto scrollbar-thin'
+            isThinking ? '' : 'max-h-[420px] overflow-y-auto scrollbar-thin'
           }`}
         >
           {content}
@@ -423,9 +419,7 @@ function ProcessAccordion({
                 <ReasoningBlock
                   key={item.key}
                   content={item.content}
-                  defaultOpen={false}
-                  autoCollapse={true}
-                  streaming={false}
+                  isThinking={false}
                 />
               )
             }
@@ -501,14 +495,12 @@ function AssistantTurnView({
             {processItems.map((item, idx) => {
               if (item.kind === 'reasoning') {
                 const isLast = idx === processItems.length - 1
-                const autoCollapse = !isLast || hasAnswer
+                const isThinking = streaming && isLast && !hasAnswer
                 return (
                   <ReasoningBlock
                     key={item.key}
                     content={item.content}
-                    defaultOpen={isLast && !hasAnswer}
-                    autoCollapse={autoCollapse}
-                    streaming={streaming && !hasAnswer}
+                    isThinking={isThinking}
                   />
                 )
               }
@@ -559,9 +551,7 @@ function AssistantTurnView({
                 <ReasoningBlock
                   key={item.key}
                   content={item.content}
-                  defaultOpen={false}
-                  autoCollapse={true}
-                  streaming={false}
+                  isThinking={false}
                 />
               )
             }
