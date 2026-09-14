@@ -9,7 +9,6 @@ import {
   ChevronRight,
   Code2,
   Copy,
-  Cpu,
   FileText,
   Lightbulb,
   Loader2,
@@ -450,7 +449,6 @@ function ProcessAccordion({
 function AssistantTurnView({
   processItems,
   finalAnswer,
-  modelName,
   isLastAssistant,
   streaming,
   onRegenerate,
@@ -458,8 +456,6 @@ function AssistantTurnView({
 }: {
   processItems: ProcessItem[]
   finalAnswer: string
-  modelName?: string
-  messageId?: string
   isLastAssistant?: boolean
   streaming?: boolean
   onRegenerate?: () => void
@@ -486,14 +482,6 @@ function AssistantTurnView({
 
       {/* 回合内容体 */}
       <div className="flex-1 min-w-0 flex flex-col space-y-3">
-        {modelName && (
-          <div className="flex items-center gap-2 select-none -mb-1">
-            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-[#f0f4f9] dark:bg-[#28292a] text-[#5f6368] dark:text-[#9aa0a6] border border-[#e3e3e3]/70 dark:border-[#3c4043]/70">
-              <Cpu className="w-3 h-3 text-[#1a73e8] dark:text-[#8ab4f8]" />
-              {modelName}
-            </span>
-          </div>
-        )}
         {/* 1. 流式进行中：各步骤平铺呈现，绝无中途突然套大框的视觉突变 */}
         {streaming && (
           <div className="space-y-3">
@@ -1622,8 +1610,6 @@ export function ChatArea({
                         key={turn.key}
                         processItems={turn.processItems}
                         finalAnswer={turn.finalAnswer}
-                        modelName={turn.modelName}
-                        messageId={turn.messageId}
                         isLastAssistant={turn.messageId === lastAssistantId}
                         streaming={false}
                         onRegenerate={regenerate}
@@ -1645,7 +1631,6 @@ export function ChatArea({
                   <AssistantTurnView
                     processItems={streamProcessItems}
                     finalAnswer={streamFinalText}
-                    modelName={currentModel}
                     streaming={true}
                     onPreview={setPreview}
                   />
