@@ -96,8 +96,11 @@ type Attachment struct {
 	ContentType string `json:"content_type,omitempty"`
 }
 
-// saveMessage 落库一条消息（含工具调用结构），返回 message_id
+// saveMessage 落库一条消息（含工具调用结构），返回 message_id。
+// 落库不随 Turn 取消而中断——中止/断连时已生成的部分内容仍要持久化，
+// 故剥离 ctx 的取消信号（保留注入的值，如 DB 连接）。
 func saveMessage(ctx context.Context, sessionID, role, content, reasoning string, calls []savedCall, toolCallID, name string, attachments []Attachment) (string, error) {
+	ctx = context.WithoutCancel(ctx)
 	msg := &model.Message{
 		MessageID:  uuid.New().String(),
 		SessionID:  sessionID,
@@ -385,7 +388,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	}
 	emit(Event{Type: "user_message_id", ID: userMsgID})
 	if (session.Title == "新会话" || session.Title == "") && autoTitle != "" {
-		_ = dao.UpdateSessionTitle(ctx, sessionID, autoTitle)
+		_ = dao.UpdateSessionTitle(context.WithoutCancel(ctx), sessionID, autoTitle)
 	}
 
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
@@ -440,7 +443,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			} else {
 				text = note
 			}
-			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", session.Model, nil)
+			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
 			emit(Event{Type: "error", Error: streamErr.Error()})
 			emit(Event{Type: "done", ID: errID})
 			return nil
@@ -449,13 +452,13 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		// finish=length 时 tool_calls 是被截断的半截 JSON，不能执行
 		if finish == "length" {
 			text := content + "\n\n[模型输出被 token 上限截断]"
-			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", session.Model, nil)
+			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
 			emit(Event{Type: "error", Error: "回答被 token 上限截断，可重试或拆小任务"})
 			emit(Event{Type: "done", ID: id})
 			return nil
 		}
 
-		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", session.Model, nil)
+		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", "", nil)
 		if err != nil {
 			return err
 		}
@@ -521,7 +524,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 		if killed {
 			killID, _ := saveMessage(ctx, sessionID, "assistant",
-				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", session.Model, nil)
+				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", "", nil)
 			emit(Event{Type: "error", Error: "已停止：检测到工具死循环（相同调用返回相同结果）"})
 			emit(Event{Type: "done", ID: killID})
 			return nil
