@@ -143,9 +143,9 @@ timeline
 - [x] 工具调用前端协议扩展：`tool_call_start`、`tool_call_result`、`tool_call_error`
 
 ### 阶段三：异步执行流与会话解耦 (Decoupled Background Turn Runner)
-- [ ] 核心执行与连接解耦：Turn 跑在后台 Goroutine 中，客户端刷新或掉线任务不中断
-- [ ] 环形事件缓冲区 (Ring Buffer Replay)：单轮 3000 条事件滑动保留，支持重连从指定 `seq` 补播
-- [ ] 会话级互斥并发锁：保障单会话时序一致性，提供优雅终止（Abort）与状态恢复
+- [x] 核心执行与连接解耦：Turn 跑在后台 Goroutine 中，客户端刷新或掉线任务不中断
+- [x] 环形事件缓冲区 (Ring Buffer Replay)：单轮 3000 条事件滑动保留，支持重连从指定 `seq` 补播
+- [x] 会话级互斥并发锁：保障单会话时序一致性，提供优雅终止（Abort）与状态恢复
 
 ### 阶段四：沙箱隔离与产物管理 (Isolated Sandbox & Artifacts)
 - [ ] 多驱动沙箱架构：本地隔离运行与 Docker Container 容器沙箱无缝切换
@@ -282,21 +282,32 @@ parameters:
 
 ### 6.1 SSE 实时流式事件协议
 
-客户端与服务端流式通道通过标准 `text/event-stream` 进行交互。每个事件均为标准单行 JSON：
+客户端与服务端流式通道通过标准 `text/event-stream` 进行交互。每个事件均为标准单行 JSON，
+并携带 `id: {seq}` 单调递增游标（断线重连时携带最后游标 +1 作为 `from_seq` 补播）；
+空闲超过 15 秒发送 `: ping` 注释行心跳，防止反向代理掐断空闲连接：
 
 ```text
 data: {"type": "user_message_id", "id": "msg_01h7..."}
 
+id: 1
 data: {"type": "delta", "content": "好的，正在为您分析代码..."}
 
+id: 2
 data: {"type": "tool_call_start", "id": "call_123", "name": "read_file", "arguments": "{\"path\": \"main.go\"}"}
 
+id: 3
 data: {"type": "tool_call_result", "id": "call_123", "output": "package main..."}
 
+id: 4
 data: {"type": "delta", "content": "根据 main.go 的内容..."}
 
+id: 5
 data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "completion_tokens": 48}}
 ```
+
+对话轮次由后台 Turn 引擎独立执行，SSE 连接仅作为订阅者：刷新或断线不影响执行，
+`GET /api/sessions/:id/stream?from_seq=N` 从环形缓冲（单轮 3000 条滑动保留）补播丢失事件；
+`POST /api/sessions/:id/messages/stop` 优雅中止当前轮次（已生成的部分回答照常落库）。
 
 #### 事件类型映射表
 
@@ -322,7 +333,9 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 | `GET` | `/api/sessions/:id` | 获取特定会话详情及完整历史消息 |
 | `PATCH` | `/api/sessions/:id` | 修改会话标题 |
 | `DELETE` | `/api/sessions/:id` | 删除会话及级联清理历史记录与摘要 |
-| `POST` | `/api/sessions/:id/messages` | 发起流式对话（SSE 协议长连接） |
+| `POST` | `/api/sessions/:id/messages` | 发起流式对话（SSE 协议长连接，轮次在后台 Turn 引擎执行） |
+| `POST` | `/api/sessions/:id/messages/stop` | 优雅中止该会话正在进行的轮次（幂等） |
+| `GET` | `/api/sessions/:id/stream` | 断线重连补播（`from_seq` 游标；`live_only=1` 仅接在跑轮次，无可接返回 204） |
 | `GET` | `/api/models` | 获取当前环境支持的模型矩阵与默认窗口上限 |
 | `GET` | `/api/memories` | 检索与管理长期记忆实体 |
 | `POST` | `/api/v1/skill-runs` | 开放异步 Skill 任务提交接口（API Key 鉴权） |

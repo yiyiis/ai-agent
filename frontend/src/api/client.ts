@@ -372,13 +372,16 @@ export type StreamEvent =
 
 interface StreamOptions {
   signal?: AbortSignal
+  /** 每收到一帧带 `id:` 游标的 SSE 事件后回调（断线重连时携带 seq+1 作为 from_seq） */
+  onSeq?: (seq: number) => void
 }
 
 async function consumeStream(
   res: Response,
   onEvent: (ev: StreamEvent) => void,
-  signal?: AbortSignal,
+  opts?: StreamOptions,
 ) {
+  const signal = opts?.signal
   if (!res.ok || !res.body) {
     onEvent({ type: 'error', message: `HTTP ${res.status}` })
     return
@@ -400,12 +403,22 @@ async function consumeStream(
       buffer += decoder.decode(value, { stream: true })
       const lines = buffer.split('\n')
       buffer = lines.pop() || ''
+      let pendingSeq: number | null = null
       for (const raw of lines) {
+        // `id: N` 是紧随其后的 data 帧的游标；`: ping` 等注释行是心跳，均不携带事件
+        if (raw.startsWith('id: ')) {
+          pendingSeq = Number(raw.slice(4))
+          continue
+        }
         if (!raw.startsWith('data: ')) continue
         try {
           onEvent(JSON.parse(raw.slice(6)) as StreamEvent)
         } catch {
           // 忽略解析失败的片段
+        }
+        if (pendingSeq != null) {
+          opts?.onSeq?.(pendingSeq)
+          pendingSeq = null
         }
       }
     }
@@ -434,7 +447,7 @@ export async function streamMessage(
     signal: opts?.signal,
   })
   if (res.status === 401 && onUnauthorized) onUnauthorized()
-  await consumeStream(res, onEvent, opts?.signal)
+  await consumeStream(res, onEvent, opts)
 }
 
 export async function editUserMessage(
@@ -457,7 +470,7 @@ export async function editUserMessage(
     },
   )
   if (res.status === 401 && onUnauthorized) onUnauthorized()
-  await consumeStream(res, onEvent, opts?.signal)
+  await consumeStream(res, onEvent, opts)
 }
 
 export async function regenerateMessage(
@@ -475,6 +488,63 @@ export async function regenerateMessage(
     },
   )
   if (res.status === 401 && onUnauthorized) onUnauthorized()
-  await consumeStream(res, onEvent, opts?.signal)
+  await consumeStream(res, onEvent, opts)
+}
+
+/**
+ * 断线重连补播：携带 from_seq（上次收到的最后游标 +1）重新接上正在跑
+ * （或刚跑完仍在保留期内）的那一轮，从服务端环形缓冲补播丢失事件。
+ * 返回 false 表示当前没有可接的轮次（HTTP 204）。
+ */
+export async function attachStream(
+  sessionId: string,
+  fromSeq: number,
+  onEvent: (ev: StreamEvent) => void,
+  opts?: StreamOptions,
+): Promise<boolean> {
+  const res = await fetch(
+    `${BASE}/sessions/${sessionId}/stream?from_seq=${fromSeq}`,
+    {
+      headers: authHeaders(),
+      credentials: 'include',
+      signal: opts?.signal,
+    },
+  )
+  if (res.status === 401 && onUnauthorized) onUnauthorized()
+  if (res.status === 204) return false
+  await consumeStream(res, onEvent, opts)
+  return true
+}
+
+/** 探测会话是否有正在执行的轮次：只看响应头（204=没有），立刻放弃连接。
+ *  live_only 语义：刚结束但仍在保留期内的轮次不算（避免整轮重放） */
+export async function hasActiveStream(sessionId: string): Promise<boolean> {
+  const ctrl = new AbortController()
+  try {
+    const res = await fetch(
+      `${BASE}/sessions/${sessionId}/stream?from_seq=0&live_only=1`,
+      {
+        headers: authHeaders(),
+        credentials: 'include',
+        signal: ctrl.signal,
+      },
+    )
+    ctrl.abort()
+    return res.ok && res.status !== 204
+  } catch {
+    return false
+  }
+}
+
+/** 优雅中止当前轮次：后台 Turn 不随断连终止，停止必须显式调用此端点 */
+export async function stopTurn(sessionId: string): Promise<void> {
+  const res = await fetch(`${BASE}/sessions/${sessionId}/messages/stop`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', ...authHeaders() },
+    credentials: 'include',
+  })
+  if (res.status === 401 && onUnauthorized) onUnauthorized()
+  if (res.status === 204) return
+  if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
 }
 

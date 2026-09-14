@@ -40,6 +40,10 @@ func RegisterRouter(engine *gin.Engine) {
 		sessionGroup.POST("/:id/messages/regenerate", Controller(api.RegenerateLastMessage))
 		// 编辑历史提问重发（截断其后全部记录再重开一轮）
 		sessionGroup.PUT("/:id/messages/:mid", Controller(api.EditUserMessage))
+		// 优雅中止当前回答（后台 Turn 不随断连终止，需显式中止）
+		sessionGroup.POST("/:id/messages/stop", Controller(api.StopSessionTurn))
+		// 断线重连补播（携带 from_seq 从环形缓冲续传）
+		sessionGroup.GET("/:id/stream", Controller(api.AttachSessionStream))
 	}
 
 	// 技能与记忆模块

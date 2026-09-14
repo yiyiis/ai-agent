@@ -185,10 +185,14 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 	}
 
 	var pending *PendingQuestionOut
-	if victim := dao.RollbackDanglingTurn(ctx, req.ID); victim != nil {
-		pending = &PendingQuestionOut{Content: victim.Content}
-		if victim.Attachments != nil && *victim.Attachments != "" {
-			pending.Attachments = json.RawMessage(*victim.Attachments)
+	// 后台 Turn 正在跑时，"末尾只有提问没有回答"是本轮尚未产出而非悬空轮，
+	// 不能回滚（否则会把在跑轮次刚落库的提问删掉）
+	if !turnRegistry.Running(req.ID) {
+		if victim := dao.RollbackDanglingTurn(ctx, req.ID); victim != nil {
+			pending = &PendingQuestionOut{Content: victim.Content}
+			if victim.Attachments != nil && *victim.Attachments != "" {
+				pending.Attachments = json.RawMessage(*victim.Attachments)
+			}
 		}
 	}
 
@@ -288,6 +292,9 @@ func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, e
 	if _, err := loadOwnedSession(ctx, identity, req.ID); err != nil {
 		return nil, err
 	}
+
+	// 先中止该会话在跑的后台 Turn，避免级联删除与后台写入竞争
+	turnRegistry.Abort(req.ID)
 
 	if err := dao.DeleteSession(ctx, req.ID); err != nil {
 		return nil, err

@@ -21,8 +21,11 @@ import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
 import {
   api,
+  attachStream,
   editUserMessage,
+  hasActiveStream,
   regenerateMessage,
+  stopTurn,
   streamMessage,
   type StreamEvent,
 } from '../api/client'
@@ -661,6 +664,8 @@ export function ChatArea({
   const scrollRef = useRef<HTMLDivElement>(null)
   const itemCounterRef = useRef(0)
   const abortRef = useRef<AbortController | null>(null)
+  // 当前流最后收到的 SSE 事件游标（id: N）；断线重连/停止等待时携带 +1 作为 from_seq
+  const lastSeqRef = useRef<number>(-1)
 
   // 停止生成 / 异常中断时把提问还原到输入框的状态
   const lastAskRef = useRef<{ content: string; attachments: Attachment[] } | null>(null)
@@ -745,6 +750,12 @@ export function ChatArea({
           if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
           noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
         }
+        // 页面刷新/切回会话：后台 Turn 不随断连终止——探测是否有正在进行的
+        // 回答，有则从 seq 0 重连续播（整轮缓冲重放，重建流式视图）
+        hasActiveStream(sessionId).then((active) => {
+          if (cancelled || !active) return
+          void runStream((onEvent, opts) => attachStream(sessionId, 0, onEvent, opts))
+        })
       })
       .catch((err) => {
         if (cancelled) return
@@ -1025,6 +1036,41 @@ export function ChatArea({
     })
   }
 
+  // 轮次结束后的终态刷新：从服务端拉取落库结果，收敛所有流式 UI 状态
+  const refreshAfterTurn = (currentId: string) => {
+    api.getSession(currentId).then((s) => {
+      setMessages((prev) => {
+        const notices = prev.filter((m) => m.role === 'notice')
+        if (notices.length === 0) return s.messages
+        return [...s.messages, ...notices].sort(
+          (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
+        )
+      })
+      // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
+      if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
+      setStreamProcessItems([])
+      setStreamFinalText('')
+      streamFinalTextRef.current = ''
+      setOptimisticUser(null)
+      setStreaming(false)
+      abortRef.current = null
+      if (s.title !== title) {
+        setTitle(s.title)
+        onTitleChange()
+      }
+      const lastModel = getLastAssistantModel(s.messages)
+      lastRoundModelRef.current = lastModel || s.model
+      // 服务端悬空轮回滚兜底：中止得太早没生成任何实质回答时，还原提问到输入框
+      if (s.pending_question?.content && !composerValue) {
+        restoreComposer(s.pending_question.content, s.pending_question.attachments)
+        setNoticeBanner('上一轮对话未完成，提问已还原到输入框')
+        if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+        noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
+      }
+      lastAskRef.current = null
+    })
+  }
+
   const handleEvent = (ev: StreamEvent) => {
     if (ev.type === 'delta') {
       // 后台标签页 rAF 冻结，打字机泵不转：直接落屏，避免回来时文字停在老位置。
@@ -1140,37 +1186,7 @@ export function ChatArea({
       stopStreamPump()
       const currentId = activeIdRef.current
       if (currentId) {
-        api.getSession(currentId).then((s) => {
-          setMessages((prev) => {
-            const notices = prev.filter((m) => m.role === 'notice')
-            if (notices.length === 0) return s.messages
-            return [...s.messages, ...notices].sort(
-              (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
-            )
-          })
-          // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
-          if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
-          setStreamProcessItems([])
-          setStreamFinalText('')
-          streamFinalTextRef.current = ''
-          setOptimisticUser(null)
-          setStreaming(false)
-          abortRef.current = null
-          if (s.title !== title) {
-            setTitle(s.title)
-            onTitleChange()
-          }
-          const lastModel = getLastAssistantModel(s.messages)
-          lastRoundModelRef.current = lastModel || s.model
-          // 服务端悬空轮回滚兜底：如果外部中断或网络异常导致生成中断，且当前输入框未被填充，还原提问
-          if (s.pending_question?.content && !composerValue) {
-            restoreComposer(s.pending_question.content, s.pending_question.attachments)
-            setNoticeBanner('上一轮对话未完成，提问已还原到输入框')
-            if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
-            noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
-          }
-          lastAskRef.current = null
-        })
+        refreshAfterTurn(currentId)
       }
       if (ev.type === 'error') {
         // 错误信息以横幅形式独立展示，避免被清掉一闪而过。
@@ -1185,12 +1201,13 @@ export function ChatArea({
   const runStream = async (
     starter: (
       onEvent: (ev: StreamEvent) => void,
-      opts: { signal: AbortSignal },
-    ) => Promise<void>,
+      opts: { signal: AbortSignal; onSeq: (seq: number) => void },
+    ) => Promise<boolean | void>,
     optimistic?: Message | null,
   ) => {
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    lastSeqRef.current = -1
     setOptimisticUser(optimistic ?? null)
     setStreaming(true)
     setStreamProcessItems([])
@@ -1206,11 +1223,42 @@ export function ChatArea({
       if (ev.type === 'done' || ev.type === 'error') sawDone = true
       handleEvent(ev)
     }
+    const onSeq = (seq: number) => {
+      lastSeqRef.current = seq
+    }
+    let streamed = true
     try {
-      await starter(onEvent, { signal: ctrl.signal })
+      // starter 返回 false 表示"当前没有可流的东西"（重连探测 204），静默收尾
+      streamed = (await starter(onEvent, { signal: ctrl.signal, onSeq })) !== false
     } catch (e) {
       if (!ctrl.signal.aborted) {
         onEvent({ type: 'error', message: String(e) })
+      }
+    }
+    if (!streamed) {
+      stopStreamPump()
+      setStreaming(false)
+      setOptimisticUser(null)
+      abortRef.current = null
+      return
+    }
+    // 断线重连：后台 Turn 不随连接中断而终止——流意外断开且未收到 done 时，
+    // 携带最后游标+1 指数退避重连，从服务端环形缓冲补播断线期间的事件
+    if (!sawDone && !ctrl.signal.aborted && activeIdRef.current) {
+      for (let attempt = 0; attempt < 4 && !sawDone && !ctrl.signal.aborted; attempt++) {
+        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
+        if (ctrl.signal.aborted || sawDone) break
+        try {
+          const attached = await attachStream(
+            activeIdRef.current!,
+            lastSeqRef.current + 1,
+            onEvent,
+            { signal: ctrl.signal, onSeq },
+          )
+          if (!attached) break // 保留期已过或轮次不存在，走兜底收尾
+        } catch {
+          // 网络仍不可用，继续退避重试
+        }
       }
     }
     // 兜底：无论 abort、异常还是 SSE 正常关闭，确保 streaming 状态被清掉。
@@ -1348,15 +1396,27 @@ export function ChatArea({
     )
   }
 
-  // 停止生成：中断流（服务端会回滚这轮未完成的记录），并把提问还原到输入框
+  // 停止生成：后台 Turn 不随断连终止，必须显式调用中止端点；已生成的部分回答
+  // 会照常落库。中止后挂回事件流等本轮收尾（兜底 8s 超时），再从服务端刷新终态。
   const stop = () => {
     abortRef.current?.abort()
     stopStreamPump()
     setStreaming(false)
-    if (lastAskRef.current) {
-      restoreComposer(lastAskRef.current.content, lastAskRef.current.attachments)
-      lastAskRef.current = null
-    }
+    const sid = activeIdRef.current
+    if (!sid) return
+    const waitCtrl = new AbortController()
+    const timer = setTimeout(() => waitCtrl.abort(), 8000)
+    stopTurn(sid)
+      .then(() =>
+        attachStream(sid, lastSeqRef.current + 1, () => {}, {
+          signal: waitCtrl.signal,
+        }),
+      )
+      .catch(() => {})
+      .finally(() => {
+        clearTimeout(timer)
+        refreshAfterTurn(sid)
+      })
   }
 
   // 重新生成：本地截断旧回答，调用 /regenerate 端点重新流式生成

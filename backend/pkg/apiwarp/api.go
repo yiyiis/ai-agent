@@ -35,6 +35,19 @@ type SSEData struct {
 	Stream func(ctx context.Context, emit func(payload any)) error
 }
 
+// SSEFrame 带序号游标的 SSE 帧：先写 `id: {ID}\n` 再写 data 帧。
+// 客户端记录最后收到的 ID，断线重连时携带 ID+1 作为 from_seq 补播游标。
+type SSEFrame struct {
+	ID      int64
+	Payload any
+}
+
+// SSEPing SSE 注释行心跳帧（": ping"），防止反向代理掐断空闲连接
+type SSEPing struct{}
+
+// NoContent 无实体响应（HTTP 204），用于"当前无可订阅资源"的探测语义
+type NoContent struct{}
+
 // SetCookie 随响应写回的 Cookie（登录态注入/清除等）
 type SetCookie struct {
 	Name     string
@@ -105,9 +118,10 @@ func bindUriParams(params gin.Params, obj any) {
 	}
 }
 
-// Controller 泛型控制器包装器：将 (ctx, *In) (*Out, error) 自动包装为标准 gin.HandlerFunc
-// 并统一处理参数绑定（支持 URI 动态路径、Query、Body 表单/JSON）、参数校验、异常捕获堆栈日志、以及规范的 JSON 响应格式
-func Controller[In any, Out any](fc func(ctx context.Context, in *In) (*Out, error)) gin.HandlerFunc {
+// Controller 泛型控制器包装器：将 (ctx, *In) (Out, error) 自动包装为标准 gin.HandlerFunc
+// 并统一处理参数绑定（支持 URI 动态路径、Query、Body 表单/JSON）、参数校验、异常捕获堆栈日志、以及规范的 JSON 响应格式。
+// Out 为具体类型时走对应响应分支；声明为 any 时（如重连端点的 SSE/204 二态）按运行时类型分发
+func Controller[In any, Out any](fc func(ctx context.Context, in *In) (Out, error)) gin.HandlerFunc {
 	return func(gCtx *gin.Context) {
 		var in In
 
@@ -164,12 +178,16 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (*Out, err
 
 		var outAny any = out
 
-		// 多返回值类型支持（支持文件路径流、字节流、SSE 流、Cookie 等特殊响应）
+		// 多返回值类型支持（支持文件路径流、字节流、SSE 流、Cookie、204 等特殊响应）
 		switch outData := outAny.(type) {
 		case *SSEData:
 			writeSSE(gCtx, outData)
 		case SSEData:
 			writeSSE(gCtx, &outData)
+		case *NoContent:
+			gCtx.Status(http.StatusNoContent)
+		case NoContent:
+			gCtx.Status(http.StatusNoContent)
 		case *FilePathData:
 			gCtx.Writer.Header().Set("Content-Type", outData.FileType)
 			gCtx.File(outData.Path)
@@ -220,6 +238,20 @@ func writeSSE(gCtx *gin.Context, sse *SSEData) {
 	gCtx.Writer.Flush()
 
 	emit := func(payload any) {
+		switch p := payload.(type) {
+		case SSEPing:
+			fmt.Fprint(gCtx.Writer, ": ping\n\n")
+			gCtx.Writer.Flush()
+			return
+		case SSEFrame:
+			b, err := json.Marshal(p.Payload)
+			if err != nil {
+				return
+			}
+			fmt.Fprintf(gCtx.Writer, "id: %d\ndata: %s\n\n", p.ID, b)
+			gCtx.Writer.Flush()
+			return
+		}
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return
