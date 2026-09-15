@@ -30,21 +30,19 @@ func writeWsFile(t *testing.T, root, rel, content string) {
 	}
 }
 
-func TestResolveConfinesPath(t *testing.T) {
+func TestWorkspacePathConfinement(t *testing.T) {
 	setupWorkspace(t)
-	// 正常相对路径
-	if _, err := resolve("sess1", "src/main.py"); err != nil {
-		t.Fatalf("normal path rejected: %v", err)
-	}
-	// 越界：../ 逃逸
-	for _, escape := range []string{"../secret", "a/../../etc/passwd", "..\\..\\x"} {
-		if _, err := resolve("sess1", escape); err == nil {
-			t.Fatalf("escape path %q should be rejected", escape)
+	// 越界路径：经驱动（local）读取一律拒绝
+	for _, escape := range []string{"../secret", "a/../../etc/passwd", "/etc/passwd", "..\\..\\x"} {
+		out := Execute(context.Background(), "sess1", "read_file", map[string]any{"path": escape})
+		if !IsErrorResult(out) || !strings.Contains(out, "超出工作区范围") {
+			t.Fatalf("escape path %q should be rejected: %s", escape, out)
 		}
 	}
-	// 绝对路径拒绝
-	if _, err := resolve("sess1", "/etc/passwd"); err == nil {
-		t.Fatal("absolute path should be rejected")
+	// 不存在的文件给可自纠正提示（非失败前缀变体由 [未读取] 承担）
+	out := Execute(context.Background(), "sess1", "read_file", map[string]any{"path": "nope.txt"})
+	if !strings.Contains(out, "[未读取]") {
+		t.Fatalf("missing file hint wrong: %s", out)
 	}
 }
 

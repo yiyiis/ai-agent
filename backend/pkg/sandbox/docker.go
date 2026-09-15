@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strconv"
@@ -147,6 +148,8 @@ func (d *dockerDriver) run(ctx context.Context, sessionID, hostDir string, timeo
 		return Result{Err: infraErr(err, "获取退出码失败")}
 	}
 	d.touch(sessionID)
+	// 命令可能改写了工作区文件：回拉宿主镜像（尽力而为，失败不影响命令结果）
+	d.pullChanged(ctx, id, hostDir)
 	// 124=timeout 超时退出；137=SIGKILL（-k 宽限后强杀）
 	killed := exitCode == 124 || exitCode == 137
 	return Result{
@@ -188,8 +191,8 @@ func (d *dockerDriver) touch(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 按需拉起会话容器：查名 → 不在则建、没跑则启。hostDir 为工作区宿主绝对路径，
-// 以绑定挂载进 /workspace；额外的只读挂载来自配置 Mounts。环境注入隔离标记 + 配置项。
+// ensure 按需拉起会话容器：查名 → 不在则建、没跑则启；全新容器创建后把宿主
+// 工作区镜像推送进容器（tar 经 /archive API 解压到 /workspace）并打同步 marker。
 func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (string, error) {
 	d.mu.Lock()
 	if st := d.ctrs[sessionID]; st != nil {
@@ -210,8 +213,9 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		}
 		slog.Info("sandbox 容器已重启", "session", sessionID, "container", name)
 	}
+	fresh := false
 	if id == "" {
-		id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID, hostDir))
+		id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID))
 		if errors.Is(err, errDockerImageMissing) {
 			// 镜像不在本地：自动拉取后重试一次（首次部署无需手动 docker pull）
 			slog.Info("sandbox 镜像不存在，开始自动拉取", "image", d.cfg.Image)
@@ -221,7 +225,7 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 				return "", infraErr(pullErr, "拉取沙箱镜像失败")
 			}
 			cancel()
-			id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID, hostDir))
+			id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID))
 		}
 		if err != nil {
 			return "", infraErr(err, "拉起执行容器失败")
@@ -229,6 +233,7 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		if err := d.client.startContainer(ctx, id); err != nil {
 			return "", infraErr(err, "启动执行容器失败")
 		}
+		fresh = true
 		slog.Info("sandbox 容器已创建", "session", sessionID, "container", name, "image", d.cfg.Image)
 	}
 
@@ -241,14 +246,18 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		d.ctrs[sessionID] = &ctrState{id: id, created: now, lastUsed: now}
 	}
 	d.mu.Unlock()
+
+	if fresh {
+		if err := d.pushWorkspace(ctx, id, hostDir); err != nil {
+			slog.Warn("sandbox 工作区镜像推送失败", "session", sessionID, "err", err)
+		}
+	}
 	return id, nil
 }
 
-// containerSpec 组装容器创建参数
-func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateReq {
-	binds := []string{d.bindHostPath(sessionID, hostDir) + ":" + containerPath}
-	binds = append(binds, d.cfg.Mounts...) // 形如 host:container[:ro]，只读挂载由调用方声明
-
+// containerSpec 组装容器创建参数。工作区不做 bind 挂载——文件经 /archive API
+// 传入传出（与 e2b 的传输模型统一），容器因此完全自包含，也支持远程 Docker daemon。
+func (d *dockerDriver) containerSpec(sessionID string) containerCreateReq {
 	env := append([]string{"AI_AGENT_SESSION=" + sessionID}, d.cfg.Env...)
 	return containerCreateReq{
 		Image:      d.cfg.Image,
@@ -258,7 +267,7 @@ func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateR
 		WorkingDir: containerPath,
 		Labels:     map[string]string{labelManaged: "1", "ai-agent-session": sessionID},
 		HostConfig: hostConfig{
-			Binds:       binds,
+			Binds:       d.cfg.Mounts, // 额外只读挂载（资产目录等），工作区不在此列
 			NetworkMode: d.cfg.NetworkMode,
 			Memory:      d.cfg.MemoryMB << 20,            // 0 = 不限制
 			NanoCPUs:    int64(d.cfg.CPUS * 1e9),         // 0 = 不限制
@@ -267,15 +276,136 @@ func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateR
 	}
 }
 
-// bindHostPath 工作区 bind 源路径（必须是宿主视角的绝对路径）：
-//   - 配置了 WorkspaceHostDir（后端自己跑在容器里）：直接 宿主根/会话ID 拼接，
-//     不经过后端视角路径——后端容器内叫 /app/workspace 还是别的，一概无关
-//   - 未配置（后端直跑宿主）：hostDir 本身就是宿主路径（SessionDir 已保证绝对）
-func (d *dockerDriver) bindHostPath(sessionID, hostDir string) string {
-	if d.cfg.WorkspaceHostDir != "" {
-		return toBindPath(filepath.Join(d.cfg.WorkspaceHostDir, sessionID))
+// ---------- 工作区文件操作（Engine /archive API，与 e2b 的传输模型统一） ----------
+
+// ErrFileNotFound 工作区文件不存在（工具层据此生成可自纠正提示）
+var ErrFileNotFound = errors.NewMsg("工作区文件不存在")
+
+func (d *dockerDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
+	relC, err := cleanRel(rel)
+	if err != nil {
+		return nil, err
 	}
-	return toBindPath(hostDir)
+	id, err := d.ensure(ctx, sessionID, hostDir)
+	if err != nil {
+		return nil, err
+	}
+	tarBytes, err := d.client.getArchive(ctx, id, containerPath+"/"+relC)
+	if err != nil {
+		if errors.Is(err, errDockerArchiveNotFound) {
+			return nil, ErrFileNotFound
+		}
+		return nil, infraErr(err, "读取沙箱文件失败")
+	}
+	data, err := readTarSingle(tarBytes)
+	if err != nil {
+		return nil, err
+	}
+	writeHostMirror(hostDir, relC, data)
+	return data, nil
+}
+
+func (d *dockerDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
+	relC, err := cleanRel(rel)
+	if err != nil {
+		return err
+	}
+	id, err := d.ensure(ctx, sessionID, hostDir)
+	if err != nil {
+		return err
+	}
+	tarball, err := tarSingleFile(relC, data)
+	if err != nil {
+		return err
+	}
+	// 解包到 /workspace：PUT archive 的 path 是目标目录，tar 内相对路径即工作区相对路径
+	if err := d.client.putArchive(ctx, id, containerPath, tarball); err != nil {
+		return infraErr(err, "写入沙箱文件失败")
+	}
+	writeHostMirror(hostDir, relC, data)
+	return nil
+}
+
+func (d *dockerDriver) RemoveFile(sessionID, hostDir, rel string) {
+	relC, err := cleanRel(rel)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(hostDir, filepath.FromSlash(relC)))
+	d.mu.Lock()
+	st := d.ctrs[sessionID]
+	d.mu.Unlock()
+	if st == nil {
+		return // 容器未拉起：宿主镜像已清，无需动容器
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = d.execQuiet(ctx, st.id, []string{"/bin/rm", "-f", "--", containerPath + "/" + relC})
+}
+
+// pushWorkspace 全新容器创建后：宿主镜像整包推送进容器 + 打同步 marker。
+// marker 的 mtime 是后续 pullChanged 检测"命令改了哪些文件"的基准。
+func (d *dockerDriver) pushWorkspace(ctx context.Context, id, hostDir string) error {
+	tarball, err := tarWorkspace(hostDir)
+	if err != nil {
+		return err
+	}
+	if len(tarball) > e2bMaxSyncBytes {
+		return errors.NewMsg(fmt.Sprintf("工作区同步包超过 %dMB 上限", e2bMaxSyncBytes>>20))
+	}
+	if err := d.client.putArchive(ctx, id, containerPath, tarball); err != nil {
+		return err
+	}
+	_, err = d.execQuiet(ctx, id, []string{"/bin/touch", containerPath + "/" + e2bSyncMarker})
+	return err
+}
+
+// pullChanged 命令执行后：把沙箱内新增/变更文件回拉宿主镜像（marker 法，尽力而为）。
+// marker 在归档后原地刷新，下一轮命令的变更检测不受影响。
+func (d *dockerDriver) pullChanged(ctx context.Context, id, hostDir string) {
+	collect := "cd " + containerPath + " && { find . -type f ! -name " + e2bSyncMarker +
+		" -newer " + e2bSyncMarker + " -print0 | tar --null -czf /tmp/sbx_out.tgz -T - ; } ; " +
+		"touch " + e2bSyncMarker + " ; exit 0"
+	if _, err := d.execQuiet(ctx, id, []string{"/bin/bash", "-c", collect}); err != nil {
+		return
+	}
+	tarBytes, err := d.client.getArchive(ctx, id, "/tmp/sbx_out.tgz")
+	if err != nil {
+		return
+	}
+	_, _ = d.execQuiet(ctx, id, []string{"/bin/rm", "-f", "/tmp/sbx_out.tgz"})
+	if len(tarBytes) == 0 || len(tarBytes) > e2bMaxSyncBytes {
+		return
+	}
+	// /archive 返回的是"裸 tar 包裹该文件"：先剥外层 tar 取出 .tgz 内容，再解压工作区
+	inner, err := readTarSingle(tarBytes)
+	if err != nil {
+		return
+	}
+	if err := untarTo(hostDir, inner); err != nil {
+		slog.Warn("sandbox 工作区回拉解包失败", "err", err)
+	}
+}
+
+// execQuiet 静默执行（只要退出码，输出丢弃）——同步与清理类内部命令用
+func (d *dockerDriver) execQuiet(ctx context.Context, id string, argv []string) (int, error) {
+	eid, err := d.client.createExec(ctx, id, argv)
+	if err != nil {
+		return 0, err
+	}
+	if err := d.client.startExecStream(ctx, eid, io.Discard, io.Discard); err != nil {
+		return 0, err
+	}
+	return d.client.execExitCode(ctx, eid)
+}
+
+// writeHostMirror 宿主镜像双落（文件工具写入与读取都同步镜像）
+func writeHostMirror(hostDir, relC string, data []byte) {
+	p := filepath.Join(hostDir, filepath.FromSlash(relC))
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return
+	}
+	_ = os.WriteFile(p, data, 0o644)
 }
 
 func pidsLimitOrNil(n int64) *int64 {
@@ -348,8 +478,6 @@ func (d *dockerDriver) sweepOrphans(ctx context.Context) {
 // containerName 容器名与 sessionID 一一映射（sessionID 为 UUID，天然安全）
 func containerName(sessionID string) string { return "ai-agent-sbx-" + sessionID }
 
-// toBindPath 宿主路径转 Docker 绑定挂载格式：统一正斜杠（Windows 盘符路径 D:\a\b → D:/a/b）
-func toBindPath(hostDir string) string { return strings.ReplaceAll(hostDir, "\\", "/") }
 
 // ---------- Docker Engine API 客户端（手写，不引官方 SDK） ----------
 
@@ -433,12 +561,19 @@ func (c *dockerClient) transport() *http.Transport {
 
 func (c *dockerClient) do(ctx context.Context, method, path string, query url.Values, body any) (*http.Response, error) {
 	var rdr io.Reader
-	if body != nil {
-		b, err := json.Marshal(body)
+	contentType := ""
+	switch b := body.(type) {
+	case nil:
+	case []byte: // 原始字节流（tar 上传），不做 JSON 包装
+		rdr = bytes.NewReader(b)
+		contentType = "application/x-tar"
+	default:
+		j, err := json.Marshal(body)
 		if err != nil {
 			return nil, err
 		}
-		rdr = bytes.NewReader(b)
+		rdr = bytes.NewReader(j)
+		contentType = "application/json"
 	}
 	u := c.base + path
 	if len(query) > 0 {
@@ -448,8 +583,8 @@ func (c *dockerClient) do(ctx context.Context, method, path string, query url.Va
 	if err != nil {
 		return nil, err
 	}
-	if body != nil {
-		req.Header.Set("Content-Type", "application/json")
+	if contentType != "" {
+		req.Header.Set("Content-Type", contentType)
 	}
 	req.Header.Set("Host", "docker") // socket 虚拟主机名场景下保持 Host 一致
 	return (&http.Client{Transport: c.transport()}).Do(req)
@@ -504,6 +639,42 @@ func (c *dockerClient) createContainer(ctx context.Context, name string, spec co
 		return "", err
 	}
 	return out.ID, nil
+}
+
+// errDockerArchiveNotFound getArchive 404 的判别哨兵（文件不存在）
+var errDockerArchiveNotFound = errors.NewMsg("docker archive not found")
+
+// putArchive 把 tar 流解压到容器内指定目录（docker cp 的上传半边）
+func (c *dockerClient) putArchive(ctx context.Context, containerID, dir string, tarball []byte) error {
+	resp, err := c.do(ctx, http.MethodPut, "/containers/"+containerID+"/archive",
+		url.Values{"path": []string{dir}}, tarball)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("put archive %s: HTTP %d %s", dir, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
+}
+
+// getArchive 读取容器内路径的 tar 流（docker cp 的下载半边）
+func (c *dockerClient) getArchive(ctx context.Context, containerID, path string) ([]byte, error) {
+	resp, err := c.do(ctx, http.MethodGet, "/containers/"+containerID+"/archive",
+		url.Values{"path": []string{path}}, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusNotFound {
+		return nil, errDockerArchiveNotFound
+	}
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("get archive %s: HTTP %d %s", path, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, e2bMaxSyncBytes+1))
 }
 
 // pullImage 拉取镜像（POST /images/create 为流式进度接口，读到 EOF 即完成）

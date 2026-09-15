@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
+	"bytes"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -223,9 +224,8 @@ func ParseArguments(raw string) (map[string]any, string) {
 	return parsed, ""
 }
 
-// SessionDir 返回（并确保存在）会话工作区目录。
-// 必须返回绝对路径：docker 驱动的 bind 挂载源要求宿主绝对路径，
-// 相对路径会被 Docker 误判为具名卷名（含 / 直接 400）。
+// SessionDir 返回（并确保存在）会话工作区目录（宿主镜像的绝对路径——
+// local 驱动以此为 cwd 直接执行，docker/e2b 驱动据此做镜像推送与回拉）。
 func SessionDir(sessionID string) (string, error) {
 	d := filepath.Join(WorkspaceRoot, sessionID)
 	if err := os.MkdirAll(d, 0o755); err != nil {
@@ -234,30 +234,8 @@ func SessionDir(sessionID string) (string, error) {
 	return filepath.Abs(d)
 }
 
-// resolve 把工具入参的路径解析到会话工作区内，越界一律报错
-func resolve(sessionID, path string) (string, error) {
-	if strings.TrimSpace(path) == "" {
-		return "", fmt.Errorf("path 不能为空")
-	}
-	// Windows 上无盘符的 "/x" 不算 IsAbs，但同样不允许（根路径一律越界）
-	if filepath.IsAbs(path) || strings.HasPrefix(path, "/") || strings.HasPrefix(path, "\\") {
-		return "", fmt.Errorf("路径 %s 超出工作区范围，只能访问工作区内的相对路径", path)
-	}
-	root, err := SessionDir(sessionID)
-	if err != nil {
-		return "", err
-	}
-	rootAbs, err := filepath.Abs(root)
-	if err != nil {
-		return "", err
-	}
-	p := filepath.Clean(filepath.Join(rootAbs, path))
-	rel, err := filepath.Rel(rootAbs, p)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return "", fmt.Errorf("路径 %s 超出工作区范围，只能访问工作区内的文件", path)
-	}
-	return p, nil
-}
+// 路径越界校验已下沉到 sandbox.cleanRel / resolveLocal（驱动侧防御），
+// 工具层只传相对路径。
 
 // checkArgs 缺必填参数时返回一句能照着改的提示
 func checkArgs(name string, args map[string]any) string {
@@ -399,17 +377,15 @@ func timeoutFor(name string, args map[string]any) time.Duration {
 	return 120 * time.Second
 }
 
-// doExecute 单个工具的实际执行逻辑
+// doExecute 单个工具的实际执行逻辑。文件工具统一经沙箱驱动读写（local 驱动
+// 退化为宿主 os 调用，docker/e2b 经传输 API 进出沙箱），进程工具经沙箱执行。
 func doExecute(ctx context.Context, sessionID, name string, args map[string]any) Output {
 	switch name {
 	case "read_file":
-		p, err := resolve(sessionID, argString(args, "path"))
+		rel := argString(args, "path")
+		data, err := readWorkspaceFile(ctx, sessionID, rel)
 		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
-		data, err := os.ReadFile(p)
-		if err != nil {
-			return Output{Text: fmt.Sprintf("[未读取] %s 不存在或不是文件。", argString(args, "path"))}
+			return Output{Text: fileErrOutput(err, "[未读取] "+rel+" 不存在或不是文件。")}
 		}
 		text := string(data)
 		offset := argInt(args, "offset", 0)
@@ -423,38 +399,32 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 			}
 			end := len(lines)
 			if limit > 0 && start+limit < end {
-				end = start+limit
+				end = start + limit
 			}
 			if start > len(lines) {
 				start = len(lines)
 			}
 			text = strings.Join(lines[start:end], "")
 		}
-		return Output{Text: capRead(sanitize(text), argString(args, "path"), paged)}
+		return Output{Text: capRead(sanitize(text), rel, paged)}
 
 	case "write_file":
-		p, err := resolve(sessionID, argString(args, "path"))
+		rel := argString(args, "path")
+		dir, err := SessionDir(sessionID)
 		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		content := argString(args, "content")
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		if err := sandbox.WriteFile(ctx, sessionID, dir, rel, []byte(content)); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		return Output{Text: fmt.Sprintf("已写入 %d 字符到 %s", len(content), argString(args, "path"))}
+		return Output{Text: fmt.Sprintf("已写入 %d 字符到 %s", len(content), rel)}
 
 	case "edit_file":
-		p, err := resolve(sessionID, argString(args, "path"))
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
 		path := argString(args, "path")
-		data, err := os.ReadFile(p)
+		data, err := readWorkspaceFile(ctx, sessionID, path)
 		if err != nil {
-			return Output{Text: fmt.Sprintf("[未改动] %s 不存在，请先用 write_file 创建。", path)}
+			return Output{Text: fileErrOutput(err, "[未改动] "+path+" 不存在，请先用 write_file 创建。")}
 		}
 		text := string(data)
 		old, newStr := argString(args, "old_string"), argString(args, "new_string")
@@ -471,7 +441,11 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if argBool(args, "replace_all") {
 			replaced = strings.ReplaceAll(text, old, newStr)
 		}
-		if err := os.WriteFile(p, []byte(replaced), 0o644); err != nil {
+		dir, err := SessionDir(sessionID)
+		if err != nil {
+			return Output{Text: "[执行失败] " + err.Error()}
+		}
+		if err := sandbox.WriteFile(ctx, sessionID, dir, path, []byte(replaced)); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		scope := "1 处"
@@ -500,27 +474,23 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		// 脚本落在工作区（docker 驱动下随目录挂载进容器），执行交给沙箱分发
+		// 脚本经驱动写进沙箱工作区，执行后清理
 		script := ".pyexec_" + randHex(12) + ".py"
-		if err := os.WriteFile(filepath.Join(dir, script), []byte(argString(args, "code")), 0o644); err != nil {
+		if err := sandbox.WriteFile(ctx, sessionID, dir, script, []byte(argString(args, "code"))); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		defer os.Remove(filepath.Join(dir, script))
+		defer sandbox.RemoveFile(sessionID, dir, script)
 
 		res := sandbox.RunPython(ctx, sessionID, dir, script, toolTimeouts["python_exec"])
 		return Output{Text: formatSandboxResult(res)}
 
 	case "export_artifact":
 		path := argString(args, "path")
-		p, err := resolve(sessionID, path)
+		data, err := readWorkspaceFile(ctx, sessionID, path)
 		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
+			return Output{Text: fileErrOutput(err, "[未读取] "+path+" 不存在或不是文件。")}
 		}
-		st, err := os.Stat(p)
-		if err != nil || st.IsDir() {
-			return Output{Text: fmt.Sprintf("[未读取] %s 不存在或不是文件。", path)}
-		}
-		if err := storage.CheckSize(st.Size()); err != nil {
+		if err := storage.CheckSize(int64(len(data))); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		filename := strings.TrimSpace(argString(args, "filename"))
@@ -531,12 +501,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if contentType == "" {
 			contentType = "application/octet-stream"
 		}
-		f, err := os.Open(p)
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
-		defer f.Close()
-		obj, err := storage.Default().Put(ctx, filename, f, st.Size(), contentType)
+		obj, err := storage.Default().Put(ctx, filename, bytes.NewReader(data), int64(len(data)), contentType)
 		if err != nil {
 			slog.Warn("产物上传失败", "session", sessionID, "file", filename, "err", errors.Stack(err))
 			return Output{Text: "[执行失败] 导出产物上传失败，请稍后重试或告知用户。"}
@@ -554,6 +519,23 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		}
 	}
 	return Output{Text: fmt.Sprintf("[执行失败] 未知工具：%s", name)}
+}
+
+// readWorkspaceFile 经沙箱驱动读取工作区文件
+func readWorkspaceFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
+	dir, err := SessionDir(sessionID)
+	if err != nil {
+		return nil, err
+	}
+	return sandbox.ReadFile(ctx, sessionID, dir, rel)
+}
+
+// fileErrOutput 文件读取错误的提示映射：不存在给可自纠正提示，其余给失败前缀
+func fileErrOutput(err error, notFoundMsg string) string {
+	if errors.Is(err, sandbox.ErrFileNotFound) {
+		return notFoundMsg
+	}
+	return "[执行失败] " + err.Error()
 }
 
 // commonContentTypes 常见产物类型的内置映射：宿主（尤其 Windows 注册表）可能没登记

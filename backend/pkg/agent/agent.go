@@ -25,6 +25,7 @@ import (
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/provider"
+	"backend/pkg/sandbox"
 	"backend/pkg/storage"
 	"backend/pkg/tools"
 	"github.com/google/uuid"
@@ -360,7 +361,8 @@ func materializeAttachments(ctx context.Context, sessionID string, attachments [
 		if safe == "" {
 			continue
 		}
-		if err := os.WriteFile(filepath.Join(dir, safe), data, 0o644); err != nil {
+		// 经沙箱驱动写入工作区（local 直写宿主；docker/e2b 传输进沙箱并双落镜像）
+		if err := sandbox.WriteFile(ctx, sessionID, dir, safe, data); err != nil {
 			continue
 		}
 		a.Filename = safe

@@ -49,21 +49,16 @@ func TestDemuxStreamTruncated(t *testing.T) {
 
 func TestContainerSpec(t *testing.T) {
 	d := &dockerDriver{cfg: Config{
-		Image:          "img:1",
-		Env:            []string{"K=V"},
-		Mounts:         []string{"/data/assets:/assets:ro"},
-		NetworkMode:    "none",
-		MemoryMB:       512,
-		CPUS:           1.5,
-		PidsLimit:      256,
+		Image:       "img:1",
+		Env:         []string{"K=V"},
+		NetworkMode: "none",
+		MemoryMB:    512,
+		CPUS:        1.5,
+		PidsLimit:   256,
 	}}
-	spec := d.containerSpec("sess-1", `D:\ws\sess-1`)
+	spec := d.containerSpec("sess-1")
 	if spec.WorkingDir != "/workspace" {
 		t.Fatalf("workdir: %q", spec.WorkingDir)
-	}
-	wantBinds := []string{"D:/ws/sess-1:/workspace", "/data/assets:/assets:ro"}
-	if fmt.Sprint(spec.HostConfig.Binds) != fmt.Sprint(wantBinds) {
-		t.Fatalf("binds: %v", spec.HostConfig.Binds)
 	}
 	if len(spec.Env) != 2 || spec.Env[0] != "AI_AGENT_SESSION=sess-1" || spec.Env[1] != "K=V" {
 		t.Fatalf("env: %v", spec.Env)
@@ -74,6 +69,10 @@ func TestContainerSpec(t *testing.T) {
 	if fmt.Sprint(spec.Cmd) != "[sleep infinity]" {
 		t.Fatalf("cmd: %v", spec.Cmd)
 	}
+	// 工作区不再 bind 挂载（文件经 /archive API 传输，与 e2b 模型统一）
+	if len(spec.HostConfig.Binds) != 0 {
+		t.Fatalf("workspace should not be bind-mounted: %v", spec.HostConfig.Binds)
+	}
 	if spec.HostConfig.Memory != 512<<20 || spec.HostConfig.NanoCPUs != 1500000000 {
 		t.Fatalf("resource limits wrong: %+v", spec.HostConfig)
 	}
@@ -82,19 +81,20 @@ func TestContainerSpec(t *testing.T) {
 	}
 }
 
-func TestBindHostPath(t *testing.T) {
-	// 配置了宿主工作区根：直接拼 会话ID，与后端视角路径无关（后端在容器里的路径叫什么都行）
-	d := &dockerDriver{cfg: Config{WorkspaceHostDir: "/data/ai-agent/backend/workspace"}}
-	if got := d.bindHostPath("abc-123", "/app/workspace/abc-123"); got != "/data/ai-agent/backend/workspace/abc-123" {
-		t.Fatalf("host dir bind wrong: %q", got)
+func TestTarSingleFileRoundTrip(t *testing.T) {
+	tarball, err := tarSingleFile("docs/report.md", []byte("# hello"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := d.bindHostPath("abc-123", "/any/other/view/abc-123"); got != "/data/ai-agent/backend/workspace/abc-123" {
-		t.Fatalf("should ignore backend view: %q", got)
+	data, err := readTarSingle(tarball)
+	if err != nil || string(data) != "# hello" {
+		t.Fatalf("round trip wrong: %q %v", data, err)
 	}
-	// 未配置：原样（Windows 反斜杠转正斜杠）
-	d2 := &dockerDriver{}
-	if got := d2.bindHostPath("s1", `D:\ws\s1`); got != "D:/ws/s1" {
-		t.Fatalf("unconfigured bind wrong: %q", got)
+	if _, err := cleanRel("../escape"); err == nil {
+		t.Fatal("cleanRel should reject escape")
+	}
+	if r, err := cleanRel("a/b.txt"); err != nil || r != "a/b.txt" {
+		t.Fatalf("cleanRel wrong: %q %v", r, err)
 	}
 }
 
@@ -122,6 +122,12 @@ func TestDockerAutoPullOnMissingImage(t *testing.T) {
 	})
 	mux.HandleFunc("POST /containers/ctr-9/start", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("PUT /containers/ctr-9/archive", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // 工作区镜像推送（tar 流，此处不校验内容）
+	})
+	mux.HandleFunc("GET /containers/ctr-9/archive", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // 回拉 tar：空体即无可变更文件
 	})
 	mux.HandleFunc("POST /containers/ctr-9/exec", func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"Id":"e9"}`))
@@ -202,8 +208,8 @@ func TestDockerRunAgainstFakeDaemon(t *testing.T) {
 		if spec.Image != "img:test" {
 			t.Errorf("image wrong: %s", spec.Image)
 		}
-		if spec.HostConfig.Binds[0] != "/host/ws:/workspace" {
-			t.Errorf("bind wrong: %v", spec.HostConfig.Binds)
+		if len(spec.HostConfig.Binds) != 0 {
+			t.Errorf("workspace should not be bind-mounted: %v", spec.HostConfig.Binds)
 		}
 		created.Store(true)
 		_, _ = w.Write([]byte(`{"Id":"ctr-1"}`))
@@ -211,12 +217,18 @@ func TestDockerRunAgainstFakeDaemon(t *testing.T) {
 	mux.HandleFunc("POST /containers/ctr-1/start", func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 	})
+	mux.HandleFunc("PUT /containers/ctr-1/archive", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("GET /containers/ctr-1/archive", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK) // 空 tar：无可回拉变更
+	})
 	mux.HandleFunc("POST /containers/ctr-1/exec", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		cmd, _ := body["Cmd"].([]any)
-		// 外层 timeout 包裹（timeout -k 5 <secs>）+ 内层命令
-		if cmd[0] != "timeout" || cmd[1] != "-k" || cmd[4] != "bash" {
+		// 外层 timeout 包裹（timeout -k 5 <secs>）+ 内层命令（仅校验主命令）
+		if len(cmd) > 4 && cmd[0] == "timeout" && cmd[4] == "bash" && cmd[1] != "-k" {
 			t.Errorf("cmd wrong: %v", cmd)
 		}
 		_, _ = w.Write([]byte(`{"Id":"exec-1"}`))

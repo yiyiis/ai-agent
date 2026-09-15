@@ -2,7 +2,9 @@ package sandbox
 
 import (
 	"context"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -10,14 +12,68 @@ import (
 	"backend/pkg/errors"
 )
 
-// localDriver 本地隔离执行：命令以会话工作区为 cwd 跑在宿主机上。
-// 与阶段二的原始行为完全一致（超时整棵进程树击杀、Windows 商店占位 python 探测跳过），
-// 作为默认驱动保证零配置开箱即用。
+// localDriver 本地隔离执行：沙箱即宿主，文件操作退化为直接 os 调用（零开销），
+// 进程以会话工作区为 cwd 跑在宿主机上（超时整棵进程树击杀、Windows 商店占位
+// python 探测跳过）。作为默认驱动保证零配置开箱即用。
 type localDriver struct{}
 
 func (localDriver) Name() string { return "local" }
 
 func (localDriver) EnvNote() string { return localEnvNote() }
+
+// resolveLocal 工作区相对路径 → 宿主绝对路径，越界一律拒绝（防 ../ 逃逸）
+func resolveLocal(hostDir, rel string) (string, error) {
+	rel = filepath.ToSlash(filepath.Clean(rel))
+	if rel == "" || rel == "." || filepath.IsAbs(rel) || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
+		return "", errors.NewMsg("路径 " + rel + " 超出工作区范围，只能访问工作区内的相对路径")
+	}
+	p := filepath.Join(hostDir, filepath.FromSlash(rel))
+	rootAbs, err := filepath.Abs(hostDir)
+	if err != nil {
+		return "", err
+	}
+	pAbs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	r, err := filepath.Rel(rootAbs, pAbs)
+	if err != nil || r == ".." || strings.HasPrefix(r, ".."+string(filepath.Separator)) {
+		return "", errors.NewMsg("路径 " + rel + " 超出工作区范围，只能访问工作区内的文件")
+	}
+	return pAbs, nil
+}
+
+func (localDriver) ReadFile(_ context.Context, _, hostDir, rel string) ([]byte, error) {
+	p, err := resolveLocal(hostDir, rel)
+	if err != nil {
+		return nil, err
+	}
+	data, err := os.ReadFile(p)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, ErrFileNotFound
+		}
+		return nil, err
+	}
+	return data, nil
+}
+
+func (localDriver) WriteFile(_ context.Context, _, hostDir, rel string, data []byte) error {
+	p, err := resolveLocal(hostDir, rel)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(p, data, 0o644)
+}
+
+func (localDriver) RemoveFile(_, hostDir, rel string) {
+	if p, err := resolveLocal(hostDir, rel); err == nil {
+		_ = os.Remove(p)
+	}
+}
 
 func (localDriver) RunBash(ctx context.Context, _, hostDir, command string, timeoutSecs int) Result {
 	if _, err := exec.LookPath("bash"); err != nil {

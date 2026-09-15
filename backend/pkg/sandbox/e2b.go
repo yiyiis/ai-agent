@@ -12,13 +12,12 @@ package sandbox
 //	           argv 形如 /bin/bash -l -c <cmd>，流式返回 base64 的 stdout/stderr 与 exitCode
 //	文件传输   GET/POST https://sandbox.e2b.app/files?path=&username=user（上传支持 gzip）
 //
-// 云端沙箱没有宿主绑定挂载，工作区一致性由驱动维护：每次执行前把宿主工作区的
-// 变更打包上传解压（tar.gz），执行后把沙箱内新增/变更的文件拉回宿主（mtime 标记法）。
-// 沙箱被服务端 TTL 回收后句柄失效，下次执行自动重建并重新同步，数据不丢。
+// 云端沙箱没有宿主绑定挂载，工作区文件经 envd /files API 传入传出：文件工具的
+// 读写直达沙箱并双落宿主镜像；沙箱新建时整包推送镜像，命令执行后回拉变更
+// （mtime 标记法）。沙箱被服务端 TTL 回收后句柄失效，下次使用自动重建并重推
+// 镜像，数据不丢。
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/binary"
@@ -63,13 +62,11 @@ type e2bDriver struct {
 	boxes map[string]*e2bBox // sessionID -> 句柄
 }
 
-// e2bBox 单个云端沙箱句柄。synced 记录最近一次上传后的宿主快照（rel -> size:mtime），
-// 用于跳过无变更时的上传；云端侧的变更检测靠沙箱内 marker 文件的 mtime。
+// e2bBox 单个云端沙箱句柄。云端侧的变更检测靠沙箱内 marker 文件的 mtime。
 type e2bBox struct {
-	sandboxID    string
-	accessToken  string
-	lastUsed     time.Time
-	synced       map[string]string
+	sandboxID   string
+	accessToken string
+	lastUsed    time.Time
 }
 
 func newE2BDriver(cfg Config) *e2bDriver {
@@ -127,15 +124,10 @@ func (d *e2bDriver) run(ctx context.Context, sessionID, hostDir string, timeoutS
 	return res
 }
 
-// runOnce 单次执行；stale 表示沙箱句柄已失效（应重建重试）
+// runOnce 单次执行；stale 表示沙箱句柄已失效（应重建重试）。
+// 文件工具的写入直接进沙箱（WriteFile），无需执行前上行同步——宿主镜像只在
+// 沙箱新建时整包推送一次；执行后回拉变更保持久。
 func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, sessionID, hostDir string, timeoutSecs int, argv []string) (Result, bool) {
-	if err := d.syncUp(ctx, box, hostDir); err != nil {
-		if errors.Is(err, errE2BStale) {
-			return Result{Err: nil}, true
-		}
-		return Result{Err: infraErr(err, "同步工作区到云端沙箱失败")}, false
-	}
-
 	// 外层包 timeout 做命令级硬超时（base 模板为 Ubuntu，含 coreutils）
 	wrapped := append([]string{"/usr/bin/timeout", "-k", strconv.Itoa(e2bExecKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
 	out, err := d.startProcess(ctx, box, wrapped)
@@ -181,7 +173,8 @@ func (d *e2bDriver) forget(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 取（必要时创建）会话的云端沙箱
+// ensure 取（必要时创建）会话的云端沙箱；新建后把宿主工作区镜像整包推上去并打
+// 同步 marker（后续文件写入走 WriteFile 直达沙箱，无需再上行同步）
 func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2bBox, error) {
 	d.mu.Lock()
 	if box := d.boxes[sessionID]; box != nil {
@@ -195,7 +188,6 @@ func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2b
 	if err != nil {
 		return nil, infraErr(err, "创建 E2B 云端沙箱失败")
 	}
-	box.synced = nil // 尚未同步过，首次执行会全量上传
 	d.mu.Lock()
 	if existing := d.boxes[sessionID]; existing != nil {
 		box = existing
@@ -204,7 +196,33 @@ func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2b
 	}
 	d.mu.Unlock()
 	slog.Info("sandbox(e2b) 已创建", "session", sessionID, "sandbox", box.sandboxID)
+	// 新沙箱是空的：推送宿主镜像 + 打 marker（尽力而为，失败交由 stale 重建兜底）
+	if err := d.pushMirror(ctx, box, hostDir); err != nil {
+		slog.Warn("sandbox(e2b) 工作区镜像推送失败", "session", sessionID, "err", err)
+	}
 	return box, nil
+}
+
+// pushMirror 宿主工作区镜像整包推送进云端沙箱（仅沙箱新建时执行一次）
+func (d *e2bDriver) pushMirror(ctx context.Context, box *e2bBox, hostDir string) error {
+	data, err := tarWorkspace(hostDir)
+	if err != nil {
+		return err
+	}
+	if len(data) > e2bMaxSyncBytes {
+		return errors.NewMsg(fmt.Sprintf("工作区同步包超过 %dMB 上限", e2bMaxSyncBytes>>20))
+	}
+	upCtx, cancel := context.WithTimeout(ctx, e2bUploadTimeout)
+	defer cancel()
+	q := url.Values{"path": {e2bWorkspace + "/.sync.tgz"}, "username": {e2bUser}}
+	resp, err := d.envdDo(upCtx, box, http.MethodPost, "/files", q, "application/octet-stream", bytes.NewReader(data))
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	extract := "cd " + e2bWorkspace + " && tar xzf .sync.tgz && rm -f .sync.tgz && touch " + e2bSyncMarker
+	_, err = d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", extract})
+	return err
 }
 
 // ---------- 生命周期 REST ----------
@@ -447,194 +465,81 @@ func readConnectStream(r io.Reader, onMessage func(frame []byte) error) error {
 	}
 }
 
-// ---------- 工作区双向同步 ----------
 
-// fileSnapshot 宿主工作区快照：rel -> "size:mtimeUnixNano"
-func fileSnapshot(root string) (map[string]string, error) {
-	snap := map[string]string{}
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil {
-			return nil // 与快照竞态的文件直接跳过
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil {
-			return nil
-		}
-		rel = filepath.ToSlash(rel)
-		if isSyncSkipped(rel) {
-			return nil
-		}
-		snap[rel] = fmt.Sprintf("%d:%d", info.Size(), info.ModTime().UnixNano())
-		return nil
-	})
+// ---------- 工作区文件操作（envd /files REST） ----------
+
+// ReadFile 从云端沙箱读取工作区文件并双落宿主镜像
+func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
+	relC, err := cleanRel(rel)
 	if err != nil {
 		return nil, err
 	}
-	return snap, nil
-}
-
-// isSyncSkipped 同步时跳过的文件：marker 与同步用 tar 包。
-// 注意 .pyexec_* 临时脚本不能排除——e2b 驱动需要把它上传到云端才能执行
-//（本地脚本由 tools 层在执行后自行清理）。
-func isSyncSkipped(rel string) bool {
-	base := filepath.Base(rel)
-	return base == e2bSyncMarker || base == ".sync.tgz" || base == "sbx_out.tgz"
-}
-
-// tarWorkspace 把宿主工作区打包为 tar.gz 字节流
-func tarWorkspace(root string) ([]byte, error) {
-	var buf bytes.Buffer
-	gw := gzip.NewWriter(&buf)
-	tw := tar.NewWriter(gw)
-	err := filepath.WalkDir(root, func(path string, entry os.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if entry.IsDir() {
-			return nil
-		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil || isSyncSkipped(filepath.ToSlash(rel)) {
-			return nil
-		}
-		hdr, err := tar.FileInfoHeader(info, "")
-		if err != nil {
-			return nil
-		}
-		hdr.Name = filepath.ToSlash(rel)
-		if err := tw.WriteHeader(hdr); err != nil {
-			return err
-		}
-		f, err := os.Open(path)
-		if err != nil {
-			return nil
-		}
-		_, copyErr := io.Copy(tw, f)
-		f.Close()
-		return copyErr
-	})
+	box, err := d.ensure(ctx, sessionID, hostDir)
 	if err != nil {
 		return nil, err
 	}
-	if err := tw.Close(); err != nil {
+	q := url.Values{"path": {e2bWorkspace + "/" + relC}, "username": {e2bUser}}
+	resp, err := d.envdDo(ctx, box, http.MethodGet, "/files", q, "", nil)
+	if err != nil {
+		if errors.Is(err, errE2BStale) {
+			return nil, ErrFileNotFound // 沙箱已被回收：文件只存在于宿主镜像，走本地兜底
+		}
+		return nil, infraErr(err, "读取沙箱文件失败")
+	}
+	defer resp.Body.Close()
+	data, err := io.ReadAll(io.LimitReader(resp.Body, e2bMaxSyncBytes+1))
+	if err != nil {
 		return nil, err
 	}
-	if err := gw.Close(); err != nil {
-		return nil, err
-	}
-	return buf.Bytes(), nil
+	writeHostMirror(hostDir, relC, data)
+	return data, nil
 }
 
-// untarTo 把 tar.gz 解包到目录（覆盖已存在文件，跳过同步排除项）
-func untarTo(dir string, data []byte) error {
-	gr, err := gzip.NewReader(bytes.NewReader(data))
+// WriteFile 写入云端沙箱工作区并双落宿主镜像
+func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
+	relC, err := cleanRel(rel)
 	if err != nil {
 		return err
 	}
-	tr := tar.NewReader(gr)
-	for {
-		hdr, err := tr.Next()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		name := filepath.Clean(hdr.Name)
-		if isSyncSkipped(filepath.ToSlash(name)) {
-			continue
-		}
-		// 防路径穿越：解析后的目标必须落在 dir 内
-		target := filepath.Join(dir, filepath.FromSlash(name))
-		rel, err := filepath.Rel(dir, target)
-		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-			continue
-		}
-		switch hdr.Typeflag {
-		case tar.TypeDir:
-			if err := os.MkdirAll(target, 0o755); err != nil {
-				return err
-			}
-		case tar.TypeReg:
-			if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
-				return err
-			}
-			if err := writeTarFile(target, tr); err != nil {
-				return err
-			}
-		}
-	}
-}
-
-func writeTarFile(target string, r io.Reader) error {
-	f, err := os.OpenFile(target, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	box, err := d.ensure(ctx, sessionID, hostDir)
 	if err != nil {
 		return err
 	}
-	_, copyErr := io.Copy(f, r)
-	closeErr := f.Close()
-	if copyErr != nil {
-		return copyErr
-	}
-	return closeErr
-}
-
-// syncUp 宿主工作区 → 云端沙箱。快照无变化时零开销跳过。
-func (d *e2bDriver) syncUp(ctx context.Context, box *e2bBox, hostDir string) error {
-	snap, err := fileSnapshot(hostDir)
+	q := url.Values{"path": {e2bWorkspace + "/" + relC}, "username": {e2bUser}}
+	resp, err := d.envdDo(ctx, box, http.MethodPost, "/files", q, "application/octet-stream", bytes.NewReader(data))
 	if err != nil {
-		return err
-	}
-	if box.synced != nil && sameSnapshot(box.synced, snap) {
-		return nil
-	}
-	data, err := tarWorkspace(hostDir)
-	if err != nil {
-		return err
-	}
-	if len(data) > e2bMaxSyncBytes {
-		return errors.NewMsg(fmt.Sprintf("工作区同步包超过 %dMB 上限", e2bMaxSyncBytes>>20))
-	}
-	// 上传 tar 包（gzip 直传）→ 沙箱内解压 → 打同步 marker（下行变更检测的基准）
-	upCtx, cancel := context.WithTimeout(ctx, e2bUploadTimeout)
-	defer cancel()
-	q := url.Values{"path": {e2bWorkspace + "/.sync.tgz"}, "username": {e2bUser}}
-	resp, err := d.envdDo(upCtx, box, http.MethodPost, "/files", q, "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		return err
+		return infraErr(err, "写入沙箱文件失败")
 	}
 	resp.Body.Close()
-
-	extract := "cd " + e2bWorkspace + " && tar xzf .sync.tgz && rm -f .sync.tgz && touch " + e2bSyncMarker
-	if _, err := d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", extract}); err != nil {
-		return err
-	}
-	box.synced = snap
+	writeHostMirror(hostDir, relC, data)
 	return nil
+}
+
+// RemoveFile 删除云端沙箱工作区文件与宿主镜像（临时脚本清理）
+func (d *e2bDriver) RemoveFile(sessionID, hostDir, rel string) {
+	relC, err := cleanRel(rel)
+	if err != nil {
+		return
+	}
+	_ = os.Remove(filepath.Join(hostDir, filepath.FromSlash(relC)))
+	d.mu.Lock()
+	box := d.boxes[sessionID]
+	d.mu.Unlock()
+	if box == nil {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	_, _ = d.startProcess(ctx, box, []string{"/bin/rm", "-f", "--", e2bWorkspace + "/" + relC})
 }
 
 // syncDown 云端沙箱 → 宿主工作区：以 marker 的 mtime 为基准拉回新增/变更文件。
 func (d *e2bDriver) syncDown(ctx context.Context, box *e2bBox, hostDir string) error {
-	list := "cd " + e2bWorkspace + " && find . -type f ! -name " + e2bSyncMarker +
-		" -newer " + e2bSyncMarker + " -print0 | tar --null -czf /tmp/sbx_out.tgz -T - ; ec=$?; " +
-		"rm -f " + e2bSyncMarker + " ; exit $ec"
-	out, err := d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", list})
-	if err != nil {
+	list := "cd " + e2bWorkspace + " && { find . -type f ! -name " + e2bSyncMarker +
+		" -newer " + e2bSyncMarker + " -print0 | tar --null -czf /tmp/sbx_out.tgz -T - ; } ; " +
+		"touch " + e2bSyncMarker + " ; exit 0"
+	if _, err := d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", list}); err != nil {
 		return err
-	}
-	if out.ExitCode != 0 {
-		return fmt.Errorf("collect changed files: exit %d %s", out.ExitCode, out.Stderr)
 	}
 
 	dlCtx, cancel := context.WithTimeout(ctx, e2bUploadTimeout)
@@ -653,25 +558,5 @@ func (d *e2bDriver) syncDown(ctx context.Context, box *e2bBox, hostDir string) e
 	if len(data) == 0 || len(data) > e2bMaxSyncBytes {
 		return nil
 	}
-	if err := untarTo(hostDir, data); err != nil {
-		return err
-	}
-	// 宿主快照刷新为拉回后的真实状态（下次 syncUp 据此判变更）
-	if snap, err := fileSnapshot(hostDir); err == nil {
-		box.synced = snap
-	}
-	return nil
-}
-
-// sameSnapshot 两份快照是否一致
-func sameSnapshot(a, b map[string]string) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for k, v := range a {
-		if b[k] != v {
-			return false
-		}
-	}
-	return true
+	return untarTo(hostDir, data)
 }

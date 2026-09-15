@@ -1,15 +1,17 @@
 // Package sandbox 多驱动执行沙箱（阶段四核心）。
 //
-// 进程类工具（bash / python_exec）的执行载体，按配置在三种驱动间无缝切换：
-//   - local：本地隔离执行——命令以会话工作区为 cwd 跑在宿主机上，超时整棵进程树击杀；
-//   - docker：每会话独立容器——工作区目录绑定挂载进容器的 /workspace，
-//     按需拉起、环境变量隔离注入、只读挂载与空闲/超期强制销毁；
-//   - e2b：E2B 云端沙箱——按会话在云端拉起隔离 Linux 虚机，命令经 envd 执行，
-//     工作区由驱动在每次执行前后与宿主目录双向同步（云端没有宿主挂载）。
+// 统一模型：**所有工具调用都发生在沙箱里**——文件读写与进程执行全部经
+// Driver 接口操作沙箱内的工作区，三种驱动语义完全一致：
+//   - local：本地隔离执行——沙箱即宿主，文件操作退化为 os 调用，
+//     进程以会话工作区为 cwd 跑在宿主机上，超时整棵进程树击杀；
+//   - docker：每会话独立容器——文件经 Engine /archive API（tar 流）传入传出，
+//     不 bind 挂载宿主目录，按需拉起、环境隔离注入、只读挂载与超期强制销毁；
+//   - e2b：E2B 云端沙箱——文件经 envd /files REST 传入传出，按会话在云端
+//     拉起隔离 Linux 虚机。
 //
-// 文件类工具（read_file / write_file / edit_file / export_artifact）始终直接操作
-// 宿主工作区目录：docker 驱动下该目录被挂载进容器，e2b 驱动下由驱动同步，
-// 因此驱动切换对文件语义零影响。依赖方向保持 tools → sandbox 单向。
+// 持久化：宿主 workspace/<会话ID>/ 是沙箱工作区的镜像——写入双落、bash
+// 执行后回拉变更、沙箱销毁重建时推送镜像，沙箱生灭不丢数据。
+// 依赖方向保持 tools → sandbox 单向。
 package sandbox
 
 import (
@@ -30,7 +32,12 @@ type Result struct {
 	Err      error
 }
 
-// Driver 沙箱驱动。hostDir 为会话工作区的宿主绝对路径，由调用方（tools 层）解析。
+// Driver 沙箱驱动。统一模型：**工作区文件活在沙箱里**，所有工具（文件与进程）
+// 都经驱动读写沙箱；宿主目录 hostDir 只是持久化镜像——写入双落、bash 执行后回拉
+// 变更、沙箱重建时推送镜像，沙箱生灭不丢数据。三种驱动的语义因此完全一致：
+//   - local：沙箱即宿主，文件操作退化为直接 os 调用（零开销）
+//   - docker：文件经 Engine /archive API（tar 流）传入传出容器，不做 bind 挂载
+//   - e2b：文件经 envd /files REST 传入传出云端沙箱
 type Driver interface {
 	Name() string
 	// EnvNote 运行环境契约说明，注入 bash 工具描述，让模型按真实环境写命令
@@ -39,7 +46,13 @@ type Driver interface {
 	RunBash(ctx context.Context, sessionID, hostDir, command string, timeoutSecs int) Result
 	// RunPython 执行工作区内的一段 Python 脚本，scriptRel 为工作区相对路径
 	RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeoutSecs int) Result
-	// Close 销毁该会话的沙箱资源（本地驱动空操作；docker 驱动强制销毁容器）
+	// ReadFile 读取工作区内相对路径的文件（沙箱内的实时内容）
+	ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error)
+	// WriteFile 写入工作区内相对路径的文件（沙箱与宿主镜像双落）
+	WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error
+	// RemoveFile 删除工作区内相对路径的文件（临时脚本清理用）
+	RemoveFile(sessionID, hostDir, rel string)
+	// Close 销毁该会话的沙箱资源（本地驱动空操作；其余驱动强制销毁）
 	Close(sessionID string)
 }
 
@@ -54,10 +67,8 @@ type Config struct {
 	// IdleTimeoutSec / MaxLifetimeSec docker 容器空闲多久 / 最长存活多久后强制销毁（秒，<=0 用默认值）
 	IdleTimeoutSec int `yaml:"IdleTimeoutSec" mapstructure:"IdleTimeoutSec"`
 	MaxLifetimeSec int `yaml:"MaxLifetimeSec" mapstructure:"MaxLifetimeSec"`
-	// WorkspaceHostDir 后端自己跑在容器里（docker compose 部署）时，工作区在宿主上的
-	// 绝对路径（如 /data/ai-agent/backend/workspace）。docker 驱动的 bind 挂载源直接用
-	// 它拼接 会话ID，不依赖后端视角路径；后端直跑宿主时留空（hostDir 即宿主路径）
-	WorkspaceHostDir string `yaml:"WorkspaceHostDir" mapstructure:"WorkspaceHostDir"`
+	// WorkspaceHostDir 已移除：docker 驱动不再 bind 挂载宿主目录（文件经
+	// /archive API 传输，与 e2b 模型统一），宿主/沙箱路径二元性不复存在
 	// MemoryMB / CPUS / PidsLimit 沙箱容器资源限额（防失控脚本打爆宿主；0 为不限制）
 	MemoryMB  int64   `yaml:"MemoryMB" mapstructure:"MemoryMB"`
 	CPUS      float64 `yaml:"CPUS" mapstructure:"CPUS"`
@@ -112,6 +123,19 @@ func RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeou
 
 // Close 销毁会话沙箱（会话删除时调用；尽力而为，失败不阻塞删除流程）
 func Close(sessionID string) { driver.Close(sessionID) }
+
+// ReadFile 经活动驱动读取工作区文件
+func ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
+	return driver.ReadFile(ctx, sessionID, hostDir, rel)
+}
+
+// WriteFile 经活动驱动写入工作区文件（沙箱与宿主镜像双落）
+func WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
+	return driver.WriteFile(ctx, sessionID, hostDir, rel, data)
+}
+
+// RemoveFile 经活动驱动删除工作区文件
+func RemoveFile(sessionID, hostDir, rel string) { driver.RemoveFile(sessionID, hostDir, rel) }
 
 // localEnvNote 本地驱动的环境契约：宿主即执行环境，按构建平台给模型真实预期
 func localEnvNote() string {

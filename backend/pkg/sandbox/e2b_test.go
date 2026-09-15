@@ -42,7 +42,7 @@ func TestConnectFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTarAndSnapshotHelpers(t *testing.T) {
+func TestTarHelpers(t *testing.T) {
 	src := t.TempDir()
 	write := func(rel, content string) {
 		p := filepath.Join(src, filepath.FromSlash(rel))
@@ -56,16 +56,7 @@ func TestTarAndSnapshotHelpers(t *testing.T) {
 	write("a.txt", "hello")
 	write("nested/b.py", "print(1)")
 	write(e2bSyncMarker, "skip")
-	write(".pyexec_tmp.py", "skip")
-
-	snap1, err := fileSnapshot(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-	// marker 被跳过；.pyexec_* 临时脚本参与同步（e2b 驱动需上传执行）
-	if len(snap1) != 3 {
-		t.Fatalf("snapshot content wrong: %v", snap1)
-	}
+	write(".pyexec_tmp.py", "py code")
 
 	data, err := tarWorkspace(src)
 	if err != nil {
@@ -76,7 +67,7 @@ func TestTarAndSnapshotHelpers(t *testing.T) {
 	if err := untarTo(dst, data); err != nil {
 		t.Fatal(err)
 	}
-	for rel, want := range map[string]string{"a.txt": "hello", "nested/b.py": "print(1)"} {
+	for rel, want := range map[string]string{"a.txt": "hello", "nested/b.py": "print(1)", ".pyexec_tmp.py": "py code"} {
 		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(rel)))
 		if err != nil || string(got) != want {
 			t.Fatalf("%s wrong: %q %v", rel, got, err)
@@ -84,20 +75,6 @@ func TestTarAndSnapshotHelpers(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dst, e2bSyncMarker)); !os.IsNotExist(err) {
 		t.Fatal("marker should be skipped in tar")
-	}
-
-	// 快照变更检测：mtime 更新后才认为变化
-	snap2, _ := fileSnapshot(src)
-	if !sameSnapshot(snap1, snap2) {
-		t.Fatal("unchanged dir should yield same snapshot")
-	}
-	future := time.Now().Add(time.Second)
-	if err := os.Chtimes(filepath.Join(src, "a.txt"), future, future); err != nil {
-		t.Fatal(err)
-	}
-	snap3, _ := fileSnapshot(src)
-	if sameSnapshot(snap1, snap3) {
-		t.Fatal("touched file should change snapshot")
 	}
 
 	// 解包时的路径穿越防护
@@ -250,9 +227,9 @@ func TestE2BLiveRealCloud(t *testing.T) {
 		t.Fatalf("python3 wrong: %+v", res)
 	}
 
-	// RunPython 全链路（脚本由 tools 层写入宿主工作区，驱动负责上行）
-	if err := os.WriteFile(filepath.Join(ws, ".pyexec_check.py"), []byte("print('py-ok')"), 0o644); err != nil {
-		t.Fatal(err)
+	// RunPython 全链路：脚本经驱动写入沙箱后执行（新模型：文件工具走驱动）
+	if err := d.WriteFile(ctx, "live-s1", ws, ".pyexec_check.py", []byte("print('py-ok')")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
 	}
 	pres := d.RunPython(ctx, "live-s1", ws, ".pyexec_check.py", 60)
 	if pres.Err != nil || !bytes.Contains([]byte(pres.Stdout), []byte("py-ok")) {

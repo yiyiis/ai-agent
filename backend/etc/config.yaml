@@ -68,9 +68,8 @@ Sandbox:
   NetworkMode: "bridge"
   IdleTimeoutSec: 900        # 空闲 15 分钟销毁容器
   MaxLifetimeSec: 43200      # 容器最长存活 12 小时
-  # 后端自己跑在容器里（docker compose 部署）时必填：工作区在宿主上的绝对路径，
-  # docker 驱动直接用它拼接 会话ID 作为 bind 源；后端直跑宿主时留空
-  WorkspaceHostDir: ""      # 例 "/data/ai-agent/backend/workspace"
+  # 工作区文件经传输 API 进出沙箱（docker: /archive tar 流；e2b: /files REST），
+  # 不做宿主 bind 挂载、无需路径映射——三种驱动语义统一，也支持远程 Docker daemon
   MemoryMB: 0                # 沙箱容器内存限额（防失控脚本打爆宿主，0 不限制）
   CPUS: 0                    # CPU 限额（核数，0 不限制）
   PidsLimit: 0               # 进程数限额（0 不限制）
