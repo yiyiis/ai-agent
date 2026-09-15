@@ -139,7 +139,12 @@ func strPtr(s string) *string {
 // buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史人设污染）
 func buildContext(session *model.Session, history []model.Message) []provider.ChatMessage {
 	modelNote := fmt.Sprintf("当前对话由模型 %s 提供支持。如果用户询问你是什么模型，如实回答自己是 %s。", session.Model, session.Model)
-	toolNote := "## 文件操作规范\n- 修改已有文件时，优先使用 edit_file 进行局部精确替换，不要用 write_file 重写整个文件。\n- write_file 仅用于新建文件或写入短文本（<3KB）；避免在 write_file 的 content 参数中塞入超长大段内容。"
+	toolNote := "## 文件操作规范\n" +
+		"- 修改已有文件时，优先使用 edit_file 进行局部精确替换，不要用 write_file 重写整个文件。\n" +
+		"- write_file 仅用于新建文件或写入短文本（<3KB）；避免在 write_file 的 content 参数中塞入超长大段内容。\n\n" +
+		"## 产物交付规范\n" +
+		"- 凡是用户最终关心的产出物（文档、报告、代码文件、图片、数据文件等），写入工作区后**必须**再调用 export_artifact 导出，用户才能拿到可下载/预览的链接。\n" +
+		"- 不要只在回复里描述或粘贴文件内容来代替导出；正文概述可以写，但链接必须通过 export_artifact 给出。"
 	systemPrompt := session.SystemPrompt
 	if systemPrompt == "" {
 		systemPrompt = modelNote + "\n\n" + toolNote
