@@ -82,15 +82,19 @@ func TestContainerSpec(t *testing.T) {
 	}
 }
 
-func TestBindHostPathMapping(t *testing.T) {
-	d := &dockerDriver{cfg: Config{HostWorkspaceMap: "/app/workspace=/srv/ai-agent/workspace"}}
-	if got := d.bindHostPath("/app/workspace/abc-123"); got != "/srv/ai-agent/workspace/abc-123" {
-		t.Fatalf("mapped path wrong: %q", got)
+func TestBindHostPath(t *testing.T) {
+	// 配置了宿主工作区根：直接拼 会话ID，与后端视角路径无关（后端在容器里的路径叫什么都行）
+	d := &dockerDriver{cfg: Config{WorkspaceHostDir: "/data/ai-agent/backend/workspace"}}
+	if got := d.bindHostPath("abc-123", "/app/workspace/abc-123"); got != "/data/ai-agent/backend/workspace/abc-123" {
+		t.Fatalf("host dir bind wrong: %q", got)
 	}
-	// 无映射配置：原样（Windows 反斜杠转正斜杠）
+	if got := d.bindHostPath("abc-123", "/any/other/view/abc-123"); got != "/data/ai-agent/backend/workspace/abc-123" {
+		t.Fatalf("should ignore backend view: %q", got)
+	}
+	// 未配置：原样（Windows 反斜杠转正斜杠）
 	d2 := &dockerDriver{}
-	if got := d2.bindHostPath(`D:\ws\s1`); got != "D:/ws/s1" {
-		t.Fatalf("unmapped path wrong: %q", got)
+	if got := d2.bindHostPath("s1", `D:\ws\s1`); got != "D:/ws/s1" {
+		t.Fatalf("unconfigured bind wrong: %q", got)
 	}
 }
 

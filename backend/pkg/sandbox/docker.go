@@ -11,6 +11,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -245,7 +246,7 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 
 // containerSpec 组装容器创建参数
 func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateReq {
-	binds := []string{d.bindHostPath(hostDir) + ":" + containerPath}
+	binds := []string{d.bindHostPath(sessionID, hostDir) + ":" + containerPath}
 	binds = append(binds, d.cfg.Mounts...) // 形如 host:container[:ro]，只读挂载由调用方声明
 
 	env := append([]string{"AI_AGENT_SESSION=" + sessionID}, d.cfg.Env...)
@@ -259,22 +260,20 @@ func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateR
 		HostConfig: hostConfig{
 			Binds:       binds,
 			NetworkMode: d.cfg.NetworkMode,
-			Memory:      d.cfg.MemoryMB << 20,           // 0 = 不限制
-			NanoCPUs:    int64(d.cfg.CPUS * 1e9),        // 0 = 不限制
+			Memory:      d.cfg.MemoryMB << 20,            // 0 = 不限制
+			NanoCPUs:    int64(d.cfg.CPUS * 1e9),         // 0 = 不限制
 			PidsLimit:   pidsLimitOrNil(d.cfg.PidsLimit), // nil = 不限制
 		},
 	}
 }
 
-// bindHostPath 工作区的 bind 源路径：后端直跑宿主时 hostDir 即宿主路径；
-// 后端自己跑在容器里时，hostDir 是容器内视角（如 /app/workspace/<sid>），
-// bind 挂载必须翻译成宿主真实路径——由 HostWorkspaceMap（容器前缀=宿主前缀）提供映射。
-func (d *dockerDriver) bindHostPath(hostDir string) string {
-	m := d.cfg.HostWorkspaceMap
-	if m != "" {
-		if parts := strings.SplitN(m, "=", 2); len(parts) == 2 && strings.HasPrefix(hostDir, parts[0]) {
-			return toBindPath(parts[1] + strings.TrimPrefix(hostDir, parts[0]))
-		}
+// bindHostPath 工作区 bind 源路径（必须是宿主视角的绝对路径）：
+//   - 配置了 WorkspaceHostDir（后端自己跑在容器里）：直接 宿主根/会话ID 拼接，
+//     不经过后端视角路径——后端容器内叫 /app/workspace 还是别的，一概无关
+//   - 未配置（后端直跑宿主）：hostDir 本身就是宿主路径（SessionDir 已保证绝对）
+func (d *dockerDriver) bindHostPath(sessionID, hostDir string) string {
+	if d.cfg.WorkspaceHostDir != "" {
+		return toBindPath(filepath.Join(d.cfg.WorkspaceHostDir, sessionID))
 	}
 	return toBindPath(hostDir)
 }
