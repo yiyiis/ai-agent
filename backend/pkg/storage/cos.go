@@ -88,7 +88,8 @@ const signDuration = 10 * time.Minute
 //
 //	KeyTime      = start;end（unix 秒）
 //	SignKey      = hex(hmac_sha1(SecretKey, KeyTime))
-//	HttpString   = method\nUriPath\nparams\nheaders\n   （params/headers 不参与签名时留空段）
+//	HttpString   = lowercase(method)\nUriPath\nparams\nheaders\n   （method 必须小写；
+//	               params/headers 不参与签名时留空段，官方示例 "put\n/test.file\n\n\n"）
 //	StringToSign = sha1\nKeyTime\nhex(sha1(HttpString))\n
 //	Signature    = hex(hmac_sha1(SignKey, StringToSign))
 func cosAuthorization(secretID, secretKey, method, uriPath string, now time.Time) string {
@@ -100,7 +101,7 @@ func cosAuthorization(secretID, secretKey, method, uriPath string, now time.Time
 	mac.Write([]byte(keyTime))
 	signKey := hex.EncodeToString(mac.Sum(nil))
 
-	httpString := method + "\n" + uriPath + "\n\n\n"
+	httpString := strings.ToLower(method) + "\n" + uriPath + "\n\n\n"
 	httpStringSum := sha1.Sum([]byte(httpString))
 
 	sts := "sha1\n" + keyTime + "\n" + hex.EncodeToString(httpStringSum[:]) + "\n"

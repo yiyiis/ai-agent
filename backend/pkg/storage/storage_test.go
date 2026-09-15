@@ -71,13 +71,14 @@ func TestLocalStoragePut(t *testing.T) {
 }
 
 // TestCOSAuthorizationDeterministic 固定密钥与时间窗下签名字段应完全可复现，
-// 防止签名拼接被无意改动（结构与算法以独立步骤重新推演，不调用被测函数内部零件）
+// 防止签名拼接被无意改动（结构与算法以独立步骤重新推演，不调用被测函数内部零件）；
+// HttpString 的 method 按官方规范取小写
 func TestCOSAuthorizationDeterministic(t *testing.T) {
 	now := time.Unix(1700000000, 0)
 	got := cosAuthorization("AKIDtest", "secret-test", "PUT", "/a/b.txt", now)
 
 	keyTime := "1700000000;1700000600"
-	httpStringSum := sha1Hex("PUT\n/a/b.txt\n\n\n")
+	httpStringSum := sha1Hex("put\n/a/b.txt\n\n\n")
 	sts := "sha1\n" + keyTime + "\n" + httpStringSum + "\n"
 	wantSig := hmacSHA1Hex(hmacSHA1Hex("secret-test", keyTime), sts)
 	want := "q-sign-algorithm=sha1&q-ak=AKIDtest&q-sign-time=" + keyTime +
