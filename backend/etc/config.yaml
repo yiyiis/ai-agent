@@ -44,7 +44,8 @@ LLM:
         - "GLM-5-Turbo"
         - "GLM-4.7"
 
-# 对象存储：Bucket 留空走本地 uploads/ 目录；填写后聊天附件与沙箱产物直传腾讯云 COS
+# 对象存储：仅用于 export_artifact 导出的产物（可分享的公网链接）。
+# Bucket 留空时产物落本地 uploads/ 并经 /api/uploads/:name 下载；聊天附件始终落本地、不受此配置影响。
 COS:
   SecretId: "YOUR_TENCENT_COS_SECRET_ID"
   SecretKey: "YOUR_TENCENT_COS_SECRET_KEY"

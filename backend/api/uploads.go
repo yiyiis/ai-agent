@@ -34,7 +34,9 @@ type UploadOut struct {
 }
 
 // UploadFile 处理 POST /api/uploads：multipart 字段 file，返回附件元数据。
-// 存储经 pkg/storage 统一分发：未配置 COS 时落本地 uploads/，配置后直传对象存储。
+// 聊天附件**始终落本地** uploads/（storage.Local()，不受 COS 配置影响）——
+// 附件每轮开始都要物化进会话工作区，传对象存储再拉回来是多余的公网往返；
+// COS 只服务 export_artifact 导出的产物（那才需要公网分享链接）。
 func UploadFile(ctx context.Context, req *UploadFileReq) (*UploadOut, error) {
 	fh := req.File
 
@@ -56,7 +58,7 @@ func UploadFile(ctx context.Context, req *UploadFileReq) (*UploadOut, error) {
 	}
 	defer src.Close()
 
-	obj, err := storage.Default().Put(ctx, orig, src, fh.Size, fh.Header.Get("Content-Type"))
+	obj, err := storage.Local().Put(ctx, orig, src, fh.Size, fh.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, err
 	}

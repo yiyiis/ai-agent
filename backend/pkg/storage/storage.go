@@ -1,8 +1,10 @@
-// Package storage 统一对象存储：聊天附件上传与沙箱产物导出的公共通道（阶段四）。
+// Package storage 统一对象存储（阶段四）：沙箱产物导出的对外通道。
 //
-// 驱动在 Init 时按配置定死，业务侧只依赖 Default() 返回的 Storage 接口：
-//   - local：落本地 uploads/ 目录，返回 /api/uploads/<name> 相对链接（默认，开箱即用）；
-//   - cos：签名直传腾讯云 COS，返回公网 URL。
+// 聊天附件不走这里——附件每轮开始都要物化进会话工作区（后端本地），
+// 传对象存储再拉回来只是多余的公网往返，因此附件一律落本地 uploads/
+// （见 api.UploadFile 的 storage.Local()）。对象存储只服务 export_artifact
+// 导出的产物：需要可分享、可公网预览、不占后端带宽的链接。
+// 驱动在 Init 时按配置定死：Bucket 留空用 local，配置后直传腾讯云 COS。
 package storage
 
 import (
@@ -101,4 +103,10 @@ func Init(cfg Config) {
 // Default 全局默认存储驱动
 func Default() Storage {
 	return defaultStorage
+}
+
+// Local 强制本地驱动（不受 Init 配置影响）：聊天附件用——无论是否配置 COS
+// 都落本地 uploads/，前端经 /api/uploads/:name 预览，工作区物化零网络开销
+func Local() Storage {
+	return localStorage{}
 }
