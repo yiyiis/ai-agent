@@ -12,7 +12,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -316,28 +320,45 @@ func collectSlots(slots map[int]*savedCall, order []int) []savedCall {
 	return calls
 }
 
-// materializeAttachments 把用户上传的附件从全局 uploads/ 拷进当前会话工作区，
+// UploadsDir 上传附件下载客户端（从对象存储拉回附件用，超时与体积上限单独约束）
+var attachmentHTTPClient = &http.Client{Timeout: 2 * time.Minute}
+
+// materializeAttachments 把用户上传的附件落进当前会话工作区，
 // 使工作区工具（read_file/edit_file/bash 等）可以直接操作它们。
-// 返回成功落入工作区的附件（Filename 已替换为实际落盘名，供上下文注入保持一致）。
-// 非本地上传的 url（如已配置 COS 时的公网链接）跳过；失败静默降级为"仅引用"。
-func materializeAttachments(sessionID string, attachments []Attachment) []Attachment {
+// 本地驱动（/api/uploads/ URL）直接从 uploads/ 目录拷贝；对象存储驱动（COS 公网
+// URL）下载回填。返回成功落入工作区的附件（Filename 已替换为实际落盘名）；
+// 失败静默降级为"仅引用"。
+func materializeAttachments(ctx context.Context, sessionID string, attachments []Attachment) []Attachment {
 	var placed []Attachment
 	dir, err := tools.SessionDir(sessionID)
 	if err != nil {
 		return nil
 	}
 	for _, a := range attachments {
-		name := strings.TrimPrefix(a.URL, "/api/uploads/")
-		if name == "" || name == a.URL {
-			continue
-		}
-		data, err := os.ReadFile(filepath.Join(storage.LocalRoot, filepath.Base(name)))
-		if err != nil {
+		var data []byte
+		if name := strings.TrimPrefix(a.URL, "/api/uploads/"); name != "" && name != a.URL {
+			// 本地存储驱动：直接读 uploads/ 目录
+			d, err := os.ReadFile(filepath.Join(storage.LocalRoot, filepath.Base(name)))
+			if err != nil {
+				continue
+			}
+			data = d
+		} else if strings.HasPrefix(a.URL, "https://") || strings.HasPrefix(a.URL, "http://") {
+			// 对象存储直传的附件：拉回本地再落工作区（公开读桶；私有桶需换签名 GET）
+			d, err := downloadAttachment(ctx, a.URL)
+			if err != nil {
+				continue
+			}
+			data = d
+		} else {
 			continue
 		}
 		safe := workspaceName(a.Filename)
 		if safe == "" {
-			safe = filepath.Base(name) // 退回服务端随机存储名（hex，必然安全）
+			safe = fallbackWorkspaceName(a.URL)
+		}
+		if safe == "" {
+			continue
 		}
 		if err := os.WriteFile(filepath.Join(dir, safe), data, 0o644); err != nil {
 			continue
@@ -346,6 +367,32 @@ func materializeAttachments(sessionID string, attachments []Attachment) []Attach
 		placed = append(placed, a)
 	}
 	return placed
+}
+
+// fallbackWorkspaceName 从 URL 尾段兜底生成工作区文件名（原文件名清洗后无效时）
+func fallbackWorkspaceName(rawURL string) string {
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		return ""
+	}
+	return workspaceName(path.Base(u.Path))
+}
+
+// downloadAttachment 下载对象存储附件（带体积上限，读流即断）
+func downloadAttachment(ctx context.Context, rawURL string) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := attachmentHTTPClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("下载附件失败: HTTP %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, storage.MaxBytes+1))
 }
 
 // workspaceName 把原始文件名转成各平台都能落盘的名字：去路径成分、
@@ -396,7 +443,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
 	msgs := buildContext(session, history)
 	// 附件落入会话工作区，工具可直接按文件名操作（多模态内容流属于阶段八）
-	placed := materializeAttachments(sessionID, attachments)
+	placed := materializeAttachments(ctx, sessionID, attachments)
 	userTurn := provider.ChatMessage{Role: "user", Content: userContent}
 	if len(placed) > 0 {
 		var b strings.Builder

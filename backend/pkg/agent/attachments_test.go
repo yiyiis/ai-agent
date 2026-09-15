@@ -1,6 +1,9 @@
 package agent
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"testing"
@@ -31,7 +34,7 @@ func TestMaterializeAttachments(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	placed := materializeAttachments("sess-1", []Attachment{
+	placed := materializeAttachments(context.Background(), "sess-1", []Attachment{
 		{URL: "/api/uploads/ab12cd34_README.md", Filename: "README.md", ContentType: "text/markdown"},
 		{URL: "https://cdn.example.com/x.png", Filename: "x.png"},  // 非本地上传 url，跳过
 		{URL: "/api/uploads/missing.bin", Filename: "missing.bin"}, // 源文件不存在，跳过
@@ -42,6 +45,31 @@ func TestMaterializeAttachments(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(wsRoot, "sess-1", "README.md"))
 	if err != nil || string(data) != "hello readme" {
 		t.Fatalf("工作区文件内容不符: %q, err=%v", string(data), err)
+	}
+}
+
+// TestMaterializeAttachmentsFromCOS 对象存储直传的附件（公网 URL）应下载回填工作区
+func TestMaterializeAttachmentsFromCOS(t *testing.T) {
+	_, wsRoot := redirectDirs(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/ab12cd34_report.md" {
+			http.NotFound(w, r)
+			return
+		}
+		_, _ = w.Write([]byte("# cloud doc"))
+	}))
+	t.Cleanup(srv.Close)
+
+	placed := materializeAttachments(context.Background(), "sess-2", []Attachment{
+		{URL: srv.URL + "/ab12cd34_report.md", Filename: "报告 v1.md"},
+	})
+	if len(placed) != 1 || placed[0].Filename != "报告 v1.md" {
+		t.Fatalf("placed = %+v", placed)
+	}
+	data, err := os.ReadFile(filepath.Join(wsRoot, "sess-2", "报告 v1.md"))
+	if err != nil || string(data) != "# cloud doc" {
+		t.Fatalf("COS 附件未落工作区: %q, err=%v", string(data), err)
 	}
 }
 
