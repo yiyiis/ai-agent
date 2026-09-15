@@ -223,13 +223,15 @@ func ParseArguments(raw string) (map[string]any, string) {
 	return parsed, ""
 }
 
-// SessionDir 返回（并确保存在）会话工作区目录
+// SessionDir 返回（并确保存在）会话工作区目录。
+// 必须返回绝对路径：docker 驱动的 bind 挂载源要求宿主绝对路径，
+// 相对路径会被 Docker 误判为具名卷名（含 / 直接 400）。
 func SessionDir(sessionID string) (string, error) {
 	d := filepath.Join(WorkspaceRoot, sessionID)
 	if err := os.MkdirAll(d, 0o755); err != nil {
 		return "", fmt.Errorf("创建会话工作区失败: %w", err)
 	}
-	return d, nil
+	return filepath.Abs(d)
 }
 
 // resolve 把工具入参的路径解析到会话工作区内，越界一律报错

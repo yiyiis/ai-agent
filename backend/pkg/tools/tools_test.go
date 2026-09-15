@@ -111,6 +111,23 @@ func TestEditFileAmbiguous(t *testing.T) {
 	}
 }
 
+func TestSessionDirReturnsAbsolute(t *testing.T) {
+	// 回归：WorkspaceRoot 为相对路径时 SessionDir 也必须返回绝对路径，
+	// 否则 docker 驱动的 bind 源会被判为非法卷名（线上 400 的根因）
+	old := WorkspaceRoot
+	WorkspaceRoot = "workspace"
+	t.Cleanup(func() { WorkspaceRoot = old })
+
+	dir, err := SessionDir("sess-abs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !filepath.IsAbs(dir) {
+		t.Fatalf("SessionDir must be absolute, got %q", dir)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+}
+
 func TestCheckArgsMessages(t *testing.T) {
 	out := Execute(context.Background(), "sess1", "write_file", map[string]any{"path": "a.txt"})
 	if !strings.Contains(out, "[参数缺失]") || !strings.Contains(out, "content") {
