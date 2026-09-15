@@ -1,12 +1,14 @@
 // Package sandbox 多驱动执行沙箱（阶段四核心）。
 //
-// 进程类工具（bash / python_exec）的执行载体，按配置在两种驱动间无缝切换：
+// 进程类工具（bash / python_exec）的执行载体，按配置在三种驱动间无缝切换：
 //   - local：本地隔离执行——命令以会话工作区为 cwd 跑在宿主机上，超时整棵进程树击杀；
 //   - docker：每会话独立容器——工作区目录绑定挂载进容器的 /workspace，
-//     按需拉起、环境变量隔离注入、只读挂载与空闲/超期强制销毁。
+//     按需拉起、环境变量隔离注入、只读挂载与空闲/超期强制销毁；
+//   - e2b：E2B 云端沙箱——按会话在云端拉起隔离 Linux 虚机，命令经 envd 执行，
+//     工作区由驱动在每次执行前后与宿主目录双向同步（云端没有宿主挂载）。
 //
 // 文件类工具（read_file / write_file / edit_file / export_artifact）始终直接操作
-// 宿主工作区目录：docker 驱动下该目录被挂载进容器，两侧看到的是同一份文件，
+// 宿主工作区目录：docker 驱动下该目录被挂载进容器，e2b 驱动下由驱动同步，
 // 因此驱动切换对文件语义零影响。依赖方向保持 tools → sandbox 单向。
 package sandbox
 
@@ -43,15 +45,20 @@ type Driver interface {
 
 // Config 沙箱配置段（包自持配置、由 config 包组合，yaml 键与 etc/config.yaml 对齐）
 type Config struct {
-	Driver      string `yaml:"Driver" mapstructure:"Driver"`             // local | docker
-	DockerURL   string `yaml:"DockerURL" mapstructure:"DockerURL"`       // tcp:// | unix:// | npipe://；空则按平台默认
-	Image       string `yaml:"Image" mapstructure:"Image"`               // 容器镜像，需含 bash 与 python3
-	Env         []string `yaml:"Env" mapstructure:"Env"`                 // 注入容器的环境变量（KEY=VALUE）
-	Mounts      []string `yaml:"Mounts" mapstructure:"Mounts"`           // 额外挂载 host:container[:ro]
-	NetworkMode string `yaml:"NetworkMode" mapstructure:"NetworkMode"`   // bridge | none | host
-	// IdleTimeoutSec / MaxLifetimeSec 空闲多久 / 最长存活多久后强制销毁容器（秒，<=0 用默认值）
+	Driver      string `yaml:"Driver" mapstructure:"Driver"`       // local | docker | e2b
+	DockerURL   string `yaml:"DockerURL" mapstructure:"DockerURL"` // tcp:// | unix:// | npipe://；空则按平台默认
+	Image       string `yaml:"Image" mapstructure:"Image"`         // docker 沙箱镜像，需含 bash 与 python3
+	Env         []string `yaml:"Env" mapstructure:"Env"`           // 注入容器的环境变量（KEY=VALUE）
+	Mounts      []string `yaml:"Mounts" mapstructure:"Mounts"`     // docker 额外挂载 host:container[:ro]
+	NetworkMode string `yaml:"NetworkMode" mapstructure:"NetworkMode"`
+	// IdleTimeoutSec / MaxLifetimeSec docker 容器空闲多久 / 最长存活多久后强制销毁（秒，<=0 用默认值）
 	IdleTimeoutSec int `yaml:"IdleTimeoutSec" mapstructure:"IdleTimeoutSec"`
 	MaxLifetimeSec int `yaml:"MaxLifetimeSec" mapstructure:"MaxLifetimeSec"`
+
+	// E2B 云端沙箱（Driver: e2b 时生效）
+	E2BKey        string `yaml:"E2BKey" mapstructure:"E2BKey"`               // e2b_ 开头的 API Key
+	E2BTemplate   string `yaml:"E2BTemplate" mapstructure:"E2BTemplate"`     // 沙箱模板 ID，默认 base
+	E2BTimeoutSec int    `yaml:"E2BTimeoutSec" mapstructure:"E2BTimeoutSec"` // 沙箱 TTL（秒），超时未续用会被服务端回收
 }
 
 // driver 活动驱动；默认本地，Init 未被调用时开箱即用
@@ -59,8 +66,17 @@ var driver Driver = localDriver{}
 
 // Init 装配全局沙箱驱动（main 启动时调用一次）
 func Init(cfg Config) {
-	if cfg.Driver == "docker" {
+	switch cfg.Driver {
+	case "docker":
 		driver = newDockerDriver(cfg)
+		return
+	case "e2b":
+		if cfg.E2BKey == "" {
+			fmt.Printf("[WARN] E2BKey 未配置，执行沙箱回落到 local 驱动\n")
+			driver = localDriver{}
+			return
+		}
+		driver = newE2BDriver(cfg)
 		return
 	}
 	driver = localDriver{}

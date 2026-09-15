@@ -52,10 +52,12 @@ COS:
   Region: "YOUR_COS_REGION"
   BasePath: ""
 
-# 执行沙箱：进程类工具（bash / python_exec）的执行载体
+# 执行沙箱：进程类工具（bash / python_exec）的执行载体，三驱动可切换
 #   local  —— 本地隔离执行（默认，零依赖开箱即用）
 #   docker —— 每会话独立容器：工作区目录绑定挂载进容器 /workspace，按需拉起、
 #             空闲/超期强制销毁；镜像需自带 bash 与 python3，容器内不可安装系统依赖
+#   e2b    —— E2B 云端沙箱：按会话在云端拉起隔离 Linux 虚机，工作区由驱动双向同步；
+#             需要 E2BKey，命令在云端执行（默认 base 模板）
 Sandbox:
   Driver: "local"
   DockerURL: ""              # tcp://127.0.0.1:2375 / unix:///var/run/docker.sock / npipe:////./pipe/docker_engine，留空按平台默认
@@ -65,3 +67,6 @@ Sandbox:
   NetworkMode: "bridge"
   IdleTimeoutSec: 900        # 空闲 15 分钟销毁容器
   MaxLifetimeSec: 43200      # 容器最长存活 12 小时
+  E2BKey: "YOUR_E2B_API_KEY" # Driver: e2b 时必填
+  E2BTemplate: "base"        # E2B 沙箱模板 ID
+  E2BTimeoutSec: 1800        # E2B 沙箱 TTL（秒），超时未使用会被云端回收
