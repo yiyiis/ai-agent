@@ -11,6 +11,7 @@ import (
 	"backend/dao"
 	"backend/pkg/errors"
 	"backend/pkg/jwt"
+	"backend/pkg/sandbox"
 	"github.com/google/uuid"
 )
 
@@ -299,6 +300,9 @@ func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, e
 	if err := dao.DeleteSession(ctx, req.ID); err != nil {
 		return nil, err
 	}
+
+	// 沙箱资源随会话销毁（docker 驱动强制移除容器；尽力而为，失败不影响删除结果）
+	sandbox.Close(req.ID)
 	return &StatusOKResp{Status: "ok"}, nil
 }
 

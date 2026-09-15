@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"backend/pkg/storage"
 	"backend/pkg/tools"
 )
 
@@ -17,9 +18,9 @@ func redirectDirs(t *testing.T) (uploadsRoot, wsRoot string) {
 	if err := os.MkdirAll(uploadsRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldUploads, oldWS := UploadsDir, tools.WorkspaceRoot
-	UploadsDir, tools.WorkspaceRoot = uploadsRoot, wsRoot
-	t.Cleanup(func() { UploadsDir, tools.WorkspaceRoot = oldUploads, oldWS })
+	oldUploads, oldWS := storage.LocalRoot, tools.WorkspaceRoot
+	storage.LocalRoot, tools.WorkspaceRoot = uploadsRoot, wsRoot
+	t.Cleanup(func() { storage.LocalRoot, tools.WorkspaceRoot = oldUploads, oldWS })
 	return uploadsRoot, wsRoot
 }
 

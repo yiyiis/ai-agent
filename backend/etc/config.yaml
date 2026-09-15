@@ -44,13 +44,24 @@ LLM:
         - "GLM-5-Turbo"
         - "GLM-4.7"
 
+# 对象存储：Bucket 留空走本地 uploads/ 目录；填写后聊天附件与沙箱产物直传腾讯云 COS
 COS:
   SecretId: "YOUR_TENCENT_COS_SECRET_ID"
   SecretKey: "YOUR_TENCENT_COS_SECRET_KEY"
-  Bucket: "YOUR_COS_BUCKET"
+  Bucket: ""
   Region: "YOUR_COS_REGION"
   BasePath: ""
 
+# 执行沙箱：进程类工具（bash / python_exec）的执行载体
+#   local  —— 本地隔离执行（默认，零依赖开箱即用）
+#   docker —— 每会话独立容器：工作区目录绑定挂载进容器 /workspace，按需拉起、
+#             空闲/超期强制销毁；镜像需自带 bash 与 python3，容器内不可安装系统依赖
 Sandbox:
-  E2BKey: "YOUR_E2B_API_KEY"
-  DockerURL: ""
+  Driver: "local"
+  DockerURL: ""              # tcp://127.0.0.1:2375 / unix:///var/run/docker.sock / npipe:////./pipe/docker_engine，留空按平台默认
+  Image: "python:3.12-slim"
+  Env: []                    # 注入容器的环境变量（KEY=VALUE）
+  Mounts: []                 # 额外挂载 host:container[:ro]，如 /data/assets:/assets:ro
+  NetworkMode: "bridge"
+  IdleTimeoutSec: 900        # 空闲 15 分钟销毁容器
+  MaxLifetimeSec: 43200      # 容器最长存活 12 小时

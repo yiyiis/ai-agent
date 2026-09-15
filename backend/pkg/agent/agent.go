@@ -21,6 +21,7 @@ import (
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/provider"
+	"backend/pkg/storage"
 	"backend/pkg/tools"
 	"github.com/google/uuid"
 )
@@ -37,7 +38,7 @@ const (
 
 // Event 协议事件（由路由层转成 SSE，字段名以 api 层契约为准）
 type Event struct {
-	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | done | error
+	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | tool_artifact | done | error
 	ID        string
 	Content   string // delta 正文增量
 	Reasoning string // delta 思考增量
@@ -46,19 +47,22 @@ type Event struct {
 	Output    string // 工具结果（tool_call_result）
 	Error     string // 错误文案（tool_call_error / error）
 	Usage     *provider.Usage
+	// Attachments 导出的工件（tool_artifact，每次事件携带一个；
+	// ID 为对应 tool_call_id，前端据此挂到工具调用卡片上）
+	Attachments []Attachment
 }
 
 // Deps 运行依赖：模型 Provider 与工具执行器（测试可注入假实现）
 type Deps struct {
 	Provider provider.Provider
-	ExecTool func(ctx context.Context, sessionID, name string, args map[string]any) string
+	ExecTool func(ctx context.Context, sessionID, name string, args map[string]any) tools.Output
 }
 
-func (d *Deps) execTool() func(ctx context.Context, sessionID, name string, args map[string]any) string {
+func (d *Deps) execTool() func(ctx context.Context, sessionID, name string, args map[string]any) tools.Output {
 	if d.ExecTool != nil {
 		return d.ExecTool
 	}
-	return tools.Execute
+	return tools.ExecuteWithOutput
 }
 
 func sigHash(s string) string {
@@ -88,13 +92,9 @@ func newSavedCall(id, name, args string) savedCall {
 	return c
 }
 
-// Attachment 聊天附件元数据（与前端 Attachment 契约一致）
-type Attachment struct {
-	URL         string `json:"url"`
-	Filename    string `json:"filename"`
-	Size        *int64 `json:"size,omitempty"`
-	ContentType string `json:"content_type,omitempty"`
-}
+// Attachment 聊天附件 / 工件元数据（与前端 Attachment 契约一致；定义为 tools 包的别名，
+// export_artifact 的产物在工具层产生、在消息与事件层消费）
+type Attachment = tools.Attachment
 
 // saveMessage 落库一条消息（含工具调用结构），返回 message_id。
 // 落库不随 Turn 取消而中断——中止/断连时已生成的部分内容仍要持久化，
@@ -311,13 +311,10 @@ func collectSlots(slots map[int]*savedCall, order []int) []savedCall {
 	return calls
 }
 
-// UploadsDir 上传文件的本地存储目录（与 api.UploadsRoot 同源，测试中可覆写）
-var UploadsDir = "uploads"
-
 // materializeAttachments 把用户上传的附件从全局 uploads/ 拷进当前会话工作区，
 // 使工作区工具（read_file/edit_file/bash 等）可以直接操作它们。
 // 返回成功落入工作区的附件（Filename 已替换为实际落盘名，供上下文注入保持一致）。
-// 非本地上传的 url（未来的对象存储）跳过；失败静默降级为"仅引用"。
+// 非本地上传的 url（如已配置 COS 时的公网链接）跳过；失败静默降级为"仅引用"。
 func materializeAttachments(sessionID string, attachments []Attachment) []Attachment {
 	var placed []Attachment
 	dir, err := tools.SessionDir(sessionID)
@@ -329,7 +326,7 @@ func materializeAttachments(sessionID string, attachments []Attachment) []Attach
 		if name == "" || name == a.URL {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(UploadsDir, filepath.Base(name)))
+		data, err := os.ReadFile(filepath.Join(storage.LocalRoot, filepath.Base(name)))
 		if err != nil {
 			continue
 		}
@@ -477,7 +474,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 		// 4. 并发执行，按发起顺序取回结果
 		exec := deps.execTool()
-		outputs := make([]string, len(calls))
+		outputs := make([]tools.Output, len(calls))
 		var wg sync.WaitGroup
 		for i, tc := range calls {
 			wg.Add(1)
@@ -485,7 +482,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				defer wg.Done()
 				args, parseErr := tools.ParseArguments(tc.Function.Arguments)
 				if parseErr != "" {
-					outputs[i] = parseErr
+					outputs[i] = tools.Output{Text: parseErr}
 					return
 				}
 				outputs[i] = exec(ctx, sessionID, tc.Function.Name, args)
@@ -493,33 +490,37 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 		wg.Wait()
 
-		// 5. Loop Guard 记账 + 结果事件 + 落库
+		// 5. Loop Guard 记账 + 结果事件 + 工件事件 + 落库
 		killed := false
 		for i, tc := range calls {
 			out := outputs[i]
 			sig := tc.Function.Name + ":" + sigHash(tc.Function.Arguments)
-			outHash := sigHash(out[:min(len(out), 400)])
+			outHash := sigHash(out.Text[:min(len(out.Text), 400)])
 			history := guard[sig]
 			history = append(history, outHash)
 			guard[sig] = history
 
 			if len(history) >= loopHintThreshold {
-				out = loopHintMessage(tc.Function.Name, len(history)) + "\n\n" + out
+				out.Text = loopHintMessage(tc.Function.Name, len(history)) + "\n\n" + out.Text
 			}
 			if len(history) >= loopKillThreshold && allSame(history) {
 				killed = true
 			}
 
-			if tools.IsErrorResult(out) {
-				emit(Event{Type: "tool_call_error", ID: tc.ID, Error: out})
+			if tools.IsErrorResult(out.Text) {
+				emit(Event{Type: "tool_call_error", ID: tc.ID, Error: out.Text})
 			} else {
-				emit(Event{Type: "tool_call_result", ID: tc.ID, Output: out})
+				emit(Event{Type: "tool_call_result", ID: tc.ID, Output: out.Text})
+			}
+			// 导出工件逐个广播（前端按 tool_call_id 挂到工具调用卡片上）
+			for _, att := range out.Attachments {
+				emit(Event{Type: "tool_artifact", ID: tc.ID, Attachments: []Attachment{att}})
 			}
 
-			if _, err := saveMessage(ctx, sessionID, "tool", out, "", nil, tc.ID, tc.Function.Name, nil); err != nil {
+			if _, err := saveMessage(ctx, sessionID, "tool", out.Text, "", nil, tc.ID, tc.Function.Name, out.Attachments); err != nil {
 				return err
 			}
-			msgs = append(msgs, provider.ChatMessage{Role: "tool", Content: out, ToolCallID: tc.ID})
+			msgs = append(msgs, provider.ChatMessage{Role: "tool", Content: out.Text, ToolCallID: tc.ID})
 		}
 
 		if killed {

@@ -4,6 +4,9 @@ import (
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"backend/pkg/log"
+	"backend/pkg/provider"
+	"backend/pkg/sandbox"
+	"backend/pkg/storage"
 	"fmt"
 	"os"
 	"github.com/spf13/viper"
@@ -14,39 +17,16 @@ type Server struct {
 	IP   string `yaml:"IP" mapstructure:"IP"`
 }
 
-type ProviderConfig struct {
-	Name    string   `yaml:"Name" mapstructure:"Name"`
-	BaseURL string   `yaml:"BaseURL" mapstructure:"BaseURL"`
-	APIKey  string   `yaml:"ApiKey" mapstructure:"ApiKey"`
-	Models  []string `yaml:"Models" mapstructure:"Models"`
-}
-
-type LLMConfig struct {
-	DefaultModel string           `yaml:"DefaultModel" mapstructure:"DefaultModel"`
-	Providers    []ProviderConfig `yaml:"Providers" mapstructure:"Providers"`
-}
-
-type COSConfig struct {
-	SecretID  string `yaml:"SecretId" mapstructure:"SecretId"`
-	SecretKey string `yaml:"SecretKey" mapstructure:"SecretKey"`
-	Bucket    string `yaml:"Bucket" mapstructure:"Bucket"`
-	Region    string `yaml:"Region" mapstructure:"Region"`
-	BasePath  string `yaml:"BasePath" mapstructure:"BasePath"`
-}
-
-type SandboxConfig struct {
-	E2BKey    string `yaml:"E2BKey" mapstructure:"E2BKey"`
-	DockerURL string `yaml:"DockerURL" mapstructure:"DockerURL"`
-}
-
+// Config 全量配置。各段配置由所属包自持（LLM/COS/Sandbox 同 DBConf/Auth/Log），
+// 本包只负责装配与解析，业务初始化统一走各包的 Init（见 main.go）。
 type Config struct {
 	DbConf  db.Config     `yaml:"DBConf" mapstructure:"DBConf"`
 	Server  Server        `yaml:"Server" mapstructure:"Server"`
 	Auth    jwt.Config    `yaml:"Auth" mapstructure:"Auth"`
 	Log     log.Config    `yaml:"Log" mapstructure:"Log"`
-	LLM     LLMConfig     `yaml:"LLM" mapstructure:"LLM"`
-	COS     COSConfig     `yaml:"COS" mapstructure:"COS"`
-	Sandbox SandboxConfig `yaml:"Sandbox" mapstructure:"Sandbox"`
+	LLM     provider.Config `yaml:"LLM" mapstructure:"LLM"`
+	COS     storage.Config `yaml:"COS" mapstructure:"COS"`
+	Sandbox sandbox.Config `yaml:"Sandbox" mapstructure:"Sandbox"`
 }
 
 var globalConf Config

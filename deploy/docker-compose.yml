@@ -48,6 +48,8 @@ services:
       - ../backend/workspace:/app/workspace
       - ../backend/uploads:/app/uploads
       - ../backend/logs:/app/logs
+      # 启用 Docker 容器沙箱（etc/config.yaml 的 Sandbox.Driver: docker）时挂载宿主 Docker：
+      # - /var/run/docker.sock:/var/run/docker.sock
 
   frontend:
     image: 43.138.247.132:3000/qqlhjt/ai-agent-frontend:${FRONTEND_TAG:-main}

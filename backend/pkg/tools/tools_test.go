@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"backend/pkg/storage"
 )
 
 func setupWorkspace(t *testing.T) string {
@@ -157,6 +159,50 @@ func TestBashToolIfAvailable(t *testing.T) {
 	}
 	if !strings.Contains(out, "hi") || !strings.Contains(out, "[exit_code] 0") {
 		t.Fatalf("bash output wrong: %s", out)
+	}
+}
+
+func TestExportArtifact(t *testing.T) {
+	root := setupWorkspace(t)
+	uploads := t.TempDir()
+	oldRoot := storage.LocalRoot
+	storage.LocalRoot = uploads
+	t.Cleanup(func() { storage.LocalRoot = oldRoot })
+
+	writeWsFile(t, root, "report.md", "# hello")
+
+	out := ExecuteWithOutput(context.Background(), "sess1", "export_artifact",
+		map[string]any{"path": "report.md", "filename": "最终报告.md"})
+	if IsErrorResult(out.Text) {
+		t.Fatalf("export failed: %s", out.Text)
+	}
+	if len(out.Attachments) != 1 {
+		t.Fatalf("attachment missing: %+v", out)
+	}
+	att := out.Attachments[0]
+	if !strings.HasPrefix(att.URL, "/api/uploads/") || att.Filename != "最终报告.md" ||
+		att.Size == nil || *att.Size != 7 || att.ContentType != "text/markdown" {
+		t.Fatalf("attachment wrong: %+v", att)
+	}
+	if _, err := os.Stat(filepath.Join(uploads, filepath.Base(att.URL))); err != nil {
+		t.Fatalf("stored file missing: %v", err)
+	}
+	if !strings.Contains(out.Text, "已导出") || !strings.Contains(out.Text, att.URL) {
+		t.Fatalf("summary should carry link: %s", out.Text)
+	}
+
+	// 不传 filename 时用 path 末段
+	out = ExecuteWithOutput(context.Background(), "sess1", "export_artifact", map[string]any{"path": "report.md"})
+	if IsErrorResult(out.Text) || out.Attachments[0].Filename != "report.md" {
+		t.Fatalf("default filename wrong: %s %+v", out.Text, out.Attachments)
+	}
+}
+
+func TestExportArtifactMissing(t *testing.T) {
+	setupWorkspace(t)
+	out := Execute(context.Background(), "sess1", "export_artifact", map[string]any{"path": "nope.md"})
+	if !IsErrorResult(out) || !strings.Contains(out, "[未读取]") {
+		t.Fatalf("missing file should fail clearly: %s", out)
 	}
 }
 

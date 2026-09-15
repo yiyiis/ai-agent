@@ -1,8 +1,9 @@
-// Package tools 内置工作区工具集（阶段二）。
+// Package tools 内置工作区工具集（阶段二建立，阶段四扩展产物导出）。
 //
-// 所有执行都发生在会话独立的本地工作区（workspace/<session_id>/）内：
-// 文件工具被约束在工作区路径下，bash / python_exec 以工作区为 cwd 执行。
-// 执行结果统一为喂回 LLM 的文本（作为 tool 消息的 content）。
+// 文件工具被约束在会话独立的本地工作区（workspace/<session_id>/）内；
+// 进程工具（bash / python_exec）经 pkg/sandbox 分发执行——本地直跑或进
+// Docker 容器，由沙箱配置决定，对模型透明。执行结果统一为喂回 LLM 的文本
+// （作为 tool 消息的 content），export_artifact 额外携带导出工件的附件元数据。
 package tools
 
 import (
@@ -11,14 +12,18 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"log/slog"
+	"mime"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
+
+	"backend/pkg/errors"
+	"backend/pkg/sandbox"
+	"backend/pkg/storage"
 )
 
 // WorkspaceRoot 会话工作区的根目录（相对后端运行目录），测试中可覆写
@@ -35,10 +40,11 @@ var ctrlRe = regexp.MustCompile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]")
 
 // toolTimeouts 各工具的外层硬超时（秒）
 var toolTimeouts = map[string]int{
-	"read_file":   30,
-	"write_file":  60,
-	"edit_file":   60,
-	"python_exec": 330,
+	"read_file":       30,
+	"write_file":      60,
+	"edit_file":       60,
+	"python_exec":     330,
+	"export_artifact": 120,
 }
 
 // errorPrefixes 结果以这些前缀开头时，前端按失败渲染，Agent 不将其视为进展
@@ -107,11 +113,7 @@ func Schemas() []any {
 			"function": map[string]any{
 				"name": "bash",
 				"description": "在工作区内执行一条 bash 命令，返回 stdout / stderr / exit_code。" +
-					"运行环境契约（违反会直接失败，别凭 Unix 惯例猜测）：\n" +
-					"- 宿主是 **Windows + Git Bash**，不是 Linux/macOS；\n" +
-					"- 启动目录就是会话工作区，用户上传与工具产出的文件都在这里；不要 cd 到 /tmp 等系统目录找文件（重定向到 /dev/null 可用）；\n" +
-					"- Python 解释器命令是 `python`；`python3` 是无效的商店占位符，会报 \"Python was not found\"；要跑 Python 优先用 python_exec 工具；\n" +
-					"- 没有 systemd、apt、brew 等，系统依赖不可安装。",
+					"运行环境契约（违反会直接失败，别凭惯例猜测）：\n" + sandbox.EnvNote(),
 				"parameters": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
@@ -138,15 +140,50 @@ func Schemas() []any {
 				},
 			},
 		},
+		map[string]any{
+			"type": "function",
+			"function": map[string]any{
+				"name": "export_artifact",
+				"description": "把工作区内的一个文件导出给用户：上传到对象存储并附在当前回答上，" +
+					"用户可直接预览/下载。\n" +
+					"**何时使用**：当你生成了用户最终关心的产出物（HTML 报告、Markdown 文档、" +
+					"图片、PDF、CSV、Excel 等）时，必须调用本工具，而不要把文件内容直接粘贴在回复里。\n" +
+					"**何时不使用**：临时的中间文件、调试输出、scratch 文件，不要导出。",
+				"parameters": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"path":     map[string]any{"type": "string", "description": "工作区内的相对路径，例如 report.html"},
+						"filename": map[string]any{"type": "string", "description": "可选；展示给用户的文件名（不传则用 path 末尾的文件名）"},
+					},
+					"required": []string{"path"},
+				},
+			},
+		},
 	}
 }
 
 var requiredArgs = map[string][]string{
-	"read_file":   {"path"},
-	"write_file":  {"path", "content"},
-	"edit_file":   {"path", "old_string", "new_string"},
-	"bash":        {"command"},
-	"python_exec": {"code"},
+	"read_file":       {"path"},
+	"write_file":      {"path", "content"},
+	"edit_file":       {"path", "old_string", "new_string"},
+	"bash":            {"command"},
+	"python_exec":     {"code"},
+	"export_artifact": {"path"},
+}
+
+// Attachment 导出工件的附件元数据（与前端 Attachment 契约一致，
+// 随 tool 消息落库并经 tool_artifact 事件推送）
+type Attachment struct {
+	URL         string `json:"url"`
+	Filename    string `json:"filename"`
+	Size        *int64 `json:"size,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+}
+
+// Output 单次工具执行的完整产物
+type Output struct {
+	Text        string       // 喂回 LLM 的执行结果文本
+	Attachments []Attachment // export_artifact 等导出的工件
 }
 
 // emptyOK 允许传空串的必填参数（edit_file 的 new_string 空串表示删除）
@@ -334,33 +371,7 @@ func formatResult(stdout, stderr string, exitCode int, killed bool) string {
 	return strings.Join(parts, "\n")
 }
 
-// runSubprocess 在 dir 下执行命令，超时由 ctx 控制；返回输出与退出码
-func runSubprocess(ctx context.Context, name string, argv []string, dir string) (string, string, int, bool) {
-	cmd := exec.CommandContext(ctx, name, argv...)
-	cmd.Dir = dir
-	var stdout, stderr strings.Builder
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-	prepareCmd(cmd)
-	// 超时先击杀整棵进程树（bash 派生的子进程一起回收），WaitDelay 兜底强杀
-	cmd.Cancel = func() error {
-		killTree(cmd)
-		return cmd.Process.Kill()
-	}
-	cmd.WaitDelay = 3 * time.Second
-
-	runErr := cmd.Run()
-	killed := ctx.Err() != nil
-	exitCode := 0
-	if runErr != nil {
-		if ee, ok := runErr.(*exec.ExitError); ok {
-			exitCode = ee.ExitCode()
-		} else {
-			exitCode = -1
-		}
-	}
-	return strings.ToValidUTF8(stdout.String(), ""), strings.ToValidUTF8(stderr.String(), ""), exitCode, killed
-}
+// runSubprocess 已随阶段四迁至 pkg/sandbox（本地驱动内）
 
 func randHex(n int) string {
 	b := make([]byte, n)
@@ -387,16 +398,16 @@ func timeoutFor(name string, args map[string]any) time.Duration {
 }
 
 // doExecute 单个工具的实际执行逻辑
-func doExecute(ctx context.Context, sessionID, name string, args map[string]any) string {
+func doExecute(ctx context.Context, sessionID, name string, args map[string]any) Output {
 	switch name {
 	case "read_file":
 		p, err := resolve(sessionID, argString(args, "path"))
 		if err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		data, err := os.ReadFile(p)
 		if err != nil {
-			return fmt.Sprintf("[未读取] %s 不存在或不是文件。", argString(args, "path"))
+			return Output{Text: fmt.Sprintf("[未读取] %s 不存在或不是文件。", argString(args, "path"))}
 		}
 		text := string(data)
 		offset := argInt(args, "offset", 0)
@@ -410,67 +421,64 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 			}
 			end := len(lines)
 			if limit > 0 && start+limit < end {
-				end = start + limit
+				end = start+limit
 			}
 			if start > len(lines) {
 				start = len(lines)
 			}
 			text = strings.Join(lines[start:end], "")
 		}
-		return capRead(sanitize(text), argString(args, "path"), paged)
+		return Output{Text: capRead(sanitize(text), argString(args, "path"), paged)}
 
 	case "write_file":
 		p, err := resolve(sessionID, argString(args, "path"))
 		if err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		content := argString(args, "content")
 		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		return fmt.Sprintf("已写入 %d 字符到 %s", len(content), argString(args, "path"))
+		return Output{Text: fmt.Sprintf("已写入 %d 字符到 %s", len(content), argString(args, "path"))}
 
 	case "edit_file":
 		p, err := resolve(sessionID, argString(args, "path"))
 		if err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		path := argString(args, "path")
 		data, err := os.ReadFile(p)
 		if err != nil {
-			return fmt.Sprintf("[未改动] %s 不存在，请先用 write_file 创建。", path)
+			return Output{Text: fmt.Sprintf("[未改动] %s 不存在，请先用 write_file 创建。", path)}
 		}
 		text := string(data)
 		old, newStr := argString(args, "old_string"), argString(args, "new_string")
 		hits := strings.Count(text, old)
 		if hits == 0 {
-			return "[未改动] 在 " + path + " 里没找到 old_string。\n" +
+			return Output{Text: "[未改动] 在 " + path + " 里没找到 old_string。\n" +
 				"常见原因：缩进或空白对不上、跨行时换行符没带全、内容已经被改过。\n" +
-				"先用 read_file（配 offset/limit）看一眼实际内容再重试。"
+				"先用 read_file（配 offset/limit）看一眼实际内容再重试。"}
 		}
 		if hits > 1 && !argBool(args, "replace_all") {
-			return fmt.Sprintf("[未改动] old_string 在 %s 里命中 %d 处，无法确定改哪一处。\n请在前后多带几行上下文让它唯一，或传 replace_all=true 全部替换。", path, hits)
+			return Output{Text: fmt.Sprintf("[未改动] old_string 在 %s 里命中 %d 处，无法确定改哪一处。\n请在前后多带几行上下文让它唯一，或传 replace_all=true 全部替换。", path, hits)}
 		}
 		replaced := strings.Replace(text, old, newStr, 1)
 		if argBool(args, "replace_all") {
 			replaced = strings.ReplaceAll(text, old, newStr)
 		}
 		if err := os.WriteFile(p, []byte(replaced), 0o644); err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		scope := "1 处"
 		if argBool(args, "replace_all") {
 			scope = fmt.Sprintf("%d 处", hits)
 		}
-		return fmt.Sprintf("已修改 %s（替换 %s）", path, scope)
+		return Output{Text: fmt.Sprintf("已修改 %s（替换 %s）", path, scope)}
 
 	case "bash":
-		if _, err := exec.LookPath("bash"); err != nil {
-			return "[执行失败] 当前环境没有可用的 bash 解释器。"
-		}
 		inner := argInt(args, "timeout", 30)
 		if inner <= 0 {
 			inner = 30
@@ -480,86 +488,118 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		}
 		dir, err := SessionDir(sessionID)
 		if err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		ctx, cancel := context.WithTimeout(ctx, time.Duration(inner)*time.Second)
-		defer cancel()
-		stdout, stderr, code, killed := runSubprocess(ctx, "bash", []string{"-c", argString(args, "command")}, dir)
-		return formatResult(stdout, stderr, code, killed)
+		res := sandbox.RunBash(ctx, sessionID, dir, argString(args, "command"), inner)
+		return Output{Text: formatSandboxResult(res)}
 
 	case "python_exec":
-		py, err := lookPython()
-		if err != nil {
-			return "[执行失败] 当前环境没有可用的 Python 解释器。"
-		}
 		dir, err := SessionDir(sessionID)
 		if err != nil {
-			return "[执行失败] " + err.Error()
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		script := filepath.Join(dir, ".pyexec_"+randHex(12)+".py")
-		if err := os.WriteFile(script, []byte(argString(args, "code")), 0o644); err != nil {
-			return "[执行失败] " + err.Error()
+		// 脚本落在工作区（docker 驱动下随目录挂载进容器），执行交给沙箱分发
+		script := ".pyexec_" + randHex(12) + ".py"
+		if err := os.WriteFile(filepath.Join(dir, script), []byte(argString(args, "code")), 0o644); err != nil {
+			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		defer os.Remove(script)
+		defer os.Remove(filepath.Join(dir, script))
 
-		ctx, cancel := context.WithTimeout(ctx, time.Duration(toolTimeouts["python_exec"])*time.Second)
-		defer cancel()
-		stdout, stderr, code, killed := runSubprocess(ctx, py, []string{filepath.Base(script)}, dir)
-		return formatResult(stdout, stderr, code, killed)
+		res := sandbox.RunPython(ctx, sessionID, dir, script, toolTimeouts["python_exec"])
+		return Output{Text: formatSandboxResult(res)}
+
+	case "export_artifact":
+		path := argString(args, "path")
+		p, err := resolve(sessionID, path)
+		if err != nil {
+			return Output{Text: "[执行失败] " + err.Error()}
+		}
+		st, err := os.Stat(p)
+		if err != nil || st.IsDir() {
+			return Output{Text: fmt.Sprintf("[未读取] %s 不存在或不是文件。", path)}
+		}
+		if err := storage.CheckSize(st.Size()); err != nil {
+			return Output{Text: "[执行失败] " + err.Error()}
+		}
+		filename := strings.TrimSpace(argString(args, "filename"))
+		if filename == "" {
+			filename = filepath.Base(path)
+		}
+		contentType := contentTypeFor(filename)
+		if contentType == "" {
+			contentType = "application/octet-stream"
+		}
+		f, err := os.Open(p)
+		if err != nil {
+			return Output{Text: "[执行失败] " + err.Error()}
+		}
+		defer f.Close()
+		obj, err := storage.Default().Put(ctx, filename, f, st.Size(), contentType)
+		if err != nil {
+			slog.Warn("产物上传失败", "session", sessionID, "file", filename, "err", errors.Stack(err))
+			return Output{Text: "[执行失败] 导出产物上传失败，请稍后重试或告知用户。"}
+		}
+		size := obj.Size
+		return Output{
+			Text: fmt.Sprintf("已导出 %s（%d 字节，%s）。链接：%s。请在回复中告知用户该产出物已生成。",
+				obj.Filename, size, contentType, obj.URL),
+			Attachments: []Attachment{{
+				URL:         obj.URL,
+				Filename:    obj.Filename,
+				Size:        &size,
+				ContentType: contentType,
+			}},
+		}
 	}
-	return fmt.Sprintf("[执行失败] 未知工具：%s", name)
+	return Output{Text: fmt.Sprintf("[执行失败] 未知工具：%s", name)}
 }
 
-// lookPython 探测可用的 Python 解释器：LookPath 之外还要真跑一次 `--version`——
-// Windows 上 Microsoft Store 的 App Execution Alias 也是一个 python.exe，
-// 存在但执行只会提示"未安装"，不验证的话模型会反复撞墙。结果进程内缓存。
-var (
-	pythonOnce   sync.Once
-	pythonFound  string
-	pythonErrMsg string
-)
-
-func lookPython() (string, error) {
-	pythonOnce.Do(func() {
-		for _, name := range []string{"python", "python3"} {
-			p, err := exec.LookPath(name)
-			if err != nil {
-				continue
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			ver := exec.CommandContext(ctx, p, "--version")
-			out, err := ver.CombinedOutput()
-			cancel()
-			if err != nil || !strings.Contains(string(out), "Python") {
-				continue
-			}
-			pythonFound = p
-			return
-		}
-		pythonErrMsg = "当前环境没有可用的 Python 解释器（已尝试 python / python3）。" +
-			"如需执行 Python 代码，请改为用 bash 工具，或告知用户先安装 Python。"
-	})
-	if pythonFound != "" {
-		return pythonFound, nil
-	}
-	return "", fmt.Errorf("%s", pythonErrMsg)
+// commonContentTypes 常见产物类型的内置映射：宿主（尤其 Windows 注册表）可能没登记
+// 这些扩展名，缺省会导致浏览器只能按二进制下载而不是预览
+var commonContentTypes = map[string]string{
+	".md":       "text/markdown",
+	".markdown": "text/markdown",
+	".txt":      "text/plain",
+	".csv":      "text/csv",
+	".json":     "application/json",
+	".html":     "text/html",
+	".htm":      "text/html",
+	".svg":      "image/svg+xml",
 }
 
-// Execute 执行单个工具调用，返回喂回 LLM 的文本。每次调用有外层硬超时兜底。
-func Execute(ctx context.Context, sessionID, name string, args map[string]any) string {
+// contentTypeFor 猜测产物 MIME：系统表优先，内置表兜底，未知返回空串
+func contentTypeFor(name string) string {
+	ext := strings.ToLower(filepath.Ext(name))
+	if ct := mime.TypeByExtension(ext); ct != "" {
+		return ct
+	}
+	return commonContentTypes[ext]
+}
+
+// formatSandboxResult 沙箱执行结果 → 喂回 LLM 的文本；基础设施失败直接给错误前缀
+func formatSandboxResult(res sandbox.Result) string {
+	if res.Err != nil {
+		return "[执行失败] " + res.Err.Error()
+	}
+	return formatResult(res.Stdout, res.Stderr, res.ExitCode, res.Killed)
+}
+
+// ExecuteWithOutput 执行单个工具调用，返回完整产物（文本 + 导出工件）。
+// 每次调用有外层硬超时兜底。
+func ExecuteWithOutput(ctx context.Context, sessionID, name string, args map[string]any) Output {
 	if msg := checkArgs(name, args); msg != "" {
-		return msg
+		return Output{Text: msg}
 	}
 	timeout := timeoutFor(name, args)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	done := make(chan string, 1)
+	done := make(chan Output, 1)
 	go func() {
-		done <- func() (out string) {
+		done <- func() (out Output) {
 			defer func() {
 				if r := recover(); r != nil {
-					out = fmt.Sprintf("[执行失败] %s: %v", name, r)
+					out = Output{Text: fmt.Sprintf("[执行失败] %s: %v", name, r)}
 				}
 			}()
 			return doExecute(ctx, sessionID, name, args)
@@ -570,6 +610,11 @@ func Execute(ctx context.Context, sessionID, name string, args map[string]any) s
 	case out := <-done:
 		return out
 	case <-ctx.Done():
-		return fmt.Sprintf("[超时] 工具 %s 执行超过 %.0fs 未返回，已放弃。", name, timeout.Seconds())
+		return Output{Text: fmt.Sprintf("[超时] 工具 %s 执行超过 %.0fs 未返回，已放弃。", name, timeout.Seconds())}
 	}
+}
+
+// Execute 兼容入口：仅取喂回 LLM 的文本（无工件场景与测试使用）
+func Execute(ctx context.Context, sessionID, name string, args map[string]any) string {
+	return ExecuteWithOutput(ctx, sessionID, name, args).Text
 }

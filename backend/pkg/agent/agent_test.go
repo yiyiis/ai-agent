@@ -15,6 +15,7 @@ import (
 	"backend/dao"
 	"backend/pkg/db"
 	"backend/pkg/provider"
+	"backend/pkg/tools"
 )
 
 // loadTestConfig 与后端启动一致：存在 config.local.yaml 时优先
@@ -97,11 +98,11 @@ func TestRunToolLoopHappyPath(t *testing.T) {
 	var events []Event
 	emit := func(ev Event) { events = append(events, ev) }
 
-	exec := func(_ context.Context, _, name string, args map[string]any) string {
+	exec := func(_ context.Context, _, name string, args map[string]any) tools.Output {
 		if name != "read_file" || args["path"] != "a.txt" {
-			return "[执行失败] unexpected call"
+			return tools.Output{Text: "[执行失败] unexpected call"}
 		}
-		return "hello"
+		return tools.Output{Text: "hello"}
 	}
 
 	if err := Run(ctx, Deps{Provider: fp, ExecTool: exec}, session, nil, "读一下 a.txt", nil, emit); err != nil {
@@ -161,6 +162,69 @@ func TestRunToolLoopHappyPath(t *testing.T) {
 	}
 }
 
+// TestRunEmitsToolArtifact 验证 export_artifact 产物链路：工具输出附件 →
+// tool_artifact 事件（携带 tool_call_id）→ tool 消息 attachments 落库
+func TestRunEmitsToolArtifact(t *testing.T) {
+	ctx := setupDB(t)
+	session := newTestSession(t, ctx)
+
+	fp := &fakeProvider{rounds: [][]provider.StreamChunk{
+		{
+			{ToolCalls: []provider.ToolCallDelta{{Index: 0, ID: "call_a", Name: "export_artifact", Arguments: `{"path":"report.md"}`}}},
+			{FinishReason: "tool_calls"},
+		},
+		{
+			{Content: "报告已生成"},
+			{FinishReason: "stop"},
+		},
+	}}
+
+	var events []Event
+	emit := func(ev Event) { events = append(events, ev) }
+	size := int64(2048)
+	exec := func(_ context.Context, _, name string, _ map[string]any) tools.Output {
+		if name != "export_artifact" {
+			return tools.Output{Text: "[执行失败] unexpected call"}
+		}
+		return tools.Output{
+			Text: "已导出 report.md",
+			Attachments: []Attachment{{
+				URL: "/api/uploads/ab12cd34_report.md", Filename: "report.md",
+				Size: &size, ContentType: "text/markdown",
+			}},
+		}
+	}
+
+	if err := Run(ctx, Deps{Provider: fp, ExecTool: exec}, session, nil, "生成报告", nil, emit); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	var artifactEv *Event
+	for i := range events {
+		if events[i].Type == "tool_artifact" {
+			artifactEv = &events[i]
+		}
+	}
+	if artifactEv == nil || artifactEv.ID != "call_a" || len(artifactEv.Attachments) != 1 ||
+		artifactEv.Attachments[0].Filename != "report.md" {
+		t.Fatalf("tool_artifact event wrong: %+v", artifactEv)
+	}
+
+	msgs, err := dao.ListMessagesBySessionID(ctx, session.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var toolMsg *model.Message
+	for i := range msgs {
+		if msgs[i].Role == "tool" {
+			toolMsg = &msgs[i]
+		}
+	}
+	if toolMsg == nil || toolMsg.Attachments == nil || !strings.Contains(*toolMsg.Attachments, "report.md") {
+		t.Fatalf("tool message attachments not saved: %+v", toolMsg)
+	}
+}
+
 func TestRunLoopGuardKills(t *testing.T) {
 	ctx := setupDB(t)
 	session := newTestSession(t, ctx)
@@ -178,7 +242,9 @@ func TestRunLoopGuardKills(t *testing.T) {
 
 	var events []Event
 	emit := func(ev Event) { events = append(events, ev) }
-	exec := func(context.Context, string, string, map[string]any) string { return "same-output" }
+	exec := func(context.Context, string, string, map[string]any) tools.Output {
+		return tools.Output{Text: "same-output"}
+	}
 
 	if err := Run(ctx, Deps{Provider: fp, ExecTool: exec}, session, nil, "test", nil, emit); err != nil {
 		t.Fatalf("run: %v", err)

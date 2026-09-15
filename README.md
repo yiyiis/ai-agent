@@ -148,9 +148,9 @@ timeline
 - [x] 会话级互斥并发锁：保障单会话时序一致性，提供优雅终止（Abort）与状态恢复
 
 ### 阶段四：沙箱隔离与产物管理 (Isolated Sandbox & Artifacts)
-- [ ] 多驱动沙箱架构：本地隔离运行与 Docker Container 容器沙箱无缝切换
-- [ ] 容器生命周期治理：按需拉起、环境隔离注入、只读挂载与超时强制销毁
-- [ ] 产物提取与存储体系：从工具输出中捕获提取工件（Artifacts），接入腾讯云 COS 存储
+- [x] 多驱动沙箱架构：本地隔离运行与 Docker Container 容器沙箱无缝切换
+- [x] 容器生命周期治理：按需拉起、环境隔离注入、只读挂载与超时强制销毁
+- [x] 产物提取与存储体系：从工具输出中捕获提取工件（Artifacts），接入腾讯云 COS 存储
 
 ### 阶段五：动态 Skill 插件系统 (Dynamic Skill Plugin Engine)
 - [ ] `SKILL.md` 规范解析器：解析 YAML 元数据、输入参数契约与执行脚本
@@ -318,6 +318,7 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 | `tool_call_start` | `id`, `name`, `arguments` | 宣布发起工具调用并传递初始参数片段 |
 | `tool_call_result`| `id`, `output` | 工具执行结束返回的结构化执行结果 |
 | `tool_call_error` | `id`, `error` | 工具执行发生超时、权限违背或运行错误时的反馈 |
+| `tool_artifact`  | `tool_call_id`, `attachment` | 工具（`export_artifact`）导出的产物工件：上传对象存储后的可预览附件 |
 | `memory_written`  | `key`, `topic`, `content` | 模型自动识别并写入长期记忆库时下发的可视化提醒 |
 | `done`            | `id`, `usage` | 助手完整消息完成落库，返回最终消息 UUID 及 Token 审计信息 |
 | `error`           | `message` | 执行链路出现无法恢复的系统异常报错 |
