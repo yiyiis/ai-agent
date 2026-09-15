@@ -54,6 +54,15 @@ type Config struct {
 	// IdleTimeoutSec / MaxLifetimeSec docker 容器空闲多久 / 最长存活多久后强制销毁（秒，<=0 用默认值）
 	IdleTimeoutSec int `yaml:"IdleTimeoutSec" mapstructure:"IdleTimeoutSec"`
 	MaxLifetimeSec int `yaml:"MaxLifetimeSec" mapstructure:"MaxLifetimeSec"`
+	// HostWorkspaceMap 后端自己跑在容器里时的 workspace 路径映射，
+	// 形如 "/app/workspace=/srv/ai-agent/workspace"（容器内前缀=宿主真实前缀）。
+	// docker 驱动的 bind 挂载以宿主路径为准，后端在容器内看到的 /app/workspace/<sid>
+	// 必须翻译成宿主上的真实路径，否则挂载到不存在的目录
+	HostWorkspaceMap string `yaml:"HostWorkspaceMap" mapstructure:"HostWorkspaceMap"`
+	// MemoryMB / CPUS / PidsLimit 沙箱容器资源限额（防失控脚本打爆宿主；0 为不限制）
+	MemoryMB  int64   `yaml:"MemoryMB" mapstructure:"MemoryMB"`
+	CPUS      float64 `yaml:"CPUS" mapstructure:"CPUS"`
+	PidsLimit int64   `yaml:"PidsLimit" mapstructure:"PidsLimit"`
 
 	// E2B 云端沙箱（Driver: e2b 时生效）
 	E2BKey        string `yaml:"E2BKey" mapstructure:"E2BKey"`               // e2b_ 开头的 API Key

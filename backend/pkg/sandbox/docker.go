@@ -211,6 +211,17 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 	}
 	if id == "" {
 		id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID, hostDir))
+		if errors.Is(err, errDockerImageMissing) {
+			// 镜像不在本地：自动拉取后重试一次（首次部署无需手动 docker pull）
+			slog.Info("sandbox 镜像不存在，开始自动拉取", "image", d.cfg.Image)
+			pullCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+			if pullErr := d.client.pullImage(pullCtx, d.cfg.Image); pullErr != nil {
+				cancel()
+				return "", infraErr(pullErr, "拉取沙箱镜像失败")
+			}
+			cancel()
+			id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID, hostDir))
+		}
 		if err != nil {
 			return "", infraErr(err, "拉起执行容器失败")
 		}
@@ -234,7 +245,7 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 
 // containerSpec 组装容器创建参数
 func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateReq {
-	binds := []string{toBindPath(hostDir) + ":" + containerPath}
+	binds := []string{d.bindHostPath(hostDir) + ":" + containerPath}
 	binds = append(binds, d.cfg.Mounts...) // 形如 host:container[:ro]，只读挂载由调用方声明
 
 	env := append([]string{"AI_AGENT_SESSION=" + sessionID}, d.cfg.Env...)
@@ -245,8 +256,34 @@ func (d *dockerDriver) containerSpec(sessionID, hostDir string) containerCreateR
 		Env:        env,
 		WorkingDir: containerPath,
 		Labels:     map[string]string{labelManaged: "1", "ai-agent-session": sessionID},
-		HostConfig: hostConfig{Binds: binds, NetworkMode: d.cfg.NetworkMode},
+		HostConfig: hostConfig{
+			Binds:       binds,
+			NetworkMode: d.cfg.NetworkMode,
+			Memory:      d.cfg.MemoryMB << 20,           // 0 = 不限制
+			NanoCPUs:    int64(d.cfg.CPUS * 1e9),        // 0 = 不限制
+			PidsLimit:   pidsLimitOrNil(d.cfg.PidsLimit), // nil = 不限制
+		},
 	}
+}
+
+// bindHostPath 工作区的 bind 源路径：后端直跑宿主时 hostDir 即宿主路径；
+// 后端自己跑在容器里时，hostDir 是容器内视角（如 /app/workspace/<sid>），
+// bind 挂载必须翻译成宿主真实路径——由 HostWorkspaceMap（容器前缀=宿主前缀）提供映射。
+func (d *dockerDriver) bindHostPath(hostDir string) string {
+	m := d.cfg.HostWorkspaceMap
+	if m != "" {
+		if parts := strings.SplitN(m, "=", 2); len(parts) == 2 && strings.HasPrefix(hostDir, parts[0]) {
+			return toBindPath(parts[1] + strings.TrimPrefix(hostDir, parts[0]))
+		}
+	}
+	return toBindPath(hostDir)
+}
+
+func pidsLimitOrNil(n int64) *int64 {
+	if n <= 0 {
+		return nil
+	}
+	return &n
 }
 
 // reapLoop 生命周期巡检：空闲超过 IdleTimeout 或存活超过 MaxLifetime 的容器强制销毁。
@@ -331,6 +368,9 @@ type hostConfig struct {
 	Binds       []string `json:"Binds,omitempty"`
 	NetworkMode string   `json:"NetworkMode,omitempty"`
 	AutoRemove  bool     `json:"AutoRemove"`
+	Memory      int64    `json:"Memory,omitempty"`
+	NanoCPUs    int64    `json:"NanoCpus,omitempty"`
+	PidsLimit   *int64   `json:"PidsLimit,omitempty"`
 }
 
 // dockerClient Docker Engine API 的极薄 HTTP 封装，只覆盖沙箱用到的接口面：
@@ -441,6 +481,9 @@ func (c *dockerClient) inspectContainer(ctx context.Context, name string) (strin
 	return out.ID, out.State.Running, nil
 }
 
+// errDockerImageMissing create 404（No such image）的判别哨兵
+var errDockerImageMissing = errors.NewMsg("docker image missing")
+
 func (c *dockerClient) createContainer(ctx context.Context, name string, spec containerCreateReq) (string, error) {
 	resp, err := c.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": []string{name}}, spec)
 	if err != nil {
@@ -449,6 +492,10 @@ func (c *dockerClient) createContainer(ctx context.Context, name string, spec co
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		if resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "No such image") {
+			return "", errors.Join(errDockerImageMissing,
+				errors.New(fmt.Sprintf("create %s: HTTP %d %s", name, resp.StatusCode, strings.TrimSpace(string(body)))))
+		}
 		return "", fmt.Errorf("create %s: HTTP %d %s", name, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 	var out struct {
@@ -458,6 +505,21 @@ func (c *dockerClient) createContainer(ctx context.Context, name string, spec co
 		return "", err
 	}
 	return out.ID, nil
+}
+
+// pullImage 拉取镜像（POST /images/create 为流式进度接口，读到 EOF 即完成）
+func (c *dockerClient) pullImage(ctx context.Context, ref string) error {
+	resp, err := c.do(ctx, http.MethodPost, "/images/create", url.Values{"fromImage": []string{ref}}, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("pull %s: HTTP %d %s", ref, resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	return nil
 }
 
 func (c *dockerClient) startContainer(ctx context.Context, id string) error {

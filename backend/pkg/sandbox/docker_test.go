@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -48,10 +49,13 @@ func TestDemuxStreamTruncated(t *testing.T) {
 
 func TestContainerSpec(t *testing.T) {
 	d := &dockerDriver{cfg: Config{
-		Image:       "img:1",
-		Env:         []string{"K=V"},
-		Mounts:      []string{"/data/assets:/assets:ro"},
-		NetworkMode: "none",
+		Image:          "img:1",
+		Env:            []string{"K=V"},
+		Mounts:         []string{"/data/assets:/assets:ro"},
+		NetworkMode:    "none",
+		MemoryMB:       512,
+		CPUS:           1.5,
+		PidsLimit:      256,
 	}}
 	spec := d.containerSpec("sess-1", `D:\ws\sess-1`)
 	if spec.WorkingDir != "/workspace" {
@@ -69,6 +73,78 @@ func TestContainerSpec(t *testing.T) {
 	}
 	if fmt.Sprint(spec.Cmd) != "[sleep infinity]" {
 		t.Fatalf("cmd: %v", spec.Cmd)
+	}
+	if spec.HostConfig.Memory != 512<<20 || spec.HostConfig.NanoCPUs != 1500000000 {
+		t.Fatalf("resource limits wrong: %+v", spec.HostConfig)
+	}
+	if spec.HostConfig.PidsLimit == nil || *spec.HostConfig.PidsLimit != 256 {
+		t.Fatalf("pids limit wrong: %+v", spec.HostConfig.PidsLimit)
+	}
+}
+
+func TestBindHostPathMapping(t *testing.T) {
+	d := &dockerDriver{cfg: Config{HostWorkspaceMap: "/app/workspace=/srv/ai-agent/workspace"}}
+	if got := d.bindHostPath("/app/workspace/abc-123"); got != "/srv/ai-agent/workspace/abc-123" {
+		t.Fatalf("mapped path wrong: %q", got)
+	}
+	// 无映射配置：原样（Windows 反斜杠转正斜杠）
+	d2 := &dockerDriver{}
+	if got := d2.bindHostPath(`D:\ws\s1`); got != "D:/ws/s1" {
+		t.Fatalf("unmapped path wrong: %q", got)
+	}
+}
+
+// TestDockerAutoPullOnMissingImage create 404（No such image）→ 自动拉取 → 重试创建
+func TestDockerAutoPullOnMissingImage(t *testing.T) {
+	var pulled, created atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /containers/ai-agent-sbx-s9/json", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	mux.HandleFunc("POST /containers/create", func(w http.ResponseWriter, r *http.Request) {
+		if created.Add(1) == 1 {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = w.Write([]byte(`{"message":"No such image: img:pull-me"}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"Id":"ctr-9"}`))
+	})
+	mux.HandleFunc("POST /images/create", func(w http.ResponseWriter, r *http.Request) {
+		pulled.Add(1)
+		if r.URL.Query().Get("fromImage") != "img:pull-me" {
+			t.Errorf("pull ref wrong: %s", r.URL.RawQuery)
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	mux.HandleFunc("POST /containers/ctr-9/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	mux.HandleFunc("POST /containers/ctr-9/exec", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"Id":"e9"}`))
+	})
+	mux.HandleFunc("POST /exec/e9/start", func(w http.ResponseWriter, r *http.Request) {
+		w.Write(frame(1, "after-pull\n"))
+	})
+	mux.HandleFunc("GET /exec/e9/json", func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"ExitCode":0,"Running":false}`))
+	})
+	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected call: %s %s", r.Method, r.URL.Path)
+		w.WriteHeader(http.StatusInternalServerError)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	d := &dockerDriver{cfg: Config{Image: "img:pull-me"}, client: newDockerClient(srv.URL), ctrs: map[string]*ctrState{}}
+	res := d.RunBash(context.Background(), "s9", "/host/ws", "echo after-pull", 10)
+	if res.Err != nil {
+		t.Fatalf("run: %v", res.Err)
+	}
+	if !strings.Contains(res.Stdout, "after-pull") {
+		t.Fatalf("stdout wrong: %+v", res)
+	}
+	if pulled.Load() != 1 || created.Load() != 2 {
+		t.Fatalf("pull=%d create=%d, want 1/2", pulled.Load(), created.Load())
 	}
 }
 

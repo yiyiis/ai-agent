@@ -67,6 +67,12 @@ Sandbox:
   NetworkMode: "bridge"
   IdleTimeoutSec: 900        # 空闲 15 分钟销毁容器
   MaxLifetimeSec: 43200      # 容器最长存活 12 小时
+  # 后端自己跑在容器里（docker compose 部署）时必填：bind 挂载需要宿主真实路径，
+  # 形如 容器内前缀=宿主前缀；后端直跑宿主时留空
+  HostWorkspaceMap: ""       # 例 "/app/workspace=/srv/ai-agent/workspace"
+  MemoryMB: 0                # 沙箱容器内存限额（防失控脚本打爆宿主，0 不限制）
+  CPUS: 0                    # CPU 限额（核数，0 不限制）
+  PidsLimit: 0               # 进程数限额（0 不限制）
   E2BKey: "YOUR_E2B_API_KEY" # Driver: e2b 时必填
   E2BTemplate: "base"        # E2B 沙箱模板 ID
   E2BTimeoutSec: 1800        # E2B 沙箱 TTL（秒），超时未使用会被云端回收

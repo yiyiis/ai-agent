@@ -48,7 +48,12 @@ services:
       - ../backend/workspace:/app/workspace
       - ../backend/uploads:/app/uploads
       - ../backend/logs:/app/logs
-      # 启用 Docker 容器沙箱（etc/config.yaml 的 Sandbox.Driver: docker）时挂载宿主 Docker：
+      # 启用 Docker 容器沙箱（etc/config.yaml 的 Sandbox.Driver: docker）时挂载宿主 Docker，
+      # 后端经 socket 在宿主上创建"兄弟"沙箱容器（非嵌套）；同时配置：
+      #   Sandbox.HostWorkspaceMap: "/app/workspace=<宿主上本目录的绝对路径>"
+      #   （bind 挂载需宿主真实路径）；镜像缺失会自动拉取。注意：挂载 docker.sock
+      #   等于授予后端容器宿主 Docker 的完全控制权，仅建议内网/自有服务器使用，
+      #   更强的隔离请改用 Driver: e2b（云端沙箱，无需宿主 Docker）。
       # - /var/run/docker.sock:/var/run/docker.sock
 
   frontend:
