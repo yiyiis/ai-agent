@@ -54,7 +54,7 @@ services:
       #   （bind 挂载需宿主真实路径）；镜像缺失会自动拉取。注意：挂载 docker.sock
       #   等于授予后端容器宿主 Docker 的完全控制权，仅建议内网/自有服务器使用，
       #   更强的隔离请改用 Driver: e2b（云端沙箱，无需宿主 Docker）。
-      # - /var/run/docker.sock:/var/run/docker.sock
+      - /var/run/docker.sock:/var/run/docker.sock
 
   frontend:
     image: 43.138.247.132:3000/qqlhjt/ai-agent-frontend:${FRONTEND_TAG:-main}
