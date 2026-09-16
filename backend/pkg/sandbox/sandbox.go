@@ -35,9 +35,9 @@ type Result struct {
 }
 
 // Driver 沙箱驱动。统一模型：**工作区文件活在沙箱里**，所有工具（文件与进程）
-// 都经驱动读写沙箱；工作区 ephemeral——沙箱销毁即消失，无宿主镜像。三种驱动
-// 的语义因此完全一致：
-//   - local：沙箱即宿主，文件操作退化为直接 os 调用（零开销）
+// 都经驱动按 sessionID 读写沙箱，调用方不需要也不应该知道工作区落在哪里；
+// 工作区 ephemeral——沙箱销毁即消失，无宿主镜像。三种驱动的语义因此完全一致：
+//   - local：沙箱即宿主，工作区是驱动自持的 LocalRoot/<会话ID>/ 目录（零开销）
 //   - docker：文件经 Engine /archive API（tar 流）传入传出容器，不做 bind 挂载
 //   - e2b：文件经 envd /files REST 传入传出云端沙箱
 type Driver interface {
@@ -45,16 +45,16 @@ type Driver interface {
 	// EnvNote 运行环境契约说明，注入 bash 工具描述，让模型按真实环境写命令
 	EnvNote() string
 	// RunBash 在会话工作区内执行一条 bash 命令，timeoutSecs 为命令级超时
-	RunBash(ctx context.Context, sessionID, hostDir, command string, timeoutSecs int) Result
+	RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result
 	// RunPython 执行工作区内的一段 Python 脚本，scriptRel 为工作区相对路径
-	RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeoutSecs int) Result
+	RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result
 	// ReadFile 读取工作区内相对路径的文件（沙箱内的实时内容）
-	ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error)
-	// WriteFile 写入工作区内相对路径的文件（沙箱与宿主镜像双落）
-	WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error
+	ReadFile(ctx context.Context, sessionID, rel string) ([]byte, error)
+	// WriteFile 写入工作区内相对路径的文件
+	WriteFile(ctx context.Context, sessionID, rel string, data []byte) error
 	// RemoveFile 删除工作区内相对路径的文件（临时脚本清理用）
-	RemoveFile(sessionID, hostDir, rel string)
-	// Close 销毁该会话的沙箱资源（本地驱动空操作；其余驱动强制销毁）
+	RemoveFile(sessionID, rel string)
+	// Close 销毁该会话的沙箱资源（local 清理宿主工作区目录；docker/e2b 强制销毁）
 	Close(sessionID string)
 }
 
@@ -71,6 +71,8 @@ type Config struct {
 	MaxLifetimeSec int `yaml:"MaxLifetimeSec" mapstructure:"MaxLifetimeSec"`
 	// WorkspaceHostDir 已移除：docker 驱动不再 bind 挂载宿主目录（文件经
 	// /archive API 传输，与 e2b 模型统一），宿主/沙箱路径二元性不复存在
+	// LocalRoot local 驱动的工作区根目录（docker/e2b 不用；空则默认 workspace/）
+	LocalRoot string `yaml:"LocalRoot" mapstructure:"LocalRoot"`
 	// MemoryMB / CPUS / PidsLimit 沙箱容器资源限额（防失控脚本打爆宿主；0 为不限制）
 	MemoryMB  int64   `yaml:"MemoryMB" mapstructure:"MemoryMB"`
 	CPUS      float64 `yaml:"CPUS" mapstructure:"CPUS"`
@@ -83,7 +85,7 @@ type Config struct {
 }
 
 // driver 活动驱动；默认本地，Init 未被调用时开箱即用
-var driver Driver = localDriver{}
+var driver Driver = newLocalDriver(Config{})
 
 // Init 装配全局沙箱驱动（main 启动时调用一次）
 func Init(cfg Config) {
@@ -94,13 +96,13 @@ func Init(cfg Config) {
 	case "e2b":
 		if cfg.E2BKey == "" {
 			fmt.Printf("[WARN] E2BKey 未配置，执行沙箱回落到 local 驱动\n")
-			driver = localDriver{}
+			driver = newLocalDriver(cfg)
 			return
 		}
 		driver = newE2BDriver(cfg)
 		return
 	}
-	driver = localDriver{}
+	driver = newLocalDriver(cfg)
 	fmt.Printf("[INFO] 执行沙箱驱动: local\n")
 }
 
@@ -114,30 +116,30 @@ func DriverName() string { return driver.Name() }
 func EnvNote() string { return driver.EnvNote() }
 
 // RunBash 经活动驱动执行 bash 命令
-func RunBash(ctx context.Context, sessionID, hostDir, command string, timeoutSecs int) Result {
-	return driver.RunBash(ctx, sessionID, hostDir, command, timeoutSecs)
+func RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
+	return driver.RunBash(ctx, sessionID, command, timeoutSecs)
 }
 
 // RunPython 经活动驱动执行 Python 脚本
-func RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeoutSecs int) Result {
-	return driver.RunPython(ctx, sessionID, hostDir, scriptRel, timeoutSecs)
+func RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
+	return driver.RunPython(ctx, sessionID, scriptRel, timeoutSecs)
 }
 
 // Close 销毁会话沙箱（会话删除时调用；尽力而为，失败不阻塞删除流程）
 func Close(sessionID string) { driver.Close(sessionID) }
 
 // ReadFile 经活动驱动读取工作区文件
-func ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
-	return driver.ReadFile(ctx, sessionID, hostDir, rel)
+func ReadFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
+	return driver.ReadFile(ctx, sessionID, rel)
 }
 
-// WriteFile 经活动驱动写入工作区文件（沙箱与宿主镜像双落）
-func WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
-	return driver.WriteFile(ctx, sessionID, hostDir, rel, data)
+// WriteFile 经活动驱动写入工作区文件
+func WriteFile(ctx context.Context, sessionID, rel string, data []byte) error {
+	return driver.WriteFile(ctx, sessionID, rel, data)
 }
 
 // RemoveFile 经活动驱动删除工作区文件
-func RemoveFile(sessionID, hostDir, rel string) { driver.RemoveFile(sessionID, hostDir, rel) }
+func RemoveFile(sessionID, rel string) { driver.RemoveFile(sessionID, rel) }
 
 // localEnvNote 本地驱动的环境契约：宿主即执行环境，按构建平台给模型真实预期
 func localEnvNote() string {

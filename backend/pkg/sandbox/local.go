@@ -12,14 +12,37 @@ import (
 	"backend/pkg/errors"
 )
 
-// localDriver 本地隔离执行：沙箱即宿主，文件操作退化为直接 os 调用（零开销），
+// defaultLocalRoot local 驱动工作区根目录默认值（相对后端运行目录）
+const defaultLocalRoot = "workspace"
+
+// localDriver 本地隔离执行：沙箱即宿主，工作区是驱动自持的 root/<会话ID>/
+// 目录（按需创建、会话关闭时清理），文件操作退化为直接 os 调用（零开销），
 // 进程以会话工作区为 cwd 跑在宿主机上（超时整棵进程树击杀、Windows 商店占位
 // python 探测跳过）。作为默认驱动保证零配置开箱即用。
-type localDriver struct{}
+type localDriver struct {
+	root string
+}
 
-func (localDriver) Name() string { return "local" }
+func newLocalDriver(cfg Config) *localDriver {
+	root := cfg.LocalRoot
+	if root == "" {
+		root = defaultLocalRoot
+	}
+	return &localDriver{root: root}
+}
 
-func (localDriver) EnvNote() string { return localEnvNote() }
+func (*localDriver) Name() string { return "local" }
+
+func (*localDriver) EnvNote() string { return localEnvNote() }
+
+// dir 会话工作区目录（按需创建；进程执行的 cwd 与文件操作的根）
+func (d *localDriver) dir(sessionID string) (string, error) {
+	p := filepath.Join(d.root, sessionID)
+	if err := os.MkdirAll(p, 0o755); err != nil {
+		return "", errors.Join(err, errors.New("mkdir "+p), errors.NewMsg("创建会话工作区失败"))
+	}
+	return p, nil
+}
 
 // resolveLocal 工作区相对路径 → 宿主绝对路径，越界一律拒绝（防 ../ 逃逸）
 func resolveLocal(hostDir, rel string) (string, error) {
@@ -43,8 +66,8 @@ func resolveLocal(hostDir, rel string) (string, error) {
 	return pAbs, nil
 }
 
-func (localDriver) ReadFile(_ context.Context, _, hostDir, rel string) ([]byte, error) {
-	p, err := resolveLocal(hostDir, rel)
+func (d *localDriver) ReadFile(_ context.Context, sessionID, rel string) ([]byte, error) {
+	p, err := resolveLocal(filepath.Join(d.root, sessionID), rel)
 	if err != nil {
 		return nil, err
 	}
@@ -58,8 +81,12 @@ func (localDriver) ReadFile(_ context.Context, _, hostDir, rel string) ([]byte, 
 	return data, nil
 }
 
-func (localDriver) WriteFile(_ context.Context, _, hostDir, rel string, data []byte) error {
-	p, err := resolveLocal(hostDir, rel)
+func (d *localDriver) WriteFile(_ context.Context, sessionID, rel string, data []byte) error {
+	dir, err := d.dir(sessionID)
+	if err != nil {
+		return err
+	}
+	p, err := resolveLocal(dir, rel)
 	if err != nil {
 		return err
 	}
@@ -69,34 +96,45 @@ func (localDriver) WriteFile(_ context.Context, _, hostDir, rel string, data []b
 	return os.WriteFile(p, data, 0o644)
 }
 
-func (localDriver) RemoveFile(_, hostDir, rel string) {
-	if p, err := resolveLocal(hostDir, rel); err == nil {
+func (d *localDriver) RemoveFile(sessionID, rel string) {
+	if p, err := resolveLocal(filepath.Join(d.root, sessionID), rel); err == nil {
 		_ = os.Remove(p)
 	}
 }
 
-func (localDriver) RunBash(ctx context.Context, _, hostDir, command string, timeoutSecs int) Result {
+func (d *localDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
 	if _, err := exec.LookPath("bash"); err != nil {
 		return Result{Err: errors.NewMsg("当前环境没有可用的 bash 解释器。")}
 	}
-	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
-	defer cancel()
-	stdout, stderr, code, killed := runSubprocess(cctx, "bash", []string{"-c", command}, hostDir)
-	return Result{Stdout: stdout, Stderr: stderr, ExitCode: code, Killed: killed}
-}
-
-func (localDriver) RunPython(ctx context.Context, _, hostDir, scriptRel string, timeoutSecs int) Result {
-	py, err := lookPython()
+	dir, err := d.dir(sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
-	stdout, stderr, code, killed := runSubprocess(cctx, py, []string{scriptRel}, hostDir)
+	stdout, stderr, code, killed := runSubprocess(cctx, "bash", []string{"-c", command}, dir)
 	return Result{Stdout: stdout, Stderr: stderr, ExitCode: code, Killed: killed}
 }
 
-func (localDriver) Close(string) {}
+func (d *localDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
+	py, err := lookPython()
+	if err != nil {
+		return Result{Err: err}
+	}
+	dir, err := d.dir(sessionID)
+	if err != nil {
+		return Result{Err: err}
+	}
+	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
+	defer cancel()
+	stdout, stderr, code, killed := runSubprocess(cctx, py, []string{scriptRel}, dir)
+	return Result{Stdout: stdout, Stderr: stderr, ExitCode: code, Killed: killed}
+}
+
+// Close 清理该会话的宿主工作区目录（local 的工作区即真实落盘处）
+func (d *localDriver) Close(sessionID string) {
+	_ = os.RemoveAll(filepath.Join(d.root, sessionID))
+}
 
 // runSubprocess 在 dir 下执行命令，超时由 ctx 控制；返回输出与退出码
 func runSubprocess(ctx context.Context, name string, argv []string, dir string) (string, string, int, bool) {

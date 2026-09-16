@@ -146,7 +146,7 @@ func TestDockerAutoPullOnMissingImage(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &dockerDriver{cfg: Config{Image: "img:pull-me"}, client: newDockerClient(srv.URL), ctrs: map[string]*ctrState{}}
-	res := d.RunBash(context.Background(), "s9", "/host/ws", "echo after-pull", 10)
+	res := d.RunBash(context.Background(), "s9", "echo after-pull", 10)
 	if res.Err != nil {
 		t.Fatalf("run: %v", res.Err)
 	}
@@ -252,7 +252,7 @@ func TestDockerRunAgainstFakeDaemon(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	d := &dockerDriver{cfg: Config{Image: "img:test"}, client: newDockerClient(srv.URL), ctrs: map[string]*ctrState{}}
-	res := d.RunBash(context.Background(), "s1", "/host/ws", "echo hi", 30)
+	res := d.RunBash(context.Background(), "s1", "echo hi", 30)
 	if res.Err != nil {
 		t.Fatalf("run: %v", res.Err)
 	}
@@ -268,7 +268,7 @@ func TestDockerRunAgainstFakeDaemon(t *testing.T) {
 
 	// 超时退出码（124）应翻译为 Killed
 	exitCode.Store(124)
-	res = d.RunBash(context.Background(), "s1", "/host/ws", "sleep 999", 1)
+	res = d.RunBash(context.Background(), "s1", "sleep 999", 1)
 	if !res.Killed {
 		t.Fatalf("exit 124 should map to killed: %+v", res)
 	}
@@ -288,7 +288,7 @@ func TestDockerIntegrationRealDaemon(t *testing.T) {
 
 	d := &dockerDriver{cfg: Config{Image: defaultDockerImage}, client: c, ctrs: map[string]*ctrState{}}
 	defer d.Close("it-session")
-	res := d.RunBash(context.Background(), "it-session", t.TempDir(), "echo ok-from-container && python3 -c 'print(1+1)'", 60)
+	res := d.RunBash(context.Background(), "it-session", "echo ok-from-container && python3 -c 'print(1+1)'", 60)
 	if res.Err != nil {
 		t.Skipf("docker exec failed (image pull needed?): %v", res.Err)
 	}

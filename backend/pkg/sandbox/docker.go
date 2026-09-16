@@ -107,19 +107,19 @@ func (d *dockerDriver) EnvNote() string {
 }
 
 // RunBash / RunPython 统一走 run：确保容器在跑 → 建 exec → 读流拿输出 → 查退出码
-func (d *dockerDriver) RunBash(ctx context.Context, sessionID, hostDir, command string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, hostDir, timeoutSecs, []string{"bash", "-c", command})
+func (d *dockerDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"bash", "-c", command})
 }
 
-func (d *dockerDriver) RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, hostDir, timeoutSecs, []string{"python3", containerPath + "/" + scriptRel})
+func (d *dockerDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"python3", containerPath + "/" + scriptRel})
 }
 
 // run 在会话容器内执行 argv。外层包一层 `timeout -k` 做命令级硬超时：
 // Engine API 没有"取消 exec"的接口，靠镜像内的 timeout 命令兜底最可靠
 // （GNU coreutils 与 busybox 均支持该参数序）。
-func (d *dockerDriver) run(ctx context.Context, sessionID, hostDir string, timeoutSecs int, argv []string) Result {
-	id, err := d.ensure(ctx, sessionID, hostDir)
+func (d *dockerDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string) Result {
+	id, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
@@ -129,7 +129,7 @@ func (d *dockerDriver) run(ctx context.Context, sessionID, hostDir string, timeo
 	if err != nil {
 		// 容器可能刚被巡检销毁（空闲/超期），按需拉起一次后重试
 		d.forget(sessionID)
-		if id, err = d.ensure(ctx, sessionID, hostDir); err != nil {
+		if id, err = d.ensure(ctx, sessionID); err != nil {
 			return Result{Err: err}
 		}
 		if eid, err = d.client.createExec(ctx, id, wrapped); err != nil {
@@ -187,9 +187,9 @@ func (d *dockerDriver) touch(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 按需拉起会话容器：查名 → 不在则建、没跑则启；全新容器创建后把宿主
-// 工作区镜像推送进容器（tar 经 /archive API 解压到 /workspace）并打同步 marker。
-func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (string, error) {
+// ensure 按需拉起会话容器：查名 → 不在则建、没跑则启（此后 exec 复用）。
+// ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化。
+func (d *dockerDriver) ensure(ctx context.Context, sessionID string) (string, error) {
 	d.mu.Lock()
 	if st := d.ctrs[sessionID]; st != nil {
 		st.lastUsed = time.Now()
@@ -228,7 +228,6 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		if err := d.client.startContainer(ctx, id); err != nil {
 			return "", infraErr(err, "启动执行容器失败")
 		}
-		// ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化
 		slog.Info("sandbox 容器已创建", "session", sessionID, "container", name, "image", d.cfg.Image)
 	}
 
@@ -270,12 +269,12 @@ func (d *dockerDriver) containerSpec(sessionID string) containerCreateReq {
 // ErrFileNotFound 工作区文件不存在（工具层据此生成可自纠正提示）
 var ErrFileNotFound = errors.NewMsg("工作区文件不存在")
 
-func (d *dockerDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
+func (d *dockerDriver) ReadFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return nil, err
 	}
-	id, err := d.ensure(ctx, sessionID, hostDir)
+	id, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -293,12 +292,12 @@ func (d *dockerDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel str
 	return data, nil
 }
 
-func (d *dockerDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
+func (d *dockerDriver) WriteFile(ctx context.Context, sessionID, rel string, data []byte) error {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return err
 	}
-	id, err := d.ensure(ctx, sessionID, hostDir)
+	id, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return err
 	}
@@ -313,7 +312,7 @@ func (d *dockerDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel st
 	return nil
 }
 
-func (d *dockerDriver) RemoveFile(sessionID, hostDir, rel string) {
+func (d *dockerDriver) RemoveFile(sessionID, rel string) {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return

@@ -364,10 +364,6 @@ func collectAttachments(history []model.Message, current []Attachment) []Attachm
 // 落盘名）；失败静默降级为"仅引用"。
 func materializeAttachments(ctx context.Context, sessionID string, attachments []Attachment) []Attachment {
 	var placed []Attachment
-	dir, err := tools.SessionDir(sessionID)
-	if err != nil {
-		return nil
-	}
 	for _, a := range attachments {
 		var data []byte
 		if name := strings.TrimPrefix(a.URL, "/api/uploads/"); name != "" && name != a.URL {
@@ -378,7 +374,7 @@ func materializeAttachments(ctx context.Context, sessionID string, attachments [
 			}
 			data = d
 		} else if strings.HasPrefix(a.URL, "https://") || strings.HasPrefix(a.URL, "http://") {
-			// 对象存储直传的附件：拉回本地再落工作区（公开读桶；私有桶需换签名 GET）
+			// 对象存储直传的附件：下载后写入沙箱（公开读桶；私有桶需换签名 GET）
 			d, err := downloadAttachment(ctx, a.URL)
 			if err != nil {
 				continue
@@ -394,8 +390,8 @@ func materializeAttachments(ctx context.Context, sessionID string, attachments [
 		if safe == "" {
 			continue
 		}
-		// 经沙箱驱动写入工作区（local 直写宿主；docker/e2b 传输进沙箱并双落镜像）
-		if err := sandbox.WriteFile(ctx, sessionID, dir, safe, data); err != nil {
+		// 经沙箱驱动写入工作区（local 落宿主目录；docker/e2b 传输进沙箱）
+		if err := sandbox.WriteFile(ctx, sessionID, safe, data); err != nil {
 			continue
 		}
 		a.Filename = safe

@@ -107,8 +107,7 @@ func TestE2BRunAgainstFakeEnvd(t *testing.T) {
 		http:     &http.Client{},
 		boxes:    map[string]*e2bBox{},
 	}
-	ws := t.TempDir()
-	res := d.RunBash(context.Background(), "s1", ws, "echo hi", 30)
+	res := d.RunBash(context.Background(), "s1", "echo hi", 30)
 	if res.Err != nil {
 		t.Fatalf("run: %v", res.Err)
 	}
@@ -148,11 +147,11 @@ func TestE2BLiveRealCloud(t *testing.T) {
 	defer d.Close("live-s1")
 
 	// 文件写入沙箱（ephemeral：无宿主镜像，字节只在云端）
-	if err := d.WriteFile(ctx, "live-s1", ws, "note.txt", []byte("hello-from-driver")); err != nil {
+	if err := d.WriteFile(ctx, "live-s1", "note.txt", []byte("hello-from-driver")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
 	// bash 读到驱动写入的文件，并产出新文件
-	res := d.RunBash(ctx, "live-s1", ws, "cat note.txt && echo cloud-ok && echo made-in-cloud > made.txt", 120)
+	res := d.RunBash(ctx, "live-s1", "cat note.txt && echo cloud-ok && echo made-in-cloud > made.txt", 120)
 	if res.Err != nil {
 		t.Fatalf("bash: %v", res.Err)
 	}
@@ -161,7 +160,7 @@ func TestE2BLiveRealCloud(t *testing.T) {
 	}
 
 	// ReadFile 读回沙箱产出的文件（沙箱存活期间状态持续）
-	data, err := d.ReadFile(ctx, "live-s1", ws, "made.txt")
+	data, err := d.ReadFile(ctx, "live-s1", "made.txt")
 	if err != nil || string(data) != "made-in-cloud\n" {
 		t.Fatalf("ReadFile wrong: %q %v", data, err)
 	}
@@ -171,16 +170,16 @@ func TestE2BLiveRealCloud(t *testing.T) {
 	}
 
 	// python3 可用
-	res = d.RunBash(ctx, "live-s1", ws, "python3 -c 'print(40+2)'", 60)
+	res = d.RunBash(ctx, "live-s1", "python3 -c 'print(40+2)'", 60)
 	if res.Err != nil || !bytes.Contains([]byte(res.Stdout), []byte("42")) {
 		t.Fatalf("python3 wrong: %+v", res)
 	}
 
 	// RunPython 全链路：脚本经驱动写入沙箱后执行
-	if err := d.WriteFile(ctx, "live-s1", ws, ".pyexec_check.py", []byte("print('py-ok')")); err != nil {
+	if err := d.WriteFile(ctx, "live-s1", ".pyexec_check.py", []byte("print('py-ok')")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
-	pres := d.RunPython(ctx, "live-s1", ws, ".pyexec_check.py", 60)
+	pres := d.RunPython(ctx, "live-s1", ".pyexec_check.py", 60)
 	if pres.Err != nil || !bytes.Contains([]byte(pres.Stdout), []byte("py-ok")) {
 		t.Fatalf("RunPython wrong: %+v", pres)
 	}

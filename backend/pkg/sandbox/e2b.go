@@ -94,37 +94,36 @@ func (d *e2bDriver) EnvNote() string {
 		"- 命令受硬超时约束，超时会被强制结束。"
 }
 
-func (d *e2bDriver) RunBash(ctx context.Context, sessionID, hostDir, command string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, hostDir, timeoutSecs, []string{"/bin/bash", "-l", "-c", command})
+func (d *e2bDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"/bin/bash", "-l", "-c", command})
 }
 
-func (d *e2bDriver) RunPython(ctx context.Context, sessionID, hostDir, scriptRel string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, hostDir, timeoutSecs, []string{"/usr/bin/python3", e2bWorkspace + "/" + scriptRel})
+func (d *e2bDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"/usr/bin/python3", e2bWorkspace + "/" + scriptRel})
 }
 
-// run 完整执行一轮：确保沙箱 → 同步上行 → 执行命令 → 同步下行。
-// 沙箱句柄失效（TTL 回收等）时重建一次并整体重试。
-func (d *e2bDriver) run(ctx context.Context, sessionID, hostDir string, timeoutSecs int, argv []string) Result {
-	box, err := d.ensure(ctx, sessionID, hostDir)
+// run 完整执行一轮：确保沙箱 → 执行命令。沙箱句柄失效（TTL 回收等）时
+// 重建一次并整体重试。
+func (d *e2bDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string) Result {
+	box, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
-	res, stale := d.runOnce(ctx, box, sessionID, hostDir, timeoutSecs, argv)
+	res, stale := d.runOnce(ctx, box, timeoutSecs, argv)
 	if stale {
 		slog.Info("sandbox(e2b) 句柄失效，重建后重试", "session", sessionID)
 		d.forget(sessionID)
-		if box, err = d.ensure(ctx, sessionID, hostDir); err != nil {
+		if box, err = d.ensure(ctx, sessionID); err != nil {
 			return Result{Err: err}
 		}
-		res, _ = d.runOnce(ctx, box, sessionID, hostDir, timeoutSecs, argv)
+		res, _ = d.runOnce(ctx, box, timeoutSecs, argv)
 	}
 	return res
 }
 
 // runOnce 单次执行；stale 表示沙箱句柄已失效（应重建重试）。
-// 文件工具的写入直接进沙箱（WriteFile），无需执行前上行同步——宿主镜像只在
-// 沙箱新建时整包推送一次；执行后回拉变更保持久。
-func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, sessionID, hostDir string, timeoutSecs int, argv []string) (Result, bool) {
+// ephemeral 工作区：文件经 WriteFile 直达沙箱，沙箱生灭不回拉。
+func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, timeoutSecs int, argv []string) (Result, bool) {
 	// 外层包 timeout 做命令级硬超时（base 模板为 Ubuntu，含 coreutils）
 	wrapped := append([]string{"/usr/bin/timeout", "-k", strconv.Itoa(e2bExecKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
 	out, err := d.startProcess(ctx, box, wrapped)
@@ -135,7 +134,6 @@ func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, sessionID, hostDir
 		return Result{Err: infraErr(err, "在云端沙箱执行命令失败")}, false
 	}
 
-	// ephemeral 工作区：沙箱生灭不回拉，附件由 agent 层按轮重物化
 	box.lastUsed = time.Now()
 	killed := out.ExitCode == 124 || out.ExitCode == 137
 	return Result{
@@ -167,9 +165,9 @@ func (d *e2bDriver) forget(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 取（必要时创建）会话的云端沙箱；新建后把宿主工作区镜像整包推上去并打
-// 同步 marker（后续文件写入走 WriteFile 直达沙箱，无需再上行同步）
-func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2bBox, error) {
+// ensure 取（必要时创建）会话的云端沙箱。ephemeral 工作区：新沙箱从空工作区
+// 开始，附件由 agent 层按轮重物化。
+func (d *e2bDriver) ensure(ctx context.Context, sessionID string) (*e2bBox, error) {
 	d.mu.Lock()
 	if box := d.boxes[sessionID]; box != nil {
 		box.lastUsed = time.Now()
@@ -190,7 +188,6 @@ func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2b
 	}
 	d.mu.Unlock()
 	slog.Info("sandbox(e2b) 已创建", "session", sessionID, "sandbox", box.sandboxID)
-	// ephemeral 工作区：新沙箱从空工作区开始，附件由 agent 层按轮重物化
 	return box, nil
 }
 
@@ -437,12 +434,12 @@ func readConnectStream(r io.Reader, onMessage func(frame []byte) error) error {
 // ---------- 工作区文件操作（envd /files REST） ----------
 
 // ReadFile 从云端沙箱读取工作区文件
-func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
+func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return nil, err
 	}
-	box, err := d.ensure(ctx, sessionID, hostDir)
+	box, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
@@ -459,12 +456,12 @@ func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string
 }
 
 // WriteFile 写入云端沙箱工作区
-func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
+func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, rel string, data []byte) error {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return err
 	}
-	box, err := d.ensure(ctx, sessionID, hostDir)
+	box, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return err
 	}
@@ -478,7 +475,7 @@ func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel strin
 }
 
 // RemoveFile 删除云端沙箱工作区文件（临时脚本清理）
-func (d *e2bDriver) RemoveFile(sessionID, hostDir, rel string) {
+func (d *e2bDriver) RemoveFile(sessionID, rel string) {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return

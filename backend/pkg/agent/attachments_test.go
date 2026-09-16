@@ -9,11 +9,11 @@ import (
 	"testing"
 
 	"backend/dal/model"
+	"backend/pkg/sandbox"
 	"backend/pkg/storage"
-	"backend/pkg/tools"
 )
 
-// 重定向上传目录与工作区根到临时目录，避免污染运行目录
+// 重定向上传目录与沙箱工作区根到临时目录，避免污染运行目录
 func redirectDirs(t *testing.T) (uploadsRoot, wsRoot string) {
 	t.Helper()
 	root := t.TempDir()
@@ -22,9 +22,13 @@ func redirectDirs(t *testing.T) (uploadsRoot, wsRoot string) {
 	if err := os.MkdirAll(uploadsRoot, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	oldUploads, oldWS := storage.LocalRoot, tools.WorkspaceRoot
-	storage.LocalRoot, tools.WorkspaceRoot = uploadsRoot, wsRoot
-	t.Cleanup(func() { storage.LocalRoot, tools.WorkspaceRoot = oldUploads, oldWS })
+	oldUploads := storage.LocalRoot
+	storage.LocalRoot = uploadsRoot
+	sandbox.Init(sandbox.Config{Driver: "local", LocalRoot: wsRoot})
+	t.Cleanup(func() {
+		storage.LocalRoot = oldUploads
+		sandbox.Init(sandbox.Config{Driver: "local"}) // 恢复默认根
+	})
 	return uploadsRoot, wsRoot
 }
 

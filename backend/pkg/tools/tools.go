@@ -1,12 +1,13 @@
 // Package tools 内置工作区工具集（阶段二建立，阶段四扩展产物导出）。
 //
-// 文件工具被约束在会话独立的本地工作区（workspace/<session_id>/）内；
-// 进程工具（bash / python_exec）经 pkg/sandbox 分发执行——本地直跑或进
-// Docker 容器，由沙箱配置决定，对模型透明。执行结果统一为喂回 LLM 的文本
-// （作为 tool 消息的 content），export_artifact 额外携带导出工件的附件元数据。
+// 文件与进程工具统一经 pkg/sandbox 分发，操作各自会话的沙箱工作区（local
+// 直跑宿主目录 / docker 容器 / e2b 云端虚机，由沙箱配置决定，对模型透明）。
+// 执行结果统一为喂回 LLM 的文本（作为 tool 消息的 content），export_artifact
+// 额外携带导出工件的附件元数据。
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -14,8 +15,6 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
-	"bytes"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -26,9 +25,6 @@ import (
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
 )
-
-// WorkspaceRoot 会话工作区的根目录（相对后端运行目录），测试中可覆写
-var WorkspaceRoot = "workspace"
 
 const (
 	maxOutput    = 256 * 1024 // 工具输出上限
@@ -224,16 +220,6 @@ func ParseArguments(raw string) (map[string]any, string) {
 	return parsed, ""
 }
 
-// SessionDir 返回（并确保存在）会话工作区目录（宿主镜像的绝对路径——
-// local 驱动以此为 cwd 直接执行，docker/e2b 驱动据此做镜像推送与回拉）。
-func SessionDir(sessionID string) (string, error) {
-	d := filepath.Join(WorkspaceRoot, sessionID)
-	if err := os.MkdirAll(d, 0o755); err != nil {
-		return "", fmt.Errorf("创建会话工作区失败: %w", err)
-	}
-	return filepath.Abs(d)
-}
-
 // 路径越界校验已下沉到 sandbox.cleanRel / resolveLocal（驱动侧防御），
 // 工具层只传相对路径。
 
@@ -410,12 +396,8 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 
 	case "write_file":
 		rel := argString(args, "path")
-		dir, err := SessionDir(sessionID)
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
 		content := argString(args, "content")
-		if err := sandbox.WriteFile(ctx, sessionID, dir, rel, []byte(content)); err != nil {
+		if err := sandbox.WriteFile(ctx, sessionID, rel, []byte(content)); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		return Output{Text: fmt.Sprintf("已写入 %d 字符到 %s", len(content), rel)}
@@ -441,11 +423,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if argBool(args, "replace_all") {
 			replaced = strings.ReplaceAll(text, old, newStr)
 		}
-		dir, err := SessionDir(sessionID)
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
-		if err := sandbox.WriteFile(ctx, sessionID, dir, path, []byte(replaced)); err != nil {
+		if err := sandbox.WriteFile(ctx, sessionID, path, []byte(replaced)); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
 		scope := "1 处"
@@ -462,26 +440,18 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if inner > bashTimeoutMax {
 			inner = bashTimeoutMax
 		}
-		dir, err := SessionDir(sessionID)
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
-		res := sandbox.RunBash(ctx, sessionID, dir, argString(args, "command"), inner)
+		res := sandbox.RunBash(ctx, sessionID, argString(args, "command"), inner)
 		return Output{Text: formatSandboxResult(res)}
 
 	case "python_exec":
-		dir, err := SessionDir(sessionID)
-		if err != nil {
-			return Output{Text: "[执行失败] " + err.Error()}
-		}
 		// 脚本经驱动写进沙箱工作区，执行后清理
 		script := ".pyexec_" + randHex(12) + ".py"
-		if err := sandbox.WriteFile(ctx, sessionID, dir, script, []byte(argString(args, "code"))); err != nil {
+		if err := sandbox.WriteFile(ctx, sessionID, script, []byte(argString(args, "code"))); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
 		}
-		defer sandbox.RemoveFile(sessionID, dir, script)
+		defer sandbox.RemoveFile(sessionID, script)
 
-		res := sandbox.RunPython(ctx, sessionID, dir, script, toolTimeouts["python_exec"])
+		res := sandbox.RunPython(ctx, sessionID, script, toolTimeouts["python_exec"])
 		return Output{Text: formatSandboxResult(res)}
 
 	case "export_artifact":
@@ -523,11 +493,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 
 // readWorkspaceFile 经沙箱驱动读取工作区文件
 func readWorkspaceFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
-	dir, err := SessionDir(sessionID)
-	if err != nil {
-		return nil, err
-	}
-	return sandbox.ReadFile(ctx, sessionID, dir, rel)
+	return sandbox.ReadFile(ctx, sessionID, rel)
 }
 
 // fileErrOutput 文件读取错误的提示映射：不存在给可自纠正提示，其余给失败前缀

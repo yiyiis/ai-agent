@@ -7,15 +7,16 @@ import (
 	"strings"
 	"testing"
 
+	"backend/pkg/sandbox"
 	"backend/pkg/storage"
 )
 
+// setupWorkspace 把 local 沙箱驱动的工作区根指到临时目录（默认驱动即 local）
 func setupWorkspace(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	old := WorkspaceRoot
-	WorkspaceRoot = root
-	t.Cleanup(func() { WorkspaceRoot = old })
+	sandbox.Init(sandbox.Config{Driver: "local", LocalRoot: root})
+	t.Cleanup(func() { sandbox.Init(sandbox.Config{Driver: "local"}) }) // 恢复默认根
 	return root
 }
 
@@ -107,23 +108,6 @@ func TestEditFileAmbiguous(t *testing.T) {
 	if string(data) != "z\nz\nz\n" {
 		t.Fatalf("replace_all result: %q", data)
 	}
-}
-
-func TestSessionDirReturnsAbsolute(t *testing.T) {
-	// 回归：WorkspaceRoot 为相对路径时 SessionDir 也必须返回绝对路径，
-	// 否则 docker 驱动的 bind 源会被判为非法卷名（线上 400 的根因）
-	old := WorkspaceRoot
-	WorkspaceRoot = "workspace"
-	t.Cleanup(func() { WorkspaceRoot = old })
-
-	dir, err := SessionDir("sess-abs")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !filepath.IsAbs(dir) {
-		t.Fatalf("SessionDir must be absolute, got %q", dir)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(dir) })
 }
 
 func TestCheckArgsMessages(t *testing.T) {

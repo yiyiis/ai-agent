@@ -12,7 +12,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -22,7 +21,7 @@ import (
 	"backend/dao"
 	"backend/pkg/db"
 	"backend/pkg/provider"
-	backendtools "backend/pkg/tools"
+	"backend/pkg/sandbox"
 )
 
 var (
@@ -71,7 +70,7 @@ func e2eSession(t *testing.T, ctx context.Context) *model.Session {
 	}
 	t.Cleanup(func() {
 		_ = dao.DeleteSession(ctx, s.SessionID)
-		os.RemoveAll(filepath.Join(backendtools.WorkspaceRoot, s.SessionID))
+		sandbox.Close(s.SessionID) // 沙箱工作区随会话清理（local 驱动删宿主目录）
 	})
 	return s
 }
