@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -294,5 +295,86 @@ func TestDockerIntegrationRealDaemon(t *testing.T) {
 	}
 	if res.ExitCode != 0 || !bytes.Contains([]byte(res.Stdout), []byte("ok-from-container")) {
 		t.Fatalf("unexpected result: %+v", res)
+	}
+}
+
+// TestDockerEnsureSerializesConcurrentColdStart 一轮对话的多个工具调用并发
+// 冷启动同一会话容器：ensureMu 串行化后只允许一次 create，其余协程复用结果
+func TestDockerEnsureSerializesConcurrentColdStart(t *testing.T) {
+	var mu sync.Mutex
+	createCalls := 0
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /containers/ai-agent-sbx-s1/json", func(w http.ResponseWriter, r *http.Request) {
+		http.NotFound(w, r)
+	})
+	mux.HandleFunc("POST /containers/create", func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		createCalls++
+		_, _ = w.Write([]byte(`{"Id":"ctr-1"}`))
+	})
+	mux.HandleFunc("POST /containers/ctr-1/start", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNoContent)
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	d := &dockerDriver{cfg: Config{Image: "img:test"}, client: newDockerClient(srv.URL), ctrs: map[string]*ctrState{}}
+	ids := make([]string, 8)
+	var wg sync.WaitGroup
+	for i := range ids {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			id, err := d.ensure(context.Background(), "s1")
+			if err != nil {
+				t.Errorf("ensure: %v", err)
+				return
+			}
+			ids[i] = id
+		}(i)
+	}
+	wg.Wait()
+	mu.Lock()
+	defer mu.Unlock()
+	if createCalls != 1 {
+		t.Fatalf("concurrent cold start should create exactly once, got %d", createCalls)
+	}
+	for i, id := range ids {
+		if id != "ctr-1" {
+			t.Fatalf("goroutine %d got %q, want ctr-1", i, id)
+		}
+	}
+}
+
+// TestDockerEnsureAdoptsNameConflict create 撞 409（同名容器已存在，如上次
+// 进程建完未注册即退出）：应收养现成容器而不是把工具调用判为基础设施故障
+func TestDockerEnsureAdoptsNameConflict(t *testing.T) {
+	var inspects atomic.Int32
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /containers/ai-agent-sbx-s2/json", func(w http.ResponseWriter, r *http.Request) {
+		if inspects.Add(1) == 1 {
+			http.NotFound(w, r) // 冷启动视角：不存在
+			return
+		}
+		_, _ = w.Write([]byte(`{"Id":"orphan-1","State":{"Running":true}}`))
+	})
+	mux.HandleFunc("POST /containers/create", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusConflict)
+		_, _ = w.Write([]byte(`{"message":"Conflict. The container name is already in use."}`))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	d := &dockerDriver{cfg: Config{Image: "img:test"}, client: newDockerClient(srv.URL), ctrs: map[string]*ctrState{}}
+	id, err := d.ensure(context.Background(), "s2")
+	if err != nil {
+		t.Fatalf("ensure should adopt orphan container: %v", err)
+	}
+	if id != "orphan-1" {
+		t.Fatalf("should adopt orphan-1, got %q", id)
+	}
+	if d.ctrs["s2"] == nil {
+		t.Fatal("adopted container should be registered")
 	}
 }

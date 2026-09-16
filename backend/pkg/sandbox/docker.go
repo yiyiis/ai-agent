@@ -55,6 +55,10 @@ type dockerDriver struct {
 	mu   sync.Mutex
 	ctrs map[string]*ctrState // sessionID -> 容器状态
 	stop chan struct{}        // 关闭巡检协程（仅测试用）
+
+	// ensureMu 串行化容器冷启动（inspect→create→start）：一轮对话的多个工具
+	// 调用并发执行，不串行会各自 create 同名容器、后到者撞 409（线上真实发生过）
+	ensureMu sync.Mutex
 }
 
 type ctrState struct {
@@ -100,7 +104,8 @@ func (d *dockerDriver) Name() string { return "docker" }
 
 func (d *dockerDriver) EnvNote() string {
 	return "- 运行环境是隔离的 Linux 容器（镜像 " + d.cfg.Image + "），不是宿主机；\n" +
-		"- 启动目录 /workspace 就是会话工作区，与文件工具看到的是同一份目录，用户上传与工具产出的文件都在这里；\n" +
+		"- 启动目录 /workspace 就是会话工作区（bash 的 cwd），用户上传与工具产出的文件都在这里；\n" +
+		"- 文件工具（read_file/write_file/edit_file/export_artifact）的 path 填工作区相对路径（如 report.md、demo/app.py），不要带 /workspace/ 前缀；\n" +
 		"- Python 解释器命令是 `python3`；跑 Python 优先用 python_exec 工具；\n" +
 		"- 容器内不可安装系统依赖（apt 等不可用），缺什么需要管理员预装进镜像；\n" +
 		"- 命令受硬超时约束，超时会被强制结束。"
@@ -187,16 +192,29 @@ func (d *dockerDriver) touch(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 按需拉起会话容器：查名 → 不在则建、没跑则启（此后 exec 复用）。
-// ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化。
-func (d *dockerDriver) ensure(ctx context.Context, sessionID string) (string, error) {
+// registered 会话容器已注册时返回其 id 并刷新活跃时间
+func (d *dockerDriver) registered(sessionID string) (string, bool) {
 	d.mu.Lock()
+	defer d.mu.Unlock()
 	if st := d.ctrs[sessionID]; st != nil {
 		st.lastUsed = time.Now()
-		d.mu.Unlock()
-		return st.id, nil
+		return st.id, true
 	}
-	d.mu.Unlock()
+	return "", false
+}
+
+// ensure 按需拉起会话容器：已注册直接复用；否则（互斥地）查名 → 不在则建、
+// 没跑则启。冷启动全程持 ensureMu，防止并发工具调用重复 create 同名容器。
+// ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化。
+func (d *dockerDriver) ensure(ctx context.Context, sessionID string) (string, error) {
+	if id, ok := d.registered(sessionID); ok {
+		return id, nil
+	}
+	d.ensureMu.Lock()
+	defer d.ensureMu.Unlock()
+	if id, ok := d.registered(sessionID); ok {
+		return id, nil // 等锁间隙已被并发协程拉起
+	}
 
 	name := containerName(sessionID)
 	id, running, err := d.client.inspectContainer(ctx, name)
@@ -222,23 +240,30 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID string) (string, er
 			cancel()
 			id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID))
 		}
-		if err != nil {
+		switch {
+		case errors.Is(err, errDockerNameConflict):
+			// 同名容器已存在（上次进程建完未注册即退出等）：收养现成容器
+			id, running, err = d.client.inspectContainer(ctx, name)
+			if err == nil && id != "" && !running {
+				err = d.client.startContainer(ctx, id)
+			}
+			if err != nil || id == "" {
+				return "", infraErr(errors.Join(err, errDockerNameConflict), "拉起执行容器失败")
+			}
+			slog.Info("sandbox 同名容器已存在，收养复用", "session", sessionID, "container", name)
+		case err != nil:
 			return "", infraErr(err, "拉起执行容器失败")
+		default:
+			if err := d.client.startContainer(ctx, id); err != nil {
+				return "", infraErr(err, "启动执行容器失败")
+			}
+			slog.Info("sandbox 容器已创建", "session", sessionID, "container", name, "image", d.cfg.Image)
 		}
-		if err := d.client.startContainer(ctx, id); err != nil {
-			return "", infraErr(err, "启动执行容器失败")
-		}
-		slog.Info("sandbox 容器已创建", "session", sessionID, "container", name, "image", d.cfg.Image)
 	}
 
 	now := time.Now()
 	d.mu.Lock()
-	// 双检：拉起的间隙可能有并发协程已注册同会话容器，以先注册者为准
-	if existing := d.ctrs[sessionID]; existing != nil {
-		id = existing.id
-	} else {
-		d.ctrs[sessionID] = &ctrState{id: id, created: now, lastUsed: now}
-	}
+	d.ctrs[sessionID] = &ctrState{id: id, created: now, lastUsed: now}
 	d.mu.Unlock()
 	return id, nil
 }
@@ -549,6 +574,9 @@ func (c *dockerClient) inspectContainer(ctx context.Context, name string) (strin
 // errDockerImageMissing create 404（No such image）的判别哨兵
 var errDockerImageMissing = errors.NewMsg("docker image missing")
 
+// errDockerNameConflict create 409（同名容器已存在）的判别哨兵
+var errDockerNameConflict = errors.NewMsg("docker container name conflict")
+
 func (c *dockerClient) createContainer(ctx context.Context, name string, spec containerCreateReq) (string, error) {
 	resp, err := c.do(ctx, http.MethodPost, "/containers/create", url.Values{"name": []string{name}}, spec)
 	if err != nil {
@@ -557,8 +585,12 @@ func (c *dockerClient) createContainer(ctx context.Context, name string, spec co
 	defer resp.Body.Close()
 	if resp.StatusCode >= 400 {
 		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		if resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "No such image") {
+		switch {
+		case resp.StatusCode == http.StatusNotFound && strings.Contains(string(body), "No such image"):
 			return "", errors.Join(errDockerImageMissing,
+				errors.New(fmt.Sprintf("create %s: HTTP %d %s", name, resp.StatusCode, strings.TrimSpace(string(body)))))
+		case resp.StatusCode == http.StatusConflict:
+			return "", errors.Join(errDockerNameConflict,
 				errors.New(fmt.Sprintf("create %s: HTTP %d %s", name, resp.StatusCode, strings.TrimSpace(string(body)))))
 		}
 		return "", fmt.Errorf("create %s: HTTP %d %s", name, resp.StatusCode, strings.TrimSpace(string(body)))

@@ -32,7 +32,7 @@ func writeWsFile(t *testing.T, root, rel, content string) {
 }
 
 func TestWorkspacePathConfinement(t *testing.T) {
-	setupWorkspace(t)
+	root := setupWorkspace(t)
 	// 越界路径：经驱动（local）读取一律拒绝
 	for _, escape := range []string{"../secret", "a/../../etc/passwd", "/etc/passwd", "..\\..\\x"} {
 		out := Execute(context.Background(), "sess1", "read_file", map[string]any{"path": escape})
@@ -44,6 +44,22 @@ func TestWorkspacePathConfinement(t *testing.T) {
 	out := Execute(context.Background(), "sess1", "read_file", map[string]any{"path": "nope.txt"})
 	if !strings.Contains(out, "[未读取]") {
 		t.Fatalf("missing file hint wrong: %s", out)
+	}
+
+	// 模型常把工作区写成沙箱内绝对路径（EnvNote 告知 cwd 是 /workspace）：
+	// 精确前缀剥离后照常工作，越界变体仍拒绝
+	out = Execute(context.Background(), "sess1", "write_file", map[string]any{"path": "/workspace/abs-prefix.txt", "content": "ok"})
+	if IsErrorResult(out) {
+		t.Fatalf("workspace prefix should be stripped: %s", out)
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "sess1", "abs-prefix.txt")); err != nil || string(data) != "ok" {
+		t.Fatalf("stripped-prefix file wrong: %q %v", data, err)
+	}
+	for _, escape := range []string{"/workspace/../etc/passwd", "/workspace"} {
+		out := Execute(context.Background(), "sess1", "write_file", map[string]any{"path": escape, "content": "x"})
+		if !IsErrorResult(out) || !strings.Contains(out, "超出工作区范围") {
+			t.Fatalf("escape %q should stay rejected: %s", escape, out)
+		}
 	}
 }
 

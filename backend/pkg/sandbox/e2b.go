@@ -57,6 +57,20 @@ type e2bDriver struct {
 
 	mu    sync.Mutex
 	boxes map[string]*e2bBox // sessionID -> 句柄
+
+	// ensureMu 串行化云端沙箱冷启动：并发工具调用不串行会重复建沙箱（多花钱）
+	ensureMu sync.Mutex
+}
+
+// registered 会话沙箱已注册时返回句柄并刷新活跃时间
+func (d *e2bDriver) registered(sessionID string) *e2bBox {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if box := d.boxes[sessionID]; box != nil {
+		box.lastUsed = time.Now()
+		return box
+	}
+	return nil
 }
 
 // e2bBox 单个云端沙箱句柄。云端侧的变更检测靠沙箱内 marker 文件的 mtime。
@@ -88,7 +102,8 @@ func (d *e2bDriver) Name() string { return "e2b" }
 
 func (d *e2bDriver) EnvNote() string {
 	return "- 运行环境是 E2B 云端隔离的 Linux 沙箱（模板 " + d.cfg.E2BTemplate + "），与宿主机完全隔离；\n" +
-		"- 启动目录 /workspace 就是会话工作区（系统自动与本地双向同步），用户上传与工具产出的文件都在这里；\n" +
+		"- 启动目录 /workspace 就是会话工作区（bash 的 cwd），用户上传与工具产出的文件都在这里；\n" +
+		"- 文件工具（read_file/write_file/edit_file/export_artifact）的 path 填工作区相对路径（如 report.md、demo/app.py），不要带 /workspace/ 前缀；\n" +
 		"- Python 解释器命令是 `python3`；跑 Python 优先用 python_exec 工具；\n" +
 		"- 沙箱内没有系统依赖安装权限（sudo/apt 不可用），缺什么需要管理员预装进模板；\n" +
 		"- 命令受硬超时约束，超时会被强制结束。"
@@ -165,27 +180,25 @@ func (d *e2bDriver) forget(sessionID string) {
 	d.mu.Unlock()
 }
 
-// ensure 取（必要时创建）会话的云端沙箱。ephemeral 工作区：新沙箱从空工作区
+// ensure 取（必要时创建）会话的云端沙箱。冷启动互斥——一轮对话的多个工具
+// 调用并发执行，不串行会重复创建云沙箱。ephemeral 工作区：新沙箱从空工作区
 // 开始，附件由 agent 层按轮重物化。
 func (d *e2bDriver) ensure(ctx context.Context, sessionID string) (*e2bBox, error) {
-	d.mu.Lock()
-	if box := d.boxes[sessionID]; box != nil {
-		box.lastUsed = time.Now()
-		d.mu.Unlock()
+	if box := d.registered(sessionID); box != nil {
 		return box, nil
 	}
-	d.mu.Unlock()
+	d.ensureMu.Lock()
+	defer d.ensureMu.Unlock()
+	if box := d.registered(sessionID); box != nil {
+		return box, nil // 等锁间隙已被并发协程创建
+	}
 
 	box, err := d.createSandbox(ctx)
 	if err != nil {
 		return nil, infraErr(err, "创建 E2B 云端沙箱失败")
 	}
 	d.mu.Lock()
-	if existing := d.boxes[sessionID]; existing != nil {
-		box = existing
-	} else {
-		d.boxes[sessionID] = box
-	}
+	d.boxes[sessionID] = box
 	d.mu.Unlock()
 	slog.Info("sandbox(e2b) 已创建", "session", sessionID, "sandbox", box.sandboxID)
 	return box, nil

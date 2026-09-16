@@ -13,9 +13,19 @@ import (
 	"backend/pkg/errors"
 )
 
+// stripSandboxPrefix 容忍模型把工作区写成沙箱内绝对路径——EnvNote 告知模型
+// cwd 是 /workspace，模型常顺手把该前缀带进文件工具的 path。剥掉精确前缀还原
+// 为相对路径；其余绝对路径（如 /etc/passwd）不在此列，仍由调用方拒绝。
+func stripSandboxPrefix(rel string) string {
+	if rel == "/workspace" {
+		return "."
+	}
+	return strings.TrimPrefix(rel, "/workspace/")
+}
+
 // cleanRel 校验并规范化工作区相对路径（斜杠分隔；拒绝绝对路径与 ../ 越界）
 func cleanRel(rel string) (string, error) {
-	r := path.Clean(strings.TrimSpace(rel))
+	r := path.Clean(stripSandboxPrefix(strings.TrimSpace(rel)))
 	if r == "" || r == "." || path.IsAbs(r) || strings.HasPrefix(r, "../") {
 		return "", errors.NewMsg("路径 " + rel + " 超出工作区范围，只能访问工作区内的相对路径")
 	}

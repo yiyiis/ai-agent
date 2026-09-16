@@ -44,9 +44,10 @@ func (d *localDriver) dir(sessionID string) (string, error) {
 	return p, nil
 }
 
-// resolveLocal 工作区相对路径 → 宿主绝对路径，越界一律拒绝（防 ../ 逃逸）
+// resolveLocal 工作区相对路径 → 宿主绝对路径，越界一律拒绝（防 ../ 逃逸）。
+// 与容器驱动的 cleanRel 同规则：剥离模型常写的 /workspace 精确前缀。
 func resolveLocal(hostDir, rel string) (string, error) {
-	rel = filepath.ToSlash(filepath.Clean(rel))
+	rel = filepath.ToSlash(filepath.Clean(stripSandboxPrefix(strings.TrimSpace(rel))))
 	if rel == "" || rel == "." || filepath.IsAbs(rel) || strings.HasPrefix(rel, "../") || strings.HasPrefix(rel, "/") {
 		return "", errors.NewMsg("路径 " + rel + " 超出工作区范围，只能访问工作区内的相对路径")
 	}
