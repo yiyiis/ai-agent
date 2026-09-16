@@ -168,6 +168,17 @@ var requiredArgs = map[string][]string{
 	"export_artifact": {"path"},
 }
 
+// argExamples 各工具的参数示例：参数缺失时随纠错提示一起返回——把"补齐"
+// 变成"照抄"，退化中的弱模型也能接住（曾出现 MiniMax 连发空 arguments 的塌缩）
+var argExamples = map[string]string{
+	"read_file":       `{"path": "report.md"}`,
+	"write_file":      `{"path": "notes.txt", "content": "要写入的文本内容"}`,
+	"edit_file":       `{"path": "notes.txt", "old_string": "被替换的原文", "new_string": "替换后的文本"}`,
+	"bash":            `{"command": "ls -la"}`,
+	"python_exec":     `{"code": "print(1)"}`,
+	"export_artifact": `{"path": "report.md"}`,
+}
+
 // Attachment 导出工件的附件元数据（与前端 Attachment 契约一致，
 // 随 tool 消息落库并经 tool_artifact 事件推送）
 type Attachment struct {
@@ -223,8 +234,9 @@ func ParseArguments(raw string) (map[string]any, string) {
 // 路径越界校验已下沉到 sandbox.cleanRel / resolveLocal（驱动侧防御），
 // 工具层只传相对路径。
 
-// checkArgs 缺必填参数时返回一句能照着改的提示
-func checkArgs(name string, args map[string]any) string {
+// CheckArgs 缺必填参数时返回一句能照着改的提示（空串表示参数齐全；
+// agent 层据此在执行前落参数异常的取证日志）
+func CheckArgs(name string, args map[string]any) string {
 	var missing []string
 	for _, k := range requiredArgs[name] {
 		if emptyOK[name+"/"+k] {
@@ -252,6 +264,10 @@ func checkArgs(name string, args map[string]any) string {
 	got := "（无参数）"
 	if len(keys) > 0 {
 		got = strings.Join(keys, "、")
+	}
+	if ex, ok := argExamples[name]; ok {
+		return fmt.Sprintf("[参数缺失] 调用 `%s` 时缺少必填参数（或传了空值）：%s。本次只收到：%s。正确格式示例：%s。请按此格式补齐后重试。",
+			name, strings.Join(missing, "、"), got, ex)
 	}
 	return fmt.Sprintf("[参数缺失] 调用 `%s` 时缺少必填参数（或传了空值）：%s。本次只收到：%s。请补齐后重试。",
 		name, strings.Join(missing, "、"), got)
@@ -537,7 +553,7 @@ func formatSandboxResult(res sandbox.Result) string {
 // ExecuteWithOutput 执行单个工具调用，返回完整产物（文本 + 导出工件）。
 // 每次调用有外层硬超时兜底。
 func ExecuteWithOutput(ctx context.Context, sessionID, name string, args map[string]any) Output {
-	if msg := checkArgs(name, args); msg != "" {
+	if msg := CheckArgs(name, args); msg != "" {
 		return Output{Text: msg}
 	}
 	timeout := timeoutFor(name, args)

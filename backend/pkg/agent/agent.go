@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"os"
@@ -88,6 +89,9 @@ type savedCall struct {
 		Name      string `json:"name"`
 		Arguments string `json:"arguments"`
 	} `json:"function"`
+	// fragCount 携带过 argument 字节的流式分片数。仅活动流内统计（不落库），
+	// 工具参数异常时作为取证元数据输出——区分"空对象整块到达"与"零分片"
+	fragCount int
 }
 
 func newSavedCall(id, name, args string) savedCall {
@@ -290,7 +294,9 @@ func streamOneRound(
 						slot.Function.Name = tc.Name
 					}
 					slot.Function.Arguments += tc.Arguments
-
+					if tc.Arguments != "" {
+						slot.fragCount++
+					}
 					if slot.Function.Name != "" && !startedSlots[tc.Index] {
 						id := slot.ID
 						if id == "" {
@@ -566,8 +572,12 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				defer wg.Done()
 				args, parseErr := tools.ParseArguments(tc.Function.Arguments)
 				if parseErr != "" {
+					logArgAnomaly(sessionID, session.Model, tc, "参数解析失败")
 					outputs[i] = tools.Output{Text: parseErr}
 					return
+				}
+				if tools.CheckArgs(tc.Function.Name, args) != "" {
+					logArgAnomaly(sessionID, session.Model, tc, "参数缺失")
 				}
 				outputs[i] = exec(ctx, sessionID, tc.Function.Name, args)
 			}(i, tc)
@@ -633,6 +643,42 @@ func orEmptyJSON(s string) string {
 		return "{}"
 	}
 	return s
+}
+
+// logArgAnomaly 工具参数异常的取证日志：把反序列化之前的原始 arguments（流式
+// 分片按到达顺序拼接的产物）截断后落一条 Warn。API 实际送来的是空对象、零字节
+// 还是残缺 JSON，在 run.log 里一眼可辨，不必事后推断（曾出现模型连发空参数的
+// 塌缩，当时无现场可查）。正常调用零开销。
+func logArgAnomaly(sessionID, modelName string, tc savedCall, trigger string) {
+	slog.Warn("工具参数异常（原始 arguments 取证）",
+		"session", sessionID,
+		"model", modelName,
+		"tool", tc.Function.Name,
+		"trigger", trigger,
+		"fragments", tc.fragCount,
+		"bytes", len(tc.Function.Arguments),
+		"raw_arguments", argPreview(tc.Function.Arguments),
+	)
+}
+
+// argPreview 截断到 512 字节，回退到上一个 UTF-8 序列边界避免截出半个字符
+func argPreview(s string) string {
+	const max = 512
+	if len(s) <= max {
+		return s
+	}
+	cut := s[:max]
+	for i := max - 1; i >= max-4 && i >= 0; i-- {
+		if s[i] < 0x80 { // ASCII：可整字节包含
+			cut = s[:i+1]
+			break
+		}
+		if s[i] >= 0xC0 { // 多字节序列首字节：整段剔除，避免留下孤儿字节
+			cut = s[:i]
+			break
+		}
+	}
+	return fmt.Sprintf("%s…(已截断，共 %d 字节)", cut, len(s))
 }
 
 func allSame(hs []string) bool {
