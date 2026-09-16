@@ -49,11 +49,11 @@ services:
       - ../backend/uploads:/app/uploads
       - ../backend/logs:/app/logs
       # 启用 Docker 容器沙箱（etc 配置 Sandbox.Driver: docker）时挂载宿主 Docker，
-      # 后端经 socket 在宿主上创建"兄弟"沙箱容器（非嵌套）。沙箱工作区文件经
-      # /archive API 传入传出（不做 bind 挂载、无需任何路径映射配置）；workspace
-      # 目录挂载仅作持久化镜像（沙箱销毁重建后数据恢复）。镜像缺失会自动拉取。
-      # 注意：挂载 docker.sock 等于授予后端容器宿主 Docker 的完全控制权，仅建议
-      # 内网/自有服务器使用，更强的隔离请改用 Driver: e2b（云端沙箱，无需宿主 Docker）。
+      # 后端经 socket 在宿主上创建"兄弟"沙箱容器（非嵌套）。工作区 ephemeral：文件
+      # 经 /archive API 传入传出容器，不 bind 挂载、无宿主镜像；附件与产物统一上 COS
+      #（Bucket 未配置时落 uploads/ 目录）。workspace 挂载仅服务 local 驱动在容器内
+      # 直跑的场景。镜像缺失会自动拉取。注意：挂载 docker.sock 等于授予后端容器宿主
+      # Docker 的完全控制权，仅建议内网/自有服务器使用，更强的隔离请改用 Driver: e2b。
       - /var/run/docker.sock:/var/run/docker.sock
 
   frontend:

@@ -324,11 +324,44 @@ func collectSlots(slots map[int]*savedCall, order []int) []savedCall {
 // UploadsDir 上传附件下载客户端（从对象存储拉回附件用，超时与体积上限单独约束）
 var attachmentHTTPClient = &http.Client{Timeout: 2 * time.Minute}
 
-// materializeAttachments 把用户上传的附件落进当前会话工作区，
+// collectAttachments 汇总会话内全部附件：历史消息落库的 attachments + 当轮请求
+// 携带的，按 URL 去重（当轮在后，覆盖同名历史项的展示名）。ephemeral 工作区下
+// 沙箱随时可能被回收重建，每轮把全部附件重物化一遍，保证"用户传过的原件"永远
+// 拿得回来（历史 URL 来自 messages 表，无需额外存储）。
+func collectAttachments(history []model.Message, current []Attachment) []Attachment {
+	seen := make(map[string]bool, len(current))
+	var out []Attachment
+	appendOne := func(a Attachment) {
+		if a.URL == "" || seen[a.URL] {
+			return
+		}
+		seen[a.URL] = true
+		out = append(out, a)
+	}
+	for i := range history {
+		m := &history[i]
+		if m.Attachments == nil || *m.Attachments == "" {
+			continue
+		}
+		var atts []Attachment
+		if json.Unmarshal([]byte(*m.Attachments), &atts) != nil {
+			continue
+		}
+		for _, a := range atts {
+			appendOne(a)
+		}
+	}
+	for _, a := range current {
+		appendOne(a)
+	}
+	return out
+}
+
+// materializeAttachments 把用户上传的附件落进当前会话工作区（沙箱），
 // 使工作区工具（read_file/edit_file/bash 等）可以直接操作它们。
-// 本地驱动（/api/uploads/ URL）直接从 uploads/ 目录拷贝；对象存储驱动（COS 公网
-// URL）下载回填。返回成功落入工作区的附件（Filename 已替换为实际落盘名）；
-// 失败静默降级为"仅引用"。
+// 本地存储驱动（/api/uploads/ URL）直接从 uploads/ 目录读字节；对象存储驱动
+//（COS 公网 URL）下载回填。返回成功落入工作区的附件（Filename 已替换为实际
+// 落盘名）；失败静默降级为"仅引用"。
 func materializeAttachments(ctx context.Context, sessionID string, attachments []Attachment) []Attachment {
 	var placed []Attachment
 	dir, err := tools.SessionDir(sessionID)
@@ -444,8 +477,9 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
 	msgs := buildContext(session, history)
-	// 附件落入会话工作区，工具可直接按文件名操作（多模态内容流属于阶段八）
-	placed := materializeAttachments(ctx, sessionID, attachments)
+	// 附件落入会话工作区（沙箱），工具可直接按文件名操作（多模态内容流属于阶段八）。
+	// ephemeral 工作区：每轮物化"历史 + 当轮"的全部附件，沙箱回收重建后原件照常可用
+	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
 	userTurn := provider.ChatMessage{Role: "user", Content: userContent}
 	if len(placed) > 0 {
 		var b strings.Builder
@@ -456,7 +490,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 		userTurn.Content = b.String()
 	} else if len(attachments) > 0 {
-		// 未能落入工作区（如未来的对象存储 url），退化为仅告知引用清单
+		// 未能落入工作区（下载失败等），退化为仅告知引用清单
 		var b strings.Builder
 		b.WriteString(userContent)
 		b.WriteString("\n\n[用户上传的附件]")

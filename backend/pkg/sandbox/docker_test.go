@@ -178,7 +178,7 @@ func TestReapOnceForceRemovesIdleContainers(t *testing.T) {
 	now := time.Now()
 	d.ctrs["busy"] = &ctrState{id: "c1", created: now.Add(-time.Hour), lastUsed: now}
 	d.ctrs["idle"] = &ctrState{id: "c2", created: now.Add(-time.Hour), lastUsed: now.Add(-time.Hour)} // 超空闲
-	d.ctrs["stale"] = &ctrState{id: "c3", created: now.Add(-2 * time.Hour), lastUsed: now}             // 超最长存活
+	d.ctrs["stale"] = &ctrState{id: "c3", created: now.Add(-2 * time.Hour), lastUsed: now}            // 超最长存活
 
 	d.reapOnce()
 

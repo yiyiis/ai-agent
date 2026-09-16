@@ -11,8 +11,6 @@ import (
 	"net"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"runtime"
 	"strconv"
 	"strings"
@@ -36,7 +34,7 @@ const (
 
 const (
 	defaultDockerImage = "python:3.12-slim" // 需含 bash 与 python3；换镜像须保住这两个契约
-	defaultIdleTimeout = 15 * time.Minute   // 空闲多久后销毁容器
+	defaultIdleTimeout = time.Hour          // 空闲多久后销毁容器（ephemeral 工作区下适当放宽，减少工作现场丢失窗口）
 	defaultMaxLifetime = 12 * time.Hour     // 容器最长存活：常驻容器也需要硬顶，防句柄泄漏越积越多
 	defaultNetworkMode = "bridge"
 )
@@ -119,7 +117,7 @@ func (d *dockerDriver) RunPython(ctx context.Context, sessionID, hostDir, script
 
 // run 在会话容器内执行 argv。外层包一层 `timeout -k` 做命令级硬超时：
 // Engine API 没有"取消 exec"的接口，靠镜像内的 timeout 命令兜底最可靠
-//（GNU coreutils 与 busybox 均支持该参数序）。
+// （GNU coreutils 与 busybox 均支持该参数序）。
 func (d *dockerDriver) run(ctx context.Context, sessionID, hostDir string, timeoutSecs int, argv []string) Result {
 	id, err := d.ensure(ctx, sessionID, hostDir)
 	if err != nil {
@@ -148,8 +146,6 @@ func (d *dockerDriver) run(ctx context.Context, sessionID, hostDir string, timeo
 		return Result{Err: infraErr(err, "获取退出码失败")}
 	}
 	d.touch(sessionID)
-	// 命令可能改写了工作区文件：回拉宿主镜像（尽力而为，失败不影响命令结果）
-	d.pullChanged(ctx, id, hostDir)
 	// 124=timeout 超时退出；137=SIGKILL（-k 宽限后强杀）
 	killed := exitCode == 124 || exitCode == 137
 	return Result{
@@ -213,7 +209,6 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		}
 		slog.Info("sandbox 容器已重启", "session", sessionID, "container", name)
 	}
-	fresh := false
 	if id == "" {
 		id, err = d.client.createContainer(ctx, name, d.containerSpec(sessionID))
 		if errors.Is(err, errDockerImageMissing) {
@@ -233,7 +228,7 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		if err := d.client.startContainer(ctx, id); err != nil {
 			return "", infraErr(err, "启动执行容器失败")
 		}
-		fresh = true
+		// ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化
 		slog.Info("sandbox 容器已创建", "session", sessionID, "container", name, "image", d.cfg.Image)
 	}
 
@@ -246,12 +241,6 @@ func (d *dockerDriver) ensure(ctx context.Context, sessionID, hostDir string) (s
 		d.ctrs[sessionID] = &ctrState{id: id, created: now, lastUsed: now}
 	}
 	d.mu.Unlock()
-
-	if fresh {
-		if err := d.pushWorkspace(ctx, id, hostDir); err != nil {
-			slog.Warn("sandbox 工作区镜像推送失败", "session", sessionID, "err", err)
-		}
-	}
 	return id, nil
 }
 
@@ -301,7 +290,6 @@ func (d *dockerDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel str
 	if err != nil {
 		return nil, err
 	}
-	writeHostMirror(hostDir, relC, data)
 	return data, nil
 }
 
@@ -322,7 +310,6 @@ func (d *dockerDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel st
 	if err := d.client.putArchive(ctx, id, containerPath, tarball); err != nil {
 		return infraErr(err, "写入沙箱文件失败")
 	}
-	writeHostMirror(hostDir, relC, data)
 	return nil
 }
 
@@ -331,63 +318,18 @@ func (d *dockerDriver) RemoveFile(sessionID, hostDir, rel string) {
 	if err != nil {
 		return
 	}
-	_ = os.Remove(filepath.Join(hostDir, filepath.FromSlash(relC)))
 	d.mu.Lock()
 	st := d.ctrs[sessionID]
 	d.mu.Unlock()
 	if st == nil {
-		return // 容器未拉起：宿主镜像已清，无需动容器
+		return // 容器未拉起：ephemeral 工作区里也没有该文件
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, _ = d.execQuiet(ctx, st.id, []string{"/bin/rm", "-f", "--", containerPath + "/" + relC})
 }
 
-// pushWorkspace 全新容器创建后：宿主镜像整包推送进容器 + 打同步 marker。
-// marker 的 mtime 是后续 pullChanged 检测"命令改了哪些文件"的基准。
-func (d *dockerDriver) pushWorkspace(ctx context.Context, id, hostDir string) error {
-	tarball, err := tarWorkspace(hostDir)
-	if err != nil {
-		return err
-	}
-	if len(tarball) > e2bMaxSyncBytes {
-		return errors.NewMsg(fmt.Sprintf("工作区同步包超过 %dMB 上限", e2bMaxSyncBytes>>20))
-	}
-	if err := d.client.putArchive(ctx, id, containerPath, tarball); err != nil {
-		return err
-	}
-	_, err = d.execQuiet(ctx, id, []string{"/bin/touch", containerPath + "/" + e2bSyncMarker})
-	return err
-}
-
-// pullChanged 命令执行后：把沙箱内新增/变更文件回拉宿主镜像（marker 法，尽力而为）。
-// marker 在归档后原地刷新，下一轮命令的变更检测不受影响。
-func (d *dockerDriver) pullChanged(ctx context.Context, id, hostDir string) {
-	collect := "cd " + containerPath + " && { find . -type f ! -name " + e2bSyncMarker +
-		" -newer " + e2bSyncMarker + " -print0 | tar --null -czf /tmp/sbx_out.tgz -T - ; } ; " +
-		"touch " + e2bSyncMarker + " ; exit 0"
-	if _, err := d.execQuiet(ctx, id, []string{"/bin/bash", "-c", collect}); err != nil {
-		return
-	}
-	tarBytes, err := d.client.getArchive(ctx, id, "/tmp/sbx_out.tgz")
-	if err != nil {
-		return
-	}
-	_, _ = d.execQuiet(ctx, id, []string{"/bin/rm", "-f", "/tmp/sbx_out.tgz"})
-	if len(tarBytes) == 0 || len(tarBytes) > e2bMaxSyncBytes {
-		return
-	}
-	// /archive 返回的是"裸 tar 包裹该文件"：先剥外层 tar 取出 .tgz 内容，再解压工作区
-	inner, err := readTarSingle(tarBytes)
-	if err != nil {
-		return
-	}
-	if err := untarTo(hostDir, inner); err != nil {
-		slog.Warn("sandbox 工作区回拉解包失败", "err", err)
-	}
-}
-
-// execQuiet 静默执行（只要退出码，输出丢弃）——同步与清理类内部命令用
+// execQuiet 静默执行（只要退出码，输出丢弃）——清理类内部命令用
 func (d *dockerDriver) execQuiet(ctx context.Context, id string, argv []string) (int, error) {
 	eid, err := d.client.createExec(ctx, id, argv)
 	if err != nil {
@@ -397,15 +339,6 @@ func (d *dockerDriver) execQuiet(ctx context.Context, id string, argv []string) 
 		return 0, err
 	}
 	return d.client.execExitCode(ctx, eid)
-}
-
-// writeHostMirror 宿主镜像双落（文件工具写入与读取都同步镜像）
-func writeHostMirror(hostDir, relC string, data []byte) {
-	p := filepath.Join(hostDir, filepath.FromSlash(relC))
-	if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-		return
-	}
-	_ = os.WriteFile(p, data, 0o644)
 }
 
 func pidsLimitOrNil(n int64) *int64 {
@@ -478,7 +411,6 @@ func (d *dockerDriver) sweepOrphans(ctx context.Context) {
 // containerName 容器名与 sessionID 一一映射（sessionID 为 UUID，天然安全）
 func containerName(sessionID string) string { return "ai-agent-sbx-" + sessionID }
 
-
 // ---------- Docker Engine API 客户端（手写，不引官方 SDK） ----------
 
 type containerCreateReq struct {
@@ -503,11 +435,11 @@ type hostConfig struct {
 // dockerClient Docker Engine API 的极薄 HTTP 封装，只覆盖沙箱用到的接口面：
 // containers inspect/create/start/list/remove 与 exec create/start/inspect。
 type dockerClient struct {
-	base      string // 形如 http://docker（socket 场景的虚拟主机名）
-	http      *http.Client
-	dialPipe  func(ctx context.Context, path string) (net.Conn, error) // npipe 拨号（测试注入用）
-	pipePath  string   // 非空时经命名管道拨号
-	socketPath string // 非空时经 unix socket 拨号
+	base       string // 形如 http://docker（socket 场景的虚拟主机名）
+	http       *http.Client
+	dialPipe   func(ctx context.Context, path string) (net.Conn, error) // npipe 拨号（测试注入用）
+	pipePath   string                                                   // 非空时经命名管道拨号
+	socketPath string                                                   // 非空时经 unix socket 拨号
 }
 
 func newDockerClient(host string) *dockerClient {

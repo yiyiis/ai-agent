@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"backend/dal/model"
 	"backend/pkg/storage"
 	"backend/pkg/tools"
 )
@@ -36,7 +37,7 @@ func TestMaterializeAttachments(t *testing.T) {
 
 	placed := materializeAttachments(context.Background(), "sess-1", []Attachment{
 		{URL: "/api/uploads/ab12cd34_README.md", Filename: "README.md", ContentType: "text/markdown"},
-		{URL: "https://cdn.example.com/x.png", Filename: "x.png"},  // 非本地上传 url，跳过
+		{URL: "https://cdn.example.com/x.png", Filename: "x.png"},  // 无法解析来源，跳过
 		{URL: "/api/uploads/missing.bin", Filename: "missing.bin"}, // 源文件不存在，跳过
 	})
 	if len(placed) != 1 || placed[0].Filename != "README.md" {
@@ -71,6 +72,31 @@ func TestMaterializeAttachmentsFromCOS(t *testing.T) {
 	if err != nil || string(data) != "# cloud doc" {
 		t.Fatalf("COS 附件未落工作区: %q, err=%v", string(data), err)
 	}
+}
+
+// TestCollectAttachments 历史 + 当轮附件汇总按 URL 去重（ephemeral 工作区每轮重物化的输入）
+func TestCollectAttachments(t *testing.T) {
+	history := []model.Message{
+		{Attachments: strPtrOrNil(`[{"url":"https://cos/a.md","filename":"a.md"}]`)},
+		{Attachments: strPtrOrNil(`[{"url":"/api/uploads/x.bin","filename":"x.bin"},{"url":"https://cos/a.md","filename":"dup.md"}]`)},
+		{}, // 无附件消息跳过
+	}
+	current := []Attachment{{URL: "https://cos/b.md", Filename: "b.md"}}
+
+	got := collectAttachments(history, current)
+	if len(got) != 3 {
+		t.Fatalf("dedupe wrong: %+v", got)
+	}
+	if got[0].URL != "https://cos/a.md" || got[1].URL != "/api/uploads/x.bin" || got[2].URL != "https://cos/b.md" {
+		t.Fatalf("order/content wrong: %+v", got)
+	}
+}
+
+func strPtrOrNil(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
 }
 
 func TestWorkspaceName(t *testing.T) {

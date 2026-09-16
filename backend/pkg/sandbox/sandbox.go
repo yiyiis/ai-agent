@@ -9,8 +9,10 @@
 //   - e2b：E2B 云端沙箱——文件经 envd /files REST 传入传出，按会话在云端
 //     拉起隔离 Linux 虚机。
 //
-// 持久化：宿主 workspace/<会话ID>/ 是沙箱工作区的镜像——写入双落、bash
-// 执行后回拉变更、沙箱销毁重建时推送镜像，沙箱生灭不丢数据。
+// 持久化（ephemeral 工作区）：沙箱生灭工作区随之消失，后端不留任何文件状态。
+// 持久性由外部存储兜底——附件原件与导出产物在对象存储（COS），链接元数据在
+// messages 表；agent 层每轮开始把会话全部附件重新物化进沙箱（含新建的空沙箱），
+// 因此"用户上传过的原件"永不丢，只有未 export 的中间态随沙箱回收消失。
 // 依赖方向保持 tools → sandbox 单向。
 package sandbox
 
@@ -33,8 +35,8 @@ type Result struct {
 }
 
 // Driver 沙箱驱动。统一模型：**工作区文件活在沙箱里**，所有工具（文件与进程）
-// 都经驱动读写沙箱；宿主目录 hostDir 只是持久化镜像——写入双落、bash 执行后回拉
-// 变更、沙箱重建时推送镜像，沙箱生灭不丢数据。三种驱动的语义因此完全一致：
+// 都经驱动读写沙箱；工作区 ephemeral——沙箱销毁即消失，无宿主镜像。三种驱动
+// 的语义因此完全一致：
 //   - local：沙箱即宿主，文件操作退化为直接 os 调用（零开销）
 //   - docker：文件经 Engine /archive API（tar 流）传入传出容器，不做 bind 挂载
 //   - e2b：文件经 envd /files REST 传入传出云端沙箱
@@ -58,12 +60,12 @@ type Driver interface {
 
 // Config 沙箱配置段（包自持配置、由 config 包组合，yaml 键与 etc/config.yaml 对齐）
 type Config struct {
-	Driver      string `yaml:"Driver" mapstructure:"Driver"`       // local | docker | e2b
-	DockerURL   string `yaml:"DockerURL" mapstructure:"DockerURL"` // tcp:// | unix:// | npipe://；空则按平台默认
-	Image       string `yaml:"Image" mapstructure:"Image"`         // docker 沙箱镜像，需含 bash 与 python3
-	Env         []string `yaml:"Env" mapstructure:"Env"`           // 注入容器的环境变量（KEY=VALUE）
-	Mounts      []string `yaml:"Mounts" mapstructure:"Mounts"`     // docker 额外挂载 host:container[:ro]
-	NetworkMode string `yaml:"NetworkMode" mapstructure:"NetworkMode"`
+	Driver      string   `yaml:"Driver" mapstructure:"Driver"`       // local | docker | e2b
+	DockerURL   string   `yaml:"DockerURL" mapstructure:"DockerURL"` // tcp:// | unix:// | npipe://；空则按平台默认
+	Image       string   `yaml:"Image" mapstructure:"Image"`         // docker 沙箱镜像，需含 bash 与 python3
+	Env         []string `yaml:"Env" mapstructure:"Env"`             // 注入容器的环境变量（KEY=VALUE）
+	Mounts      []string `yaml:"Mounts" mapstructure:"Mounts"`       // docker 额外挂载 host:container[:ro]
+	NetworkMode string   `yaml:"NetworkMode" mapstructure:"NetworkMode"`
 	// IdleTimeoutSec / MaxLifetimeSec docker 容器空闲多久 / 最长存活多久后强制销毁（秒，<=0 用默认值）
 	IdleTimeoutSec int `yaml:"IdleTimeoutSec" mapstructure:"IdleTimeoutSec"`
 	MaxLifetimeSec int `yaml:"MaxLifetimeSec" mapstructure:"MaxLifetimeSec"`

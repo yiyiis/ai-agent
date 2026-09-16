@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -12,6 +14,7 @@ import (
 	"backend/pkg/errors"
 	"backend/pkg/jwt"
 	"backend/pkg/sandbox"
+	"backend/pkg/tools"
 	"github.com/google/uuid"
 )
 
@@ -303,6 +306,8 @@ func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, e
 
 	// 沙箱资源随会话销毁（docker 驱动强制移除容器；尽力而为，失败不影响删除结果）
 	sandbox.Close(req.ID)
+	// 本地驱动的工作区文件 / 其余驱动残留的空目录一并清理（local 的沙箱即宿主目录）
+	_ = os.RemoveAll(filepath.Join(tools.WorkspaceRoot, req.ID))
 	return &StatusOKResp{Status: "ok"}, nil
 }
 

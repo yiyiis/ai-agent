@@ -27,8 +27,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -45,9 +43,8 @@ const (
 	e2bEnvdPort        = 49983
 	e2bWorkspace       = "/workspace" // 工作区在云端沙箱内的路径
 	e2bUser            = "user"       // 沙箱默认用户（envd Basic 鉴权与文件参数都用它）
-	e2bSyncMarker      = ".sbx_synced"
-	e2bMaxSyncBytes    = 256 << 20 // 单次工作区同步包上限
-	e2bExecKillGrace   = 5         // 内层 timeout 命令的 KILL 宽限（秒）
+	e2bMaxSyncBytes    = 256 << 20    // 单次工作区同步包上限
+	e2bExecKillGrace   = 5            // 内层 timeout 命令的 KILL 宽限（秒）
 	e2bUploadTimeout   = 5 * time.Minute
 )
 
@@ -58,7 +55,7 @@ type e2bDriver struct {
 	envdBase string // 测试可覆写
 	http     *http.Client
 
-	mu   sync.Mutex
+	mu    sync.Mutex
 	boxes map[string]*e2bBox // sessionID -> 句柄
 }
 
@@ -138,10 +135,7 @@ func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, sessionID, hostDir
 		return Result{Err: infraErr(err, "在云端沙箱执行命令失败")}, false
 	}
 
-	// 命令本身失败也要回拉文件（半成品产物不丢），但 infra 失败则跳过
-	if err := d.syncDown(ctx, box, hostDir); err != nil {
-		slog.Warn("sandbox(e2b) 回拉工作区失败", "session", sessionID, "err", err)
-	}
+	// ephemeral 工作区：沙箱生灭不回拉，附件由 agent 层按轮重物化
 	box.lastUsed = time.Now()
 	killed := out.ExitCode == 124 || out.ExitCode == 137
 	return Result{
@@ -196,33 +190,8 @@ func (d *e2bDriver) ensure(ctx context.Context, sessionID, hostDir string) (*e2b
 	}
 	d.mu.Unlock()
 	slog.Info("sandbox(e2b) 已创建", "session", sessionID, "sandbox", box.sandboxID)
-	// 新沙箱是空的：推送宿主镜像 + 打 marker（尽力而为，失败交由 stale 重建兜底）
-	if err := d.pushMirror(ctx, box, hostDir); err != nil {
-		slog.Warn("sandbox(e2b) 工作区镜像推送失败", "session", sessionID, "err", err)
-	}
+	// ephemeral 工作区：新沙箱从空工作区开始，附件由 agent 层按轮重物化
 	return box, nil
-}
-
-// pushMirror 宿主工作区镜像整包推送进云端沙箱（仅沙箱新建时执行一次）
-func (d *e2bDriver) pushMirror(ctx context.Context, box *e2bBox, hostDir string) error {
-	data, err := tarWorkspace(hostDir)
-	if err != nil {
-		return err
-	}
-	if len(data) > e2bMaxSyncBytes {
-		return errors.NewMsg(fmt.Sprintf("工作区同步包超过 %dMB 上限", e2bMaxSyncBytes>>20))
-	}
-	upCtx, cancel := context.WithTimeout(ctx, e2bUploadTimeout)
-	defer cancel()
-	q := url.Values{"path": {e2bWorkspace + "/.sync.tgz"}, "username": {e2bUser}}
-	resp, err := d.envdDo(upCtx, box, http.MethodPost, "/files", q, "application/octet-stream", bytes.NewReader(data))
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	extract := "cd " + e2bWorkspace + " && tar xzf .sync.tgz && rm -f .sync.tgz && touch " + e2bSyncMarker
-	_, err = d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", extract})
-	return err
 }
 
 // ---------- 生命周期 REST ----------
@@ -465,10 +434,9 @@ func readConnectStream(r io.Reader, onMessage func(frame []byte) error) error {
 	}
 }
 
-
 // ---------- 工作区文件操作（envd /files REST） ----------
 
-// ReadFile 从云端沙箱读取工作区文件并双落宿主镜像
+// ReadFile 从云端沙箱读取工作区文件
 func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string) ([]byte, error) {
 	relC, err := cleanRel(rel)
 	if err != nil {
@@ -482,20 +450,15 @@ func (d *e2bDriver) ReadFile(ctx context.Context, sessionID, hostDir, rel string
 	resp, err := d.envdDo(ctx, box, http.MethodGet, "/files", q, "", nil)
 	if err != nil {
 		if errors.Is(err, errE2BStale) {
-			return nil, ErrFileNotFound // 沙箱已被回收：文件只存在于宿主镜像，走本地兜底
+			return nil, ErrFileNotFound // 沙箱已被回收：ephemeral 工作区随之消失
 		}
 		return nil, infraErr(err, "读取沙箱文件失败")
 	}
 	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, e2bMaxSyncBytes+1))
-	if err != nil {
-		return nil, err
-	}
-	writeHostMirror(hostDir, relC, data)
-	return data, nil
+	return io.ReadAll(io.LimitReader(resp.Body, e2bMaxSyncBytes+1))
 }
 
-// WriteFile 写入云端沙箱工作区并双落宿主镜像
+// WriteFile 写入云端沙箱工作区
 func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel string, data []byte) error {
 	relC, err := cleanRel(rel)
 	if err != nil {
@@ -511,17 +474,15 @@ func (d *e2bDriver) WriteFile(ctx context.Context, sessionID, hostDir, rel strin
 		return infraErr(err, "写入沙箱文件失败")
 	}
 	resp.Body.Close()
-	writeHostMirror(hostDir, relC, data)
 	return nil
 }
 
-// RemoveFile 删除云端沙箱工作区文件与宿主镜像（临时脚本清理）
+// RemoveFile 删除云端沙箱工作区文件（临时脚本清理）
 func (d *e2bDriver) RemoveFile(sessionID, hostDir, rel string) {
 	relC, err := cleanRel(rel)
 	if err != nil {
 		return
 	}
-	_ = os.Remove(filepath.Join(hostDir, filepath.FromSlash(relC)))
 	d.mu.Lock()
 	box := d.boxes[sessionID]
 	d.mu.Unlock()
@@ -531,32 +492,4 @@ func (d *e2bDriver) RemoveFile(sessionID, hostDir, rel string) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	_, _ = d.startProcess(ctx, box, []string{"/bin/rm", "-f", "--", e2bWorkspace + "/" + relC})
-}
-
-// syncDown 云端沙箱 → 宿主工作区：以 marker 的 mtime 为基准拉回新增/变更文件。
-func (d *e2bDriver) syncDown(ctx context.Context, box *e2bBox, hostDir string) error {
-	list := "cd " + e2bWorkspace + " && { find . -type f ! -name " + e2bSyncMarker +
-		" -newer " + e2bSyncMarker + " -print0 | tar --null -czf /tmp/sbx_out.tgz -T - ; } ; " +
-		"touch " + e2bSyncMarker + " ; exit 0"
-	if _, err := d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", list}); err != nil {
-		return err
-	}
-
-	dlCtx, cancel := context.WithTimeout(ctx, e2bUploadTimeout)
-	defer cancel()
-	q := url.Values{"path": {"/tmp/sbx_out.tgz"}, "username": {e2bUser}}
-	resp, err := d.envdDo(dlCtx, box, http.MethodGet, "/files", q, "", nil)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	data, err := io.ReadAll(io.LimitReader(resp.Body, e2bMaxSyncBytes+1))
-	if err != nil {
-		return err
-	}
-	_, _ = d.startProcess(ctx, box, []string{"/bin/bash", "-l", "-c", "rm -f /tmp/sbx_out.tgz"})
-	if len(data) == 0 || len(data) > e2bMaxSyncBytes {
-		return nil
-	}
-	return untarTo(hostDir, data)
 }

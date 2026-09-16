@@ -1,9 +1,7 @@
 package sandbox
 
 import (
-	"archive/tar"
 	"bytes"
-	"compress/gzip"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -42,57 +40,6 @@ func TestConnectFrameRoundTrip(t *testing.T) {
 	}
 }
 
-func TestTarHelpers(t *testing.T) {
-	src := t.TempDir()
-	write := func(rel, content string) {
-		p := filepath.Join(src, filepath.FromSlash(rel))
-		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
-			t.Fatal(err)
-		}
-	}
-	write("a.txt", "hello")
-	write("nested/b.py", "print(1)")
-	write(e2bSyncMarker, "skip")
-	write(".pyexec_tmp.py", "py code")
-
-	data, err := tarWorkspace(src)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	dst := t.TempDir()
-	if err := untarTo(dst, data); err != nil {
-		t.Fatal(err)
-	}
-	for rel, want := range map[string]string{"a.txt": "hello", "nested/b.py": "print(1)", ".pyexec_tmp.py": "py code"} {
-		got, err := os.ReadFile(filepath.Join(dst, filepath.FromSlash(rel)))
-		if err != nil || string(got) != want {
-			t.Fatalf("%s wrong: %q %v", rel, got, err)
-		}
-	}
-	if _, err := os.Stat(filepath.Join(dst, e2bSyncMarker)); !os.IsNotExist(err) {
-		t.Fatal("marker should be skipped in tar")
-	}
-
-	// 解包时的路径穿越防护
-	var evil bytes.Buffer
-	gw := gzip.NewWriter(&evil)
-	tw := tar.NewWriter(gw)
-	hdr := &tar.Header{Name: "../../evil.txt", Typeflag: tar.TypeReg, Size: 3}
-	_ = tw.WriteHeader(hdr)
-	_, _ = tw.Write([]byte("bad"))
-	_ = tw.Close()
-	_ = gw.Close()
-	if err := untarTo(dst, evil.Bytes()); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(dst, "..", "..", "evil.txt")); !os.IsNotExist(err) {
-		t.Fatal("path traversal should be blocked")
-	}
-}
 
 // TestE2BRunAgainstFakeEnvd 假 E2B 服务走协议主链路：
 // 创建（API）→ Start（Connect 帧 + 头路由 + base64 输出）→ exitCode 映射
@@ -117,10 +64,10 @@ func TestE2BRunAgainstFakeEnvd(t *testing.T) {
 	var lastStart startRequest
 	envdSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for k, want := range map[string]string{
-			"E2b-Sandbox-Id":    "sbx-1",
-			"E2b-Sandbox-Port":  "49983",
-			"X-Access-Token":    "tok",
-			"Authorization":     "Basic " + b64e("user:"),
+			"E2b-Sandbox-Id":   "sbx-1",
+			"E2b-Sandbox-Port": "49983",
+			"X-Access-Token":   "tok",
+			"Authorization":    "Basic " + b64e("user:"),
 		} {
 			if got := r.Header.Get(k); got != want {
 				t.Errorf("header %s = %q, want %q", k, got, want)
@@ -187,7 +134,7 @@ func b64e(s string) string {
 }
 
 // TestE2BLiveRealCloud 真实 E2B 联调（需 E2B_LIVE_KEY；按需执行）：
-// 创建云端沙箱 → 工作区上行同步 → bash 读到宿主文件 → 沙箱产出文件回传宿主 → python3 执行 → 销毁
+// ephemeral 工作区全链路：WriteFile 写入云端 → bash 读到并产出 → ReadFile 读回 → python3 → 销毁
 func TestE2BLiveRealCloud(t *testing.T) {
 	key := os.Getenv("E2B_LIVE_KEY")
 	if key == "" {
@@ -198,27 +145,29 @@ func TestE2BLiveRealCloud(t *testing.T) {
 	defer cancel()
 
 	ws := t.TempDir()
-	if err := os.WriteFile(filepath.Join(ws, "note.txt"), []byte("hello-from-host"), 0o644); err != nil {
-		t.Fatal(err)
-	}
 	defer d.Close("live-s1")
 
-	// 上行同步 + bash 读取
-	res := d.RunBash(ctx, "live-s1", ws, "cat note.txt && echo cloud-ok && echo made-in-cloud > made.txt && printf 'bin' > bin.dat", 120)
+	// 文件写入沙箱（ephemeral：无宿主镜像，字节只在云端）
+	if err := d.WriteFile(ctx, "live-s1", ws, "note.txt", []byte("hello-from-driver")); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	// bash 读到驱动写入的文件，并产出新文件
+	res := d.RunBash(ctx, "live-s1", ws, "cat note.txt && echo cloud-ok && echo made-in-cloud > made.txt", 120)
 	if res.Err != nil {
 		t.Fatalf("bash: %v", res.Err)
 	}
-	if !bytes.Contains([]byte(res.Stdout), []byte("hello-from-host")) || !bytes.Contains([]byte(res.Stdout), []byte("cloud-ok")) {
+	if !bytes.Contains([]byte(res.Stdout), []byte("hello-from-driver")) || !bytes.Contains([]byte(res.Stdout), []byte("cloud-ok")) {
 		t.Fatalf("bash output wrong: %+v", res)
 	}
 
-	// 下行同步：沙箱产出的文件回到宿主
-	res = d.RunBash(ctx, "live-s1", ws, "test -f made.txt && echo pulled", 60)
-	if res.Err != nil || !bytes.Contains([]byte(res.Stdout), []byte("pulled")) {
-		t.Fatalf("sync down wrong: %+v", res)
+	// ReadFile 读回沙箱产出的文件（沙箱存活期间状态持续）
+	data, err := d.ReadFile(ctx, "live-s1", ws, "made.txt")
+	if err != nil || string(data) != "made-in-cloud\n" {
+		t.Fatalf("ReadFile wrong: %q %v", data, err)
 	}
-	if data, err := os.ReadFile(filepath.Join(ws, "made.txt")); err != nil || string(data) != "made-in-cloud\n" {
-		t.Fatalf("made.txt not pulled back: %q %v", data, err)
+	// 宿主不落任何镜像
+	if _, err := os.Stat(filepath.Join(ws, "made.txt")); !os.IsNotExist(err) {
+		t.Fatal("ephemeral 模式不应在宿主留镜像")
 	}
 
 	// python3 可用
@@ -227,7 +176,7 @@ func TestE2BLiveRealCloud(t *testing.T) {
 		t.Fatalf("python3 wrong: %+v", res)
 	}
 
-	// RunPython 全链路：脚本经驱动写入沙箱后执行（新模型：文件工具走驱动）
+	// RunPython 全链路：脚本经驱动写入沙箱后执行
 	if err := d.WriteFile(ctx, "live-s1", ws, ".pyexec_check.py", []byte("print('py-ok')")); err != nil {
 		t.Fatalf("WriteFile: %v", err)
 	}
