@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { Attachment } from '../types'
+import { markdownLinkComponents } from '../lib/markdown'
 import { cn } from '../lib/utils'
 import { isPreviewable } from './FilePreviewModal'
 import { BrandIcon } from './BrandIcons'
@@ -320,6 +321,7 @@ export function MessageBubble({
           <ReactMarkdown
             remarkPlugins={[remarkGfm]}
             rehypePlugins={[rehypeHighlight]}
+            components={markdownLinkComponents}
           >
             {content || (streaming ? '' : '')}
           </ReactMarkdown>

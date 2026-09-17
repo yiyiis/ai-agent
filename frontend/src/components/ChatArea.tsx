@@ -19,6 +19,7 @@ import {
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import rehypeHighlight from 'rehype-highlight'
+import { markdownLinkComponents } from '../lib/markdown'
 import {
   api,
   attachStream,
@@ -567,6 +568,7 @@ function AssistantTurnView({
             <ReactMarkdown
               remarkPlugins={[remarkGfm]}
               rehypePlugins={[rehypeHighlight]}
+              components={markdownLinkComponents}
             >
               {finalAnswer}
             </ReactMarkdown>
