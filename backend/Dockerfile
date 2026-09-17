@@ -37,8 +37,8 @@ WORKDIR /app
 COPY --from=builder /build/server /app/server
 COPY --from=builder /build/etc/config.yaml /app/etc/config.yaml
 
-# 建立工作区与上传文件挂载目录
-RUN mkdir -p /app/workspace /app/uploads /app/logs
+# 建立工作区、上传、日志与技能库挂载目录（技能库运行时可写：zip 安装 / secrets）
+RUN mkdir -p /app/workspace /app/uploads /app/logs /app/skills
 
 EXPOSE 8888
 

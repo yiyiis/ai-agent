@@ -48,6 +48,10 @@ services:
       - ../backend/workspace:/app/workspace
       - ../backend/uploads:/app/uploads
       - ../backend/logs:/app/logs
+      # 技能库（阶段五）：zip 上传安装与 secrets 写入都发生在 /app/skills，
+      # 属运行时可变状态，必须挂出来——否则容器重建即丢失全部已上传技能
+      #（.secrets/ 机密与库同根，随本挂载一并持久化；要求 Skill.Dir 保持默认值 skills）
+      - ../backend/skills:/app/skills
       # 启用 Docker 容器沙箱（etc 配置 Sandbox.Driver: docker）时挂载宿主 Docker，
       # 后端经 socket 在宿主上创建"兄弟"沙箱容器（非嵌套）。工作区 ephemeral：文件
       # 经 /archive API 传入传出容器，不 bind 挂载、无宿主镜像；附件与产物统一上 COS
