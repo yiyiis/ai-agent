@@ -7,9 +7,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
+
+	"backend/pkg/errors"
 )
 
 type OpenAICompatProvider struct {
@@ -77,6 +80,21 @@ func (p *OpenAICompatProvider) StreamChat(ctx context.Context, req *ChatRequest)
 		defer close(chunkChan)
 		defer close(errChan)
 
+		// 上游失败统一落服务端日志：agent 层会把流错误吞成消息文本只推给在线
+		// 订阅者（Run 返回 nil），不在请求层记录的话，断线期间的上游故障
+		//（限流 / 5xx / 网络断）在事后排查时毫无痕迹
+		start := time.Now()
+		warnUpstream := func(err error) {
+			slog.Warn("LLM 上游调用失败",
+				"model", req.Model,
+				"elapsed", time.Since(start).Round(time.Millisecond).String(),
+				"err", err.Error())
+		}
+		fail := func(err error) {
+			warnUpstream(err)
+			errChan <- err
+		}
+
 		maxTokens := req.MaxTokens
 		if maxTokens <= 0 {
 			maxTokens = 8192
@@ -100,14 +118,14 @@ func (p *OpenAICompatProvider) StreamChat(ctx context.Context, req *ChatRequest)
 
 		bodyBytes, err := json.Marshal(payload)
 		if err != nil {
-			errChan <- fmt.Errorf("序列化请求体失败: %w", err)
+			fail(errors.Wrapf(err, "序列化请求体失败"))
 			return
 		}
 
 		endpoint := fmt.Sprintf("%s/chat/completions", p.BaseURL)
 		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(bodyBytes))
 		if err != nil {
-			errChan <- fmt.Errorf("创建 HTTP 请求失败: %w", err)
+			fail(errors.Wrapf(err, "创建 HTTP 请求失败"))
 			return
 		}
 
@@ -118,14 +136,14 @@ func (p *OpenAICompatProvider) StreamChat(ctx context.Context, req *ChatRequest)
 
 		resp, err := p.HTTPClient.Do(httpReq)
 		if err != nil {
-			errChan <- fmt.Errorf("上游模型接口调用异常: %w", err)
+			fail(errors.Wrapf(err, "上游模型接口调用异常"))
 			return
 		}
 		defer resp.Body.Close()
 
 		if resp.StatusCode != http.StatusOK {
-			respBytes, _ := io.ReadAll(resp.Body)
-			errChan <- fmt.Errorf("上游接口响应异常 HTTP %d: %s", resp.StatusCode, string(respBytes))
+			respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			fail(errors.New(fmt.Sprintf("上游接口响应异常 HTTP %d: %s", resp.StatusCode, string(respBytes))))
 			return
 		}
 
@@ -140,7 +158,11 @@ func (p *OpenAICompatProvider) StreamChat(ctx context.Context, req *ChatRequest)
 			line, err := reader.ReadString('\n')
 			if err != nil {
 				if err != io.EOF {
-					errChan <- fmt.Errorf("读取 SSE 响应流异常: %w", err)
+					werr := errors.Wrapf(err, "读取 SSE 响应流异常")
+					if ctx.Err() == nil { // 用户主动中止引发的断流不算上游故障
+						warnUpstream(werr)
+					}
+					errChan <- werr
 				}
 				return
 			}

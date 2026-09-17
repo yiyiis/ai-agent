@@ -10,10 +10,13 @@ package agent
 
 import (
 	"context"
-	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"sync"
 	"time"
+
+	"backend/pkg/errors"
 )
 
 const (
@@ -26,7 +29,7 @@ const (
 )
 
 // ErrTurnRunning 会话级互斥：同一会话已有正在进行的 Turn
-var ErrTurnRunning = errors.New("该会话已有正在进行的对话轮次")
+var ErrTurnRunning = errors.NewMsg("该会话已有正在进行的对话轮次")
 
 // Turn 单轮对话的后台执行载体：事件环形缓冲 + 生命周期状态 + Abort 句柄
 type Turn struct {
@@ -97,10 +100,14 @@ func (t *Turn) ensureDone() {
 }
 
 // pump 后台工作协程：驱动执行体，把产出事件灌入缓冲，并保证任何路径下
-// 订阅者都能看到终态事件（error/done）与 finished 标记
+// 订阅者都能看到终态事件（error/done）与 finished 标记。
+// 失败路径必须同步落服务端日志——error 事件只推给当时在线的订阅者，
+// 用户断线期间发生的失败（落库异常、执行体 panic）若不留日志就完全无迹可查
 func (t *Turn) pump(ctx context.Context, cancel context.CancelFunc, run func(ctx context.Context, emit func(Event)) error) {
 	defer func() {
 		if v := recover(); v != nil {
+			slog.Error("后台 Turn panic", "session", t.sessionID,
+				"panic", fmt.Sprintf("%v", v), "stack", string(debug.Stack()))
 			t.append(Event{Type: "error", Error: fmt.Sprintf("后台任务异常：%v", v)})
 		}
 		t.ensureDone()
@@ -110,6 +117,7 @@ func (t *Turn) pump(ctx context.Context, cancel context.CancelFunc, run func(ctx
 
 	err := run(ctx, t.append)
 	if err != nil {
+		slog.Error("后台 Turn 执行失败", "session", t.sessionID, "err", errors.Stack(err))
 		// 执行体未走协议收尾就返回了错误——补 error + done，让订阅端明确终止
 		if !t.lastIsDone() {
 			t.append(Event{Type: "error", Error: err.Error()})
