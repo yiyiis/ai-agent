@@ -692,6 +692,15 @@ export function ChatArea({
       return
     }
 
+    // 切换会话：立刻断开上一会话正在消费的本地 SSE 流——仅断本地连接，
+    // 后台 Turn 照常执行（切回时经补播续看）；不断的话旧会话的流式事件
+    // 会继续写进组件共享状态，渲染到当前会话的视图里
+    if (abortRef.current) {
+      abortRef.current.abort()
+      abortRef.current = null
+      setStreaming(false)
+    }
+
     activeIdRef.current = sessionId
 
     // 切换会话时（无论切去草稿态还是切到其它已有会话），必须彻底清理上一会话的输入框还原态与记录，杜绝串到新会话
@@ -754,7 +763,25 @@ export function ChatArea({
         // 回答，有则从 seq 0 重连续播（整轮缓冲重放，重建流式视图）
         hasActiveStream(sessionId).then((active) => {
           if (cancelled || !active) return
-          void runStream((onEvent, opts) => attachStream(sessionId, 0, onEvent, opts))
+          // Turn 是边跑边落库的，getSession 已带回这轮已完成的部分（Tool 结果
+          // 等）；整轮即将从 seq 0 重放唯一重建，落库部分必须截掉，否则同一次
+          // 操作会以"历史完成卡片 + 流式重放"渲染两遍。最后一条 user 消息保留
+          // （重放流里没有提问气泡）
+          setMessages((prev) => {
+            for (let i = prev.length - 1; i >= 0; i--) {
+              if (prev[i].role === 'user') return prev.slice(0, i + 1)
+            }
+            return prev
+          })
+          void runStream(async (onEvent, opts) => {
+            const attached = await attachStream(sessionId, 0, onEvent, opts)
+            if (!attached) {
+              // 竞态兜底：探测与补播之间轮次恰好结束（204）——重拉全量消息，
+              // 补回刚被截掉的落库部分
+              refreshAfterTurn(sessionId)
+            }
+            return attached
+          })
         })
       })
       .catch((err) => {
@@ -1038,6 +1065,9 @@ export function ChatArea({
 
   // 轮次结束后的终态刷新：从服务端拉取落库结果，收敛所有流式 UI 状态
   const refreshAfterTurn = (currentId: string) => {
+    // 会话守卫：回调到达时用户可能已切到别的会话——旧会话的消息/标题
+    // 不允许覆盖当前视图，直接放弃刷新（切回时会重新加载）
+    if (activeIdRef.current !== currentId) return
     api.getSession(currentId).then((s) => {
       setMessages((prev) => {
         const notices = prev.filter((m) => m.role === 'notice')
@@ -1205,6 +1235,9 @@ export function ChatArea({
     ) => Promise<boolean | void>,
     optimistic?: Message | null,
   ) => {
+    // 流所属会话在启动时钉死：切走会话后到达的事件（abort 前已入队的微任务）
+    // 一律丢弃，防止写进当前显示的会话视图
+    const streamSessionId = activeIdRef.current
     const ctrl = new AbortController()
     abortRef.current = ctrl
     lastSeqRef.current = -1
@@ -1221,6 +1254,7 @@ export function ChatArea({
     // 末尾的兜底会补发，确保 setStreaming(false) 一定被触发。
     const onEvent = (ev: StreamEvent) => {
       if (ev.type === 'done' || ev.type === 'error') sawDone = true
+      if (activeIdRef.current !== streamSessionId) return // 已切走：事件丢弃
       handleEvent(ev)
     }
     const onSeq = (seq: number) => {
@@ -1243,14 +1277,15 @@ export function ChatArea({
       return
     }
     // 断线重连：后台 Turn 不随连接中断而终止——流意外断开且未收到 done 时，
-    // 携带最后游标+1 指数退避重连，从服务端环形缓冲补播断线期间的事件
-    if (!sawDone && !ctrl.signal.aborted && activeIdRef.current) {
+    // 携带最后游标+1 指数退避重连，从服务端环形缓冲补播断线期间的事件。
+    // 重连目标钉死为流所属会话，而非当前显示的会话
+    if (!sawDone && !ctrl.signal.aborted && streamSessionId) {
       for (let attempt = 0; attempt < 4 && !sawDone && !ctrl.signal.aborted; attempt++) {
         await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
         if (ctrl.signal.aborted || sawDone) break
         try {
           const attached = await attachStream(
-            activeIdRef.current!,
+            streamSessionId,
             lastSeqRef.current + 1,
             onEvent,
             { signal: ctrl.signal, onSeq },
@@ -1263,8 +1298,13 @@ export function ChatArea({
     }
     // 兜底：无论 abort、异常还是 SSE 正常关闭，确保 streaming 状态被清掉。
     // 重复触发 handleEvent('done') 是幂等的（最多多一次无害的 getSession）。
+    // 已切走会话时只停泵收尾——终态刷新交给切回时的加载流程。
     if (!sawDone) {
-      handleEvent({ type: 'done', id: '' })
+      if (activeIdRef.current === streamSessionId) {
+        handleEvent({ type: 'done', id: '' })
+      } else {
+        stopStreamPump()
+      }
     }
   }
 
