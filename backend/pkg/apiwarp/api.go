@@ -48,6 +48,12 @@ type SSEPing struct{}
 // NoContent 无实体响应（HTTP 204），用于"当前无可订阅资源"的探测语义
 type NoContent struct{}
 
+// RawJSONData 裸 JSON 响应（不经统一信封）：个别沿外部契约实现的接口
+//（如技能 zip 上传，前端直接 res.json() 取实体）需要裸 body，恒 200。
+type RawJSONData struct {
+	Body any
+}
+
 // SetCookie 随响应写回的 Cookie（登录态注入/清除等）
 type SetCookie struct {
 	Name     string
@@ -188,6 +194,10 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (Out, erro
 			gCtx.Status(http.StatusNoContent)
 		case NoContent:
 			gCtx.Status(http.StatusNoContent)
+		case *RawJSONData:
+			gCtx.JSON(200, outData.Body)
+		case RawJSONData:
+			gCtx.JSON(200, outData.Body)
 		case *FilePathData:
 			gCtx.Writer.Header().Set("Content-Type", outData.FileType)
 			gCtx.File(outData.Path)

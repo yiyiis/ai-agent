@@ -13,6 +13,8 @@ import (
 	"backend/dal/model"
 	"backend/pkg/db"
 	"backend/pkg/errors"
+
+	"gorm.io/gorm"
 )
 
 // SkillRegistryItem 文件系统扫描出的技能注册项（TagsJSON 为 JSON 数组文本或空）
@@ -249,4 +251,153 @@ func MarshalTags(tags []string) string {
 		return ""
 	}
 	return string(b)
+}
+
+// GetSkillByID 按主键查询技能（不存在返回 nil）
+func GetSkillByID(ctx context.Context, id int64) (*model.Skill, error) {
+	q := db.Ctx(ctx)
+	row, err := q.Skill.WithContext(ctx).Where(q.Skill.ID.Eq(id)).First()
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, errors.Join(err, errors.New("查询技能失败"), errors.NewMsg("系统异常"))
+	}
+	return row, nil
+}
+
+// GetSkillByDirName 按目录名查询技能（上传判定"新建还是覆盖"用）
+func GetSkillByDirName(ctx context.Context, dirName string) (*model.Skill, error) {
+	q := db.Ctx(ctx)
+	row, err := q.Skill.WithContext(ctx).Where(q.Skill.DirName.Eq(dirName)).First()
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return nil, nil
+		}
+		return nil, errors.Join(err, errors.New("查询技能失败"), errors.NewMsg("系统异常"))
+	}
+	return row, nil
+}
+
+// UploadedSkillItem 上传安装的注册行（含归属与机密标记，创建时落库、更新时保留归属）
+type UploadedSkillItem struct {
+	Name         string
+	Description  string
+	DirName      string
+	TagsJSON     *string
+	OwnerID      int64
+	OwnerName    string
+	Confidential bool
+}
+
+// UpsertUploadedSkill 上传路径的注册行 upsert（按 dir_name）：不存在则建行
+//（带归属），存在则只更新内容字段（name / description / tags / confidential），
+// 归属字段不迁移。
+func UpsertUploadedSkill(ctx context.Context, item UploadedSkillItem) (*model.Skill, error) {
+	q := db.Ctx(ctx)
+	existing, err := GetSkillByDirName(ctx, item.DirName)
+	if err != nil {
+		return nil, err
+	}
+	if existing == nil {
+		row := &model.Skill{
+			Name:         item.Name,
+			Description:  item.Description,
+			DirName:      item.DirName,
+			OwnerID:      item.OwnerID,
+			OwnerName:    item.OwnerName,
+			Confidential: item.Confidential,
+			Tags:         item.TagsJSON,
+		}
+		if err := q.Skill.WithContext(ctx).Create(row); err != nil {
+			return nil, errors.Join(err, errors.New("写入技能注册表失败"), errors.NewMsg("系统异常"))
+		}
+		return row, nil
+	}
+	updates := map[string]interface{}{
+		"name":         item.Name,
+		"description":  item.Description,
+		"confidential": item.Confidential,
+	}
+	if item.TagsJSON != nil {
+		updates["tags"] = *item.TagsJSON
+	}
+	if _, err := q.Skill.WithContext(ctx).Where(q.Skill.ID.Eq(existing.ID)).UpdateColumns(updates); err != nil {
+		return nil, errors.Join(err, errors.New("更新技能注册表失败"), errors.NewMsg("系统异常"))
+	}
+	existing.Name = item.Name
+	existing.Description = item.Description
+	existing.Confidential = item.Confidential
+	existing.Tags = item.TagsJSON
+	return existing, nil
+}
+
+// UpdateSkillColumns 技能注册行的局部更新（PATCH：机密 / 模型 / 标签）
+func UpdateSkillColumns(ctx context.Context, id int64, updates map[string]interface{}) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	q := db.Ctx(ctx)
+	if _, err := q.Skill.WithContext(ctx).Where(q.Skill.ID.Eq(id)).UpdateColumns(updates); err != nil {
+		return errors.Join(err, errors.New("更新技能失败"), errors.NewMsg("系统异常"))
+	}
+	return nil
+}
+
+// NextSkillVersionNumber 技能的下一个版本号（当前最大 +1，首个为 1）
+func NextSkillVersionNumber(ctx context.Context, skillID int64) (int64, error) {
+	q := db.Ctx(ctx)
+	sv := q.SkillVersion
+	row, err := sv.WithContext(ctx).
+		Where(sv.SkillID.Eq(skillID)).
+		Order(sv.VersionNumber.Desc()).
+		First()
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return 1, nil
+		}
+		return 0, errors.Join(err, errors.New("查询技能版本失败"), errors.NewMsg("系统异常"))
+	}
+	return row.VersionNumber + 1, nil
+}
+
+// CreateSkillVersion 记录一次版本产生（上传安装 / 发布）
+func CreateSkillVersion(ctx context.Context, v *model.SkillVersion) error {
+	q := db.Ctx(ctx)
+	if err := q.SkillVersion.WithContext(ctx).Create(v); err != nil {
+		return errors.Join(err, errors.New("写入技能版本失败"), errors.NewMsg("系统异常"))
+	}
+	return nil
+}
+
+// ListSkillVersions 技能的版本历史（版本号倒序）
+func ListSkillVersions(ctx context.Context, skillID int64) ([]*model.SkillVersion, error) {
+	q := db.Ctx(ctx)
+	sv := q.SkillVersion
+	rows, err := sv.WithContext(ctx).
+		Where(sv.SkillID.Eq(skillID)).
+		Order(sv.VersionNumber.Desc()).
+		Find()
+	if err != nil {
+		return nil, errors.Join(err, errors.New("查询技能版本失败"), errors.NewMsg("系统异常"))
+	}
+	return rows, nil
+}
+
+// DeleteSkillCascade 删除技能注册行并连带清理会话关联与版本历史（事务）
+func DeleteSkillCascade(ctx context.Context, skillID int64) error {
+	return db.Transition(ctx, func(txCtx context.Context) error {
+		q := db.Ctx(txCtx)
+		ss, sv := q.SessionSkill, q.SkillVersion
+		if _, err := ss.WithContext(txCtx).Where(ss.SkillID.Eq(skillID)).Delete(); err != nil {
+			return errors.Join(err, errors.New("清理技能会话关联失败"), errors.NewMsg("系统异常"))
+		}
+		if _, err := sv.WithContext(txCtx).Where(sv.SkillID.Eq(skillID)).Delete(); err != nil {
+			return errors.Join(err, errors.New("清理技能版本失败"), errors.NewMsg("系统异常"))
+		}
+		if _, err := q.Skill.WithContext(txCtx).Where(q.Skill.ID.Eq(skillID)).Delete(); err != nil {
+			return errors.Join(err, errors.New("删除技能失败"), errors.NewMsg("系统异常"))
+		}
+		return nil
+	})
 }

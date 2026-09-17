@@ -72,6 +72,16 @@ func setupTestServer() {
 		sessionGroup.POST("/:id/messages", Controller(api.SendMessageStream))
 	}
 
+	// 技能管理（与 router.go 同构，验证静态段 upload 与 :id 共存不冲突）
+	engine.GET("/api/skills", Controller(api.ListSkills))
+	engine.POST("/api/skills/upload", Controller(api.UploadSkill))
+	engine.PATCH("/api/skills/:id", Controller(api.UpdateSkill))
+	engine.DELETE("/api/skills/:id", Controller(api.DeleteSkill))
+	engine.GET("/api/skills/:id/body", Controller(api.GetSkillBody))
+	engine.GET("/api/skills/:id/secrets", Controller(api.GetSkillSecrets))
+	engine.PUT("/api/skills/:id/secrets", Controller(api.UpdateSkillSecrets))
+	engine.GET("/api/skills/:id/versions", Controller(api.ListSkillVersions))
+
 	testEngine = engine
 }
 
