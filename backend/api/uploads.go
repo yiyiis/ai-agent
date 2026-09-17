@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"fmt"
 	"mime"
 	"mime/multipart"
 	"os"
@@ -13,7 +14,7 @@ import (
 	"backend/pkg/storage"
 )
 
-const maxUploadBytes = 20 << 20 // 20MB
+const maxUploadBytes = 30 << 20 // 30MB，与 storage.MaxBytes 对齐
 
 // blockedExts 可执行文件作为聊天附件没有正当用途，且公开下载链接等于给了一个分发通道
 var blockedExts = map[string]bool{
@@ -49,7 +50,7 @@ func UploadFile(ctx context.Context, req *UploadFileReq) (*UploadOut, error) {
 		return nil, errors.NewMsg("不支持上传 ." + ext + " 类型的文件")
 	}
 	if fh.Size > maxUploadBytes {
-		return nil, errors.NewMsg("文件超过 20MB 上限")
+		return nil, errors.NewMsg(fmt.Sprintf("文件超过 %dMB 上限", maxUploadBytes>>20))
 	}
 
 	src, err := fh.Open()
