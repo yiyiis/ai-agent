@@ -114,9 +114,9 @@ func TestBuildPrompts(t *testing.T) {
 	if !strings.Contains(cp, "load_skill") {
 		t.Fatal("目录段应指引 load_skill")
 	}
-	// 描述截断到上限附近
-	if got := len([]rune(cp)); got > CatalogDescLimit+300 {
-		t.Fatalf("目录段未截断描述，长度 %d", got)
+	// 长描述截断：不得包含超出截断上限的连续原文（160 字符 = 32 组，取 40 组为界）
+	if strings.Contains(cp, strings.Repeat("很长的描述", 40)) {
+		t.Fatal("目录段未截断描述")
 	}
 	if BuildCatalogPrompt(nil) != "" || BuildSkillsPrompt(nil) != "" {
 		t.Fatal("空输入应返回空串")

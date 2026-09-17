@@ -44,15 +44,18 @@ const (
 
 // Event 协议事件（由路由层转成 SSE，字段名以 api 层契约为准）
 type Event struct {
-	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | tool_artifact | done | error
+	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | tool_artifact | skill_loaded | done | error
 	ID        string
 	Content   string // delta 正文增量
 	Reasoning string // delta 思考增量
-	Name      string // 工具名（tool_call_start）
+	Name      string // 工具名（tool_call_start）/ 技能名（skill_loaded）
 	Arguments string // 工具入参 JSON（tool_call_start）
 	Output    string // 工具结果（tool_call_result）
 	Error     string // 错误文案（tool_call_error / error）
 	Usage     *provider.Usage
+	// SkillID load_skill 自主装载成功时对应的注册行 ID（skill_loaded，
+	// 前端据此同步启用列表与角标）
+	SkillID int64
 	// Attachments 导出的工件（tool_artifact，每次事件携带一个；
 	// ID 为对应 tool_call_id，前端据此挂到工具调用卡片上）
 	Attachments []Attachment
@@ -574,13 +577,18 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 
 		// 4. load_skill 串行先行（改写 turn 内的挂载列表与 secrets 合并表，
-		//    后续工具才拿得到新挂载的文件与机密），其余工具并发执行
+		//    后续工具才拿得到新挂载的文件与机密），其余工具并发执行；
+		//    装载成功同时广播 skill_loaded（前端同步启用列表并弹提示条）
 		outputs := make([]tools.Output, len(calls))
 		executed := make([]bool, len(calls))
 		for i, tc := range calls {
 			if tc.Function.Name == tools.LoadSkillTool {
-				outputs[i] = ts.runLoadSkill(ctx, sessionID, tc)
+				var loaded *Event
+				outputs[i], loaded = ts.runLoadSkill(ctx, sessionID, tc)
 				executed[i] = true
+				if loaded != nil {
+					emit(*loaded)
+				}
 			}
 		}
 		execCtx := tools.WithEnv(ctx, tools.SortedEnv(ts.envs))

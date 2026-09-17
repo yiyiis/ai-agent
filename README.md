@@ -319,6 +319,7 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 | `tool_call_result`| `id`, `output` | 工具执行结束返回的结构化执行结果 |
 | `tool_call_error` | `id`, `error` | 工具执行发生超时、权限违背或运行错误时的反馈 |
 | `tool_artifact`  | `tool_call_id`, `attachment` | 工具（`export_artifact`）导出的产物工件：上传对象存储后的可预览附件 |
+| `skill_loaded`   | `skill_id`, `name`, `tool_call_id` | 模型 `load_skill` 自主装载成功：前端同步启用列表并弹提示条 |
 | `memory_written`  | `key`, `topic`, `content` | 模型自动识别并写入长期记忆库时下发的可视化提醒 |
 | `done`            | `id`, `usage` | 助手完整消息完成落库，返回最终消息 UUID 及 Token 审计信息 |
 | `error`           | `message` | 执行链路出现无法恢复的系统异常报错 |

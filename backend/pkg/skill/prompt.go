@@ -67,6 +67,10 @@ func BuildCatalogPrompt(entries []Entry) string {
 		"当用户的需求明显落在某个 skill 的用途范围内时，先调用 `load_skill(name)`，",
 		"拿到完整说明后再按说明操作；用途不匹配就正常回答，**不要为了用而用**。",
 		"",
+		"注意：不要用 read_file / bash（ls、find 等）去探测或读取未加载技能的文件——",
+		"它们不在工作区里，必然扑空；使用未加载技能的唯一入口是 load_skill(name)，",
+		"它的返回已经包含你需要的全部说明。",
+		"",
 	}
 	for _, e := range entries {
 		desc := truncate(e.Description, CatalogDescLimit)

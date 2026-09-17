@@ -140,12 +140,13 @@ func (ts *turnSkills) catalogEntries() []skill.Entry {
 func (ts *turnSkills) hasCatalog() bool { return len(ts.catalog) > 0 }
 
 // runLoadSkill 拦截执行 load_skill：挂载目录 + 合并 secrets + 回传 SKILL.md。
+// 装载成功时同时返回 skill_loaded 事件（由调用方 emit，前端同步启用列表并提示）。
 // 结果文案均为模型可自纠正的普通文本（非 [执行失败] 前缀），前端不会弹失败卡；
 // 只有挂载基础设施失败才带错误前缀。
-func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc savedCall) tools.Output {
+func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc savedCall) (tools.Output, *Event) {
 	args, parseErr := tools.ParseArguments(tc.Function.Arguments)
 	if parseErr != "" {
-		return tools.Output{Text: parseErr}
+		return tools.Output{Text: parseErr}, nil
 	}
 	rawName := strings.TrimSpace(fmt.Sprint(args["name"]))
 
@@ -155,7 +156,7 @@ func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc sav
 			return tools.Output{Text: fmt.Sprintf(
 				"[无需加载] `%s` 已在本会话启用，文件就在 %s/%s/ 下，直接按 SKILL.md 操作即可。" +
 					"（已启用的技能不出现在待加载目录里，所以 load_skill 找不到它，这不代表它不存在。）",
-				rawName, skill.MountDir, dir)}
+				rawName, skill.MountDir, dir)}, nil
 		}
 		avail := "（无）"
 		if names := ts.catalogNames(); len(names) > 0 {
@@ -168,29 +169,29 @@ func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc sav
 		return tools.Output{Text: fmt.Sprintf(
 			"[未找到] 目录里没有名为 `%s` 的技能。当前可加载：%s；已启用（无需加载，直接用）：%s。"+
 				"如果两边都没有匹配的，就不要再调用 load_skill，直接用你自己的能力回答。",
-			rawName, avail, enabledList)}
+			rawName, avail, enabledList)}, nil
 	}
 	if containsStr(ts.autoLoaded, rawName) {
 		return tools.Output{Text: fmt.Sprintf(
 			"[已加载] `%s` 本轮已经加载过了，文件在 %s/%s/ 下，直接用即可。",
-			rawName, skill.MountDir, item.DirName)}
+			rawName, skill.MountDir, item.DirName)}, nil
 	}
 	if len(ts.autoLoaded) >= MaxAutoSkillLoads {
 		return tools.Output{Text: fmt.Sprintf(
 			"[已达上限] 本轮已自动加载 %d 个技能，不能再加载了。请用已加载的技能完成任务，"+
-				"或告诉用户需要在技能面板里手工启用 `%s`。", MaxAutoSkillLoads, rawName)}
+				"或告诉用户需要在技能面板里手工启用 `%s`。", MaxAutoSkillLoads, rawName)}, nil
 	}
 
 	if _, err := skill.MountToSandbox(ctx, sessionID, item.DirName); err != nil {
 		slog.Warn("自动装载技能挂载失败", "session", sessionID, "skill", item.DirName, "err", errors.Stack(err))
-		return tools.Output{Text: "[执行失败] 挂载技能 `" + rawName + "` 失败：" + err.Error()}
+		return tools.Output{Text: "[执行失败] 挂载技能 `" + rawName + "` 失败：" + err.Error()}, nil
 	}
 	body, err := skill.ReadSkillMD(item.DirName)
 	if err != nil {
 		return tools.Output{Text: fmt.Sprintf(
 			"[加载异常] `%s` 已挂到 %s/%s/ 下，但读取它的 SKILL.md 失败（%v）。"+
 				"可以用 bash 看看目录里有什么，或告诉用户这个技能安装不完整。",
-			rawName, skill.MountDir, item.DirName, err)}
+			rawName, skill.MountDir, item.DirName, err)}, nil
 	}
 
 	// 生效顺序要紧：先合并 secrets 与装载记录，再持久化、再回结果——
@@ -212,7 +213,7 @@ func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc sav
 	slog.Info("技能自动装载成功", "session", sessionID, "skill", rawName, "dir", item.DirName, "md_len", len(body))
 	return tools.Output{Text: fmt.Sprintf(
 		"已加载技能 `%s`，文件在工作区 %s/%s/ 下（只读）。它配置的机密密钥已注入进程环境变量。以下是 SKILL.md：\n\n%s",
-		rawName, skill.MountDir, item.DirName, body)}
+		rawName, skill.MountDir, item.DirName, body)}, &Event{Type: "skill_loaded", ID: tc.ID, Name: rawName, SkillID: item.ID}
 }
 
 func (ts *turnSkills) catalogNames() []string {

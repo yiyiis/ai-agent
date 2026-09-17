@@ -160,6 +160,19 @@ func TestLoadSkillAutoMount(t *testing.T) {
 	if !containsText(results, "已加载技能 `fetch-url`") || !containsText(results, "# Fetch URL") {
 		t.Fatalf("load_skill 结果异常: %v", results)
 	}
+	// 3b. 装载成功广播 skill_loaded 事件（前端同步启用列表与提示条）
+	var loaded *Event
+	for i := range events {
+		if events[i].Type == "skill_loaded" {
+			loaded = &events[i]
+		}
+	}
+	if loaded == nil {
+		t.Fatal("未发出 skill_loaded 事件")
+	}
+	if loaded.Name != "fetch-url" || loaded.SkillID == 0 || loaded.ID != "call_load" {
+		t.Fatalf("skill_loaded 事件字段异常: %+v", loaded)
+	}
 	// 4. 同批 bash 工具已拿得到合并后的 secrets
 	if !strings.Contains(envSeen, "FETCH_API_KEY=topsecret") {
 		t.Fatalf("同批工具未拿到 secrets: %q", envSeen)

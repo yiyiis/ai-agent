@@ -261,6 +261,9 @@ func ssePayload(ev agent.Event) gin.H {
 			payload["attachment"] = ev.Attachments[0]
 		}
 		return payload
+	case "skill_loaded":
+		// 模型 load_skill 自主装载成功：前端同步启用列表并弹提示条
+		return gin.H{"type": ev.Type, "tool_call_id": ev.ID, "skill_id": ev.SkillID, "name": ev.Name}
 	case "done":
 		payload := gin.H{"type": "done", "id": ev.ID}
 		if ev.Usage != nil {
