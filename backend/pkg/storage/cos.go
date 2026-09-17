@@ -44,9 +44,9 @@ func (c *cosStorage) Put(ctx context.Context, name string, r io.Reader, size int
 	if err := CheckSize(size); err != nil {
 		return Object{}, err
 	}
-	if contentType == "" {
-		contentType = "application/octet-stream"
-	}
+	// 归一化（空值回退 / 文本类补 charset）：此头会成为 COS 下载响应的
+	// Content-Type，直接决定浏览器解码行为
+	contentType = NormalizeContentType(contentType)
 	key := path.Join(c.cfg.BasePath, SanitizeName(name))
 	uri := "/" + key
 	endpoint := c.endpoint()

@@ -51,6 +51,20 @@ func CheckSize(size int64) error {
 	return nil
 }
 
+// NormalizeContentType Content-Type 归一化：空值回退二进制流；文本类补
+// UTF-8 charset 声明。对象存储会把上传时的 Content-Type 原样作为下载响应头，
+// 不带 charset 的 text/* 会被浏览器按本地默认编码解码（中文 Windows 通常是
+// GBK），UTF-8 内容直接乱码。
+func NormalizeContentType(ct string) string {
+	if ct == "" {
+		return "application/octet-stream"
+	}
+	if strings.HasPrefix(ct, "text/") && !strings.Contains(strings.ToLower(ct), "charset") {
+		return ct + "; charset=utf-8"
+	}
+	return ct
+}
+
 // SanitizeName 生成存储名：6 字节随机前缀（防碰撞与路径猜测）+ 清洗后的原始文件名。
 // 只保留常见安全字符，避免路径注入与怪异文件名；清洗后为空则退回 file。
 func SanitizeName(orig string) string {

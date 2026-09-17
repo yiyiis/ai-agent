@@ -46,6 +46,6 @@ func (s localStorage) Put(_ context.Context, name string, r io.Reader, size int6
 		URL:         "/api/uploads/" + stored,
 		Filename:    name,
 		Size:        written,
-		ContentType: contentType,
+		ContentType: NormalizeContentType(contentType),
 	}, nil
 }

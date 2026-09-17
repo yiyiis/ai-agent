@@ -86,9 +86,8 @@ func DownloadAttachment(ctx context.Context, req *DownloadAttachmentReq) (*apiwa
 		return nil, errors.NewMsg("文件不存在")
 	}
 
-	fileType := mime.TypeByExtension(filepath.Ext(name))
-	if fileType == "" {
-		fileType = "application/octet-stream"
-	}
+	// 本地驱动不落 Content-Type 元数据，按扩展名推断并归一化（文本类补
+	// charset=utf-8，否则浏览器按本地默认编码解码 UTF-8 内容会乱码）
+	fileType := storage.NormalizeContentType(mime.TypeByExtension(filepath.Ext(name)))
 	return &apiwarp.FilePathData{FileType: fileType, Path: p}, nil
 }

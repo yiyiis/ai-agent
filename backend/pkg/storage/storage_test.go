@@ -136,3 +136,19 @@ func TestCOSStoragePutServerError(t *testing.T) {
 		t.Fatal("server error should propagate")
 	}
 }
+
+func TestNormalizeContentType(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"", "application/octet-stream"},
+		{"text/markdown", "text/markdown; charset=utf-8"},
+		{"text/html", "text/html; charset=utf-8"},
+		{"text/html; charset=gbk", "text/html; charset=gbk"}, // 已带 charset 不重复补
+		{"application/octet-stream", "application/octet-stream"},
+		{"image/png", "image/png"},
+	}
+	for _, c := range cases {
+		if got := NormalizeContentType(c.in); got != c.want {
+			t.Errorf("NormalizeContentType(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
+}
