@@ -650,6 +650,9 @@ export function ChatArea({
   const lastRoundModelRef = useRef<string>('')
   const [skillsOpen, setSkillsOpen] = useState(false)
   const [autoSkill, setAutoSkill] = useState(true)
+  // 斜杠选中的技能在 submit → send 同一事件内到达：setState 是异步的，send 的
+  // 闭包读不到刚并入的 enabledEntries——经 ref 桥接，send 的草稿建会话分支合并它
+  const pendingSkillRef = useRef<Skill | null>(null)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [preview, setPreview] = useState<Attachment | null>(null)
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
@@ -828,14 +831,14 @@ export function ChatArea({
     }
   }, [skillsOpen])
 
-  const enabledIdSet = useMemo(
-    () => new Set(enabledEntries.map((e) => e.skill_id)),
-    [enabledEntries],
-  )
-  const enabledSkills = useMemo(
-    () => allSkills.filter((s) => enabledIdSet.has(s.id)),
-    [allSkills, enabledIdSet],
-  )
+  // 技能全量列表挂载即拉一次：输入框斜杠菜单要列全部技能（不只是已启用的），
+  // 选中即启用——不能等用户先打开技能面板才有得选
+  useEffect(() => {
+    api.listSkills().then(setAllSkills).catch(() => {})
+  }, [])
+
+
+
 
   // 贴底跟随：滚轮向上/触摸/滚动条上拖都视为"用户要阅读"，立即释放跟随；
   // 只有真正回到距底 24px 内才重新吸附。程序化滚动不触发这些意图信号。
@@ -1339,6 +1342,25 @@ export function ChatArea({
     [nameOf],
   )
 
+  // 斜杠选中技能的启用入口（Composer.submit 在 onSend 之前调用）：
+  // 并入启用列表 + 弹提示条；已有会话立即落库，草稿态经 pendingSkillRef
+  // 由 send 的建会话分支提交
+  const useSkill = (s: Skill) => {
+    const next = enabledEntries.some((e) => e.skill_id === s.id)
+      ? enabledEntries
+      : [...enabledEntries, { skill_id: s.id, pinned_version_number: null }]
+    pendingSkillRef.current = s
+    setEnabledEntries(next)
+    setNoticeBanner(`已启用技能：${s.name}`)
+    if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
+    noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
+    if (activeIdRef.current) {
+      api.setEnabledSkills(activeIdRef.current, next).catch((e) => {
+        setErrorBanner(`保存技能配置失败: ${String(e)}`)
+      })
+    }
+  }
+
   const send = async (content: string, attachments: Attachment[] = []) => {
     if (streaming) return
 
@@ -1357,9 +1379,15 @@ export function ChatArea({
         activeIdRef.current = newSession.id
         loadedIdRef.current = newSession.id
         // 草稿期选定的技能与 auto_skill 开关随建会话一并落库
-        //（auto_skill 后端默认开，仅关闭态需要显式同步）
-        if (enabledEntries.length > 0) {
-          await api.setEnabledSkills(newSession.id, enabledEntries)
+        //（auto_skill 后端默认开，仅关闭态需要显式同步；
+        //  斜杠刚选的技能经 ref 合并——send 闭包里的 enabledEntries 还是旧值）
+        const pending = pendingSkillRef.current
+        pendingSkillRef.current = null
+        const entriesForCreate = pending && !enabledEntries.some((e) => e.skill_id === pending.id)
+          ? [...enabledEntries, { skill_id: pending.id, pinned_version_number: null }]
+          : enabledEntries
+        if (entriesForCreate.length > 0) {
+          await api.setEnabledSkills(newSession.id, entriesForCreate)
         }
         if (!autoSkill) {
           await api.updateSession(newSession.id, { auto_skill: false })
@@ -1609,10 +1637,11 @@ export function ChatArea({
             <Composer
               key={`empty-${composerKey}`}
               onSend={send}
+              onUseSkill={useSkill}
               disabled={streaming}
               streaming={streaming}
               onStop={stop}
-              skills={enabledSkills}
+              skills={allSkills}
               models={models}
               currentModel={currentModel}
               onModelChange={handleModelChange}
@@ -1837,10 +1866,11 @@ export function ChatArea({
             <Composer
               key={`chat-${composerKey}`}
               onSend={send}
+              onUseSkill={useSkill}
               disabled={streaming}
               streaming={streaming}
               onStop={stop}
-              skills={enabledSkills}
+              skills={allSkills}
               models={models}
               currentModel={currentModel}
               onModelChange={handleModelChange}

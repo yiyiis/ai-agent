@@ -11,6 +11,7 @@ import {
   Image as ImageIcon,
   Pencil,
   RotateCcw,
+  Wrench,
 } from 'lucide-react'
 import { useEffect, useRef, useState } from 'react'
 import type { Attachment } from '../types'
@@ -255,7 +256,24 @@ export function MessageBubble({
         )}
         {content && (
           <div className="px-5 py-3 rounded-[22px] rounded-br-[6px] bg-[#f0f4f9] dark:bg-[#28292a] text-[#1f1f1f] dark:text-[#f1f3f4] text-[15px] leading-relaxed whitespace-pre-wrap select-text">
-            {content}
+            {/* Composer 斜杠选技能生成的「使用 X 技能：…」前缀还原为 chip 展示；
+                要求紧随全角冒号或整串到此为止，避免误伤普通句子 */}
+            {(() => {
+              const m = /^使用 (.{1,64}?) 技能(?:：\s*([\s\S]*)|$)/.exec(content)
+              if (!m) return content
+              return (
+                <>
+                  <span
+                    className="inline-flex items-center gap-1 px-2.5 py-0.5 mr-1.5 rounded-full bg-[#d3e3fd] text-[#041e49] dark:bg-[#004a77] dark:text-[#c2e7ff] text-xs font-medium align-middle whitespace-nowrap"
+                    title={`技能：${m[1]}`}
+                  >
+                    <Wrench className="w-3 h-3" />
+                    <span>{m[1]}</span>
+                  </span>
+                  {m[2] ?? ''}
+                </>
+              )
+            })()}
             {streaming && (
               <span className="inline-block w-1.5 h-4 ml-1 bg-[#1a73e8] dark:bg-[#8ab4f8] animate-pulse align-middle rounded-sm" />
             )}

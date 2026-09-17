@@ -29,6 +29,9 @@ interface Props {
   placeholder?: string
   streaming?: boolean
   onStop?: () => void
+  /** 斜杠选中的技能随消息一并启用（父层负责入启用列表与持久化）；
+   *  消息文本保持"使用 X 技能：…"前缀不变，气泡侧负责还原 chip 展示 */
+  onUseSkill?: (skill: Skill) => void
 }
 
 interface PendingUpload {
@@ -68,6 +71,7 @@ export function Composer({
   placeholder = '输入消息，随时开始...',
   streaming = false,
   onStop,
+  onUseSkill,
 }: Props) {
   const [value, setValue] = useState(initialValue ?? '')
   const [selIdx, setSelIdx] = useState(0)
@@ -142,6 +146,9 @@ export function Composer({
         ? `使用 ${pickedSkill.name} 技能：${text}`
         : `使用 ${pickedSkill.name} 技能`
       : text
+    // 斜杠选中的技能先于发送上抛：父层把它并入启用列表（草稿态随建会话提交，
+    // 已有会话立即落库）——技能是确定挂载的，不再依赖模型自觉调 load_skill
+    if (pickedSkill) onUseSkill?.(pickedSkill)
     onSend(payload, attachments)
     setValue('')
     setPickedSkill(null)
