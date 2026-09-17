@@ -133,7 +133,15 @@ export const api = {
       body: JSON.stringify({ account, password }),
     }),
 
-  listSkills: () => http<Skill[]>('/skills'),
+  listSkills: async (): Promise<Skill[]> => {
+    const list = await http<Skill[]>('/skills')
+    // tags 契约为 string[]；历史后端把 JSON 文本串直接返回过，坏数据在
+    // 组件里调 .map 会整页崩（广场黑屏），入口处归一掉
+    for (const s of list) {
+      if (!Array.isArray(s.tags)) s.tags = undefined
+    }
+    return list
+  },
 
   /**
    * 更新 skill 元信息。

@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"mime/multipart"
@@ -22,7 +23,7 @@ type SkillOut struct {
 	Name         string    `json:"name"`
 	Description  string    `json:"description"`
 	DirName      string    `json:"dir_name"`
-	Tags         *string   `json:"tags"`
+	Tags         []string  `json:"tags"`
 	CreatedAt    time.Time `json:"created_at"`
 	OwnerID      int64     `json:"owner_id"`
 	OwnerName    string    `json:"owner_name"`
@@ -35,6 +36,19 @@ type SkillOut struct {
 
 type ListSkillsReq struct{}
 
+// parseTagsJSON skills.tags 列存的是 JSON 数组文本；出参按前端契约（Skill.tags
+// 为 string[]）解析后返回，坏数据降级为 null
+func parseTagsJSON(p *string) []string {
+	if p == nil || *p == "" || *p == "null" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(*p), &out); err != nil || len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
 // toSkillOut 实体 → 出参（is_owner/can_view 按当前登录态派生：
 // 机密技能仅所有者可预览，非所有者只能使用）
 func toSkillOut(s *model.Skill, identity jwt.TokenClaims) SkillOut {
@@ -44,7 +58,7 @@ func toSkillOut(s *model.Skill, identity jwt.TokenClaims) SkillOut {
 		Name:         s.Name,
 		Description:  s.Description,
 		DirName:      s.DirName,
-		Tags:         s.Tags,
+		Tags:         parseTagsJSON(s.Tags),
 		CreatedAt:    s.CreatedAt,
 		OwnerID:      s.OwnerID,
 		OwnerName:    s.OwnerName,
