@@ -221,3 +221,55 @@ func TestExportArtifactMissing(t *testing.T) {
 	}
 }
 
+
+// TestEnvInjectionIntoBash 阶段五：skill secrets 经 tools.WithEnv 注入 context，
+// bash / python_exec 执行时应转交给沙箱进程（local 驱动即进程环境变量）
+func TestEnvInjectionIntoBash(t *testing.T) {
+	setupWorkspace(t)
+	ctx := WithEnv(context.Background(), SortedEnv(map[string]string{"SKILL_SECRET_KEY": "s3cr3t-val"}))
+	out := Execute(ctx, "sess1", "bash", map[string]any{"command": "echo KEY=$SKILL_SECRET_KEY"})
+	if IsErrorResult(out) {
+		t.Fatalf("bash failed: %s", out)
+	}
+	if !strings.Contains(out, "KEY=s3cr3t-val") {
+		t.Fatalf("env 未注入沙箱进程: %s", out)
+	}
+	// 未注入时不应凭空出现
+	out = Execute(context.Background(), "sess1", "bash", map[string]any{"command": "echo KEY=$SKILL_SECRET_KEY"})
+	if strings.Contains(out, "s3cr3t-val") {
+		t.Fatalf("env 不应泄漏到未注入的调用: %s", out)
+	}
+}
+
+// TestSkillMountDirWriteGuard 挂载进工作区的 skills/ 目录是只读引用，
+// 写入类工具应给出可自纠正提示而不是放行污染
+func TestSkillMountDirWriteGuard(t *testing.T) {
+	setupWorkspace(t)
+	for name, args := range map[string]map[string]any{
+		"write_file": {"path": "skills/fetch-url/SKILL.md", "content": "篡改"},
+		"edit_file":  {"path": "skills/fetch-url/SKILL.md", "old_string": "a", "new_string": "b"},
+	} {
+		out := Execute(context.Background(), "sess1", name, args)
+		if !IsErrorResult(out) || !strings.Contains(out, "只读") {
+			t.Fatalf("%s 应拦截 skills/ 写入: %s", name, out)
+		}
+	}
+	// 前缀混淆变体（./、多余斜杠）同样拦截
+	out := Execute(context.Background(), "sess1", "write_file",
+		map[string]any{"path": "./skills/x/y.txt", "content": "x"})
+	if !IsErrorResult(out) {
+		t.Fatalf("skills/ 前缀变体未拦截: %s", out)
+	}
+}
+
+// TestLoadSkillSchemaArgs load_skill 的参数校验：缺 name 给可照抄示例
+func TestLoadSkillSchemaArgs(t *testing.T) {
+	schema := LoadSkillSchema()
+	fn := schema["function"].(map[string]any)
+	if fn["name"] != LoadSkillTool {
+		t.Fatalf("schema name wrong: %v", fn["name"])
+	}
+	if msg := CheckArgs(LoadSkillTool, map[string]any{}); !strings.Contains(msg, "[参数缺失]") || !strings.Contains(msg, `"name": "fetch-url"`) {
+		t.Fatalf("load_skill 缺参提示异常: %s", msg)
+	}
+}

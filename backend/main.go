@@ -4,12 +4,14 @@ import (
 	"flag"
 	"fmt"
 
+	"backend/api"
 	"backend/config"
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"backend/pkg/log"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
+	"backend/pkg/skill"
 	"backend/pkg/storage"
 	"backend/pkg/validate"
 	"github.com/gin-contrib/cors"
@@ -37,20 +39,24 @@ func main() {
 	storage.Init(conf.COS)
 	sandbox.Init(conf.Sandbox)
 
-	// 5. 初始化 Gin Engine
+	// 5. 初始化技能库并同步注册表（阶段五：SKILL.md 目录 → skills 表投影）
+	skill.Init(conf.Skill)
+	api.InitSkillRegistry()
+
+	// 6. 初始化 Gin Engine
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.Default()
 
-	// 6. 挂载全局中间件
+	// 7. 挂载全局中间件
 	engine.
 		Use(cors.Default()).
 		Use(db.InjectQuery). // 注入 DB 门面对象至 context
 		Use(jwt.CheckLogin)  // JWT 登录校验与 claims 注入
 
-	// 7. 注册路由
+	// 8. 注册路由
 	RegisterRouter(engine)
 
-	// 8. 启动服务
+	// 9. 启动服务
 	addr := fmt.Sprintf("%s:%d", conf.Server.IP, conf.Server.Port)
 	fmt.Printf("服务启动成功，监听地址: %s\n", addr)
 	err := engine.Run(addr)

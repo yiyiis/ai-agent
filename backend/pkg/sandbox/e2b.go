@@ -109,39 +109,39 @@ func (d *e2bDriver) EnvNote() string {
 		"- 命令受硬超时约束，超时会被强制结束。"
 }
 
-func (d *e2bDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, timeoutSecs, []string{"/bin/bash", "-l", "-c", command})
+func (d *e2bDriver) RunBash(ctx context.Context, sessionID, command string, env []string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"/bin/bash", "-l", "-c", command}, env)
 }
 
-func (d *e2bDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, timeoutSecs, []string{"/usr/bin/python3", e2bWorkspace + "/" + scriptRel})
+func (d *e2bDriver) RunPython(ctx context.Context, sessionID, scriptRel string, env []string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"/usr/bin/python3", e2bWorkspace + "/" + scriptRel}, env)
 }
 
 // run 完整执行一轮：确保沙箱 → 执行命令。沙箱句柄失效（TTL 回收等）时
 // 重建一次并整体重试。
-func (d *e2bDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string) Result {
+func (d *e2bDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string, env []string) Result {
 	box, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
-	res, stale := d.runOnce(ctx, box, timeoutSecs, argv)
+	res, stale := d.runOnce(ctx, box, timeoutSecs, argv, env)
 	if stale {
 		slog.Info("sandbox(e2b) 句柄失效，重建后重试", "session", sessionID)
 		d.forget(sessionID)
 		if box, err = d.ensure(ctx, sessionID); err != nil {
 			return Result{Err: err}
 		}
-		res, _ = d.runOnce(ctx, box, timeoutSecs, argv)
+		res, _ = d.runOnce(ctx, box, timeoutSecs, argv, env)
 	}
 	return res
 }
 
 // runOnce 单次执行；stale 表示沙箱句柄已失效（应重建重试）。
 // ephemeral 工作区：文件经 WriteFile 直达沙箱，沙箱生灭不回拉。
-func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, timeoutSecs int, argv []string) (Result, bool) {
+func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, timeoutSecs int, argv []string, env []string) (Result, bool) {
 	// 外层包 timeout 做命令级硬超时（base 模板为 Ubuntu，含 coreutils）
 	wrapped := append([]string{"/usr/bin/timeout", "-k", strconv.Itoa(e2bExecKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
-	out, err := d.startProcess(ctx, box, wrapped)
+	out, err := d.startProcess(ctx, box, wrapped, env)
 	if err != nil {
 		if errors.Is(err, errE2BStale) {
 			return Result{}, true
@@ -340,13 +340,19 @@ func (d *e2bDriver) envdDo(ctx context.Context, box *e2bBox, method, path string
 	return resp, nil
 }
 
-// startProcess 经 envd Connect RPC 执行一条命令并等待结束
-func (d *e2bDriver) startProcess(ctx context.Context, box *e2bBox, argv []string) (e2bCommandResult, error) {
+// startProcess 经 envd Connect RPC 执行一条命令并等待结束；env 为 KEY=VALUE
+// 形式的额外环境变量（nil 表示不注入）
+func (d *e2bDriver) startProcess(ctx context.Context, box *e2bBox, argv []string, env []string) (e2bCommandResult, error) {
 	var reqBody startRequest
 	reqBody.Process.Cmd = argv[0]
 	reqBody.Process.Args = argv[1:]
 	reqBody.Process.Cwd = e2bWorkspace
 	reqBody.Stdin = false
+	for _, kv := range env {
+		if k, v, ok := strings.Cut(kv, "="); ok {
+			reqBody.Process.Envs[k] = v
+		}
+	}
 	payload, err := json.Marshal(reqBody)
 	if err != nil {
 		return e2bCommandResult{}, err
@@ -501,5 +507,5 @@ func (d *e2bDriver) RemoveFile(sessionID, rel string) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	_, _ = d.startProcess(ctx, box, []string{"/bin/rm", "-f", "--", e2bWorkspace + "/" + relC})
+	_, _ = d.startProcess(ctx, box, []string{"/bin/rm", "-f", "--", e2bWorkspace + "/" + relC}, nil)
 }

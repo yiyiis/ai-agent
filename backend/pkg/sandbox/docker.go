@@ -112,32 +112,32 @@ func (d *dockerDriver) EnvNote() string {
 }
 
 // RunBash / RunPython 统一走 run：确保容器在跑 → 建 exec → 读流拿输出 → 查退出码
-func (d *dockerDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, timeoutSecs, []string{"bash", "-c", command})
+func (d *dockerDriver) RunBash(ctx context.Context, sessionID, command string, env []string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"bash", "-c", command}, env)
 }
 
-func (d *dockerDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
-	return d.run(ctx, sessionID, timeoutSecs, []string{"python3", containerPath + "/" + scriptRel})
+func (d *dockerDriver) RunPython(ctx context.Context, sessionID, scriptRel string, env []string, timeoutSecs int) Result {
+	return d.run(ctx, sessionID, timeoutSecs, []string{"python3", containerPath + "/" + scriptRel}, env)
 }
 
 // run 在会话容器内执行 argv。外层包一层 `timeout -k` 做命令级硬超时：
 // Engine API 没有"取消 exec"的接口，靠镜像内的 timeout 命令兜底最可靠
-// （GNU coreutils 与 busybox 均支持该参数序）。
-func (d *dockerDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string) Result {
+// （GNU coreutils 与 busybox 均支持该参数序）。env 经 exec 配置注入容器进程。
+func (d *dockerDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string, env []string) Result {
 	id, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
 	wrapped := append([]string{"timeout", "-k", strconv.Itoa(execKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
 
-	eid, err := d.client.createExec(ctx, id, wrapped)
+	eid, err := d.client.createExec(ctx, id, wrapped, env)
 	if err != nil {
 		// 容器可能刚被巡检销毁（空闲/超期），按需拉起一次后重试
 		d.forget(sessionID)
 		if id, err = d.ensure(ctx, sessionID); err != nil {
 			return Result{Err: err}
 		}
-		if eid, err = d.client.createExec(ctx, id, wrapped); err != nil {
+		if eid, err = d.client.createExec(ctx, id, wrapped, env); err != nil {
 			return Result{Err: infraErr(err, "创建执行会话失败")}
 		}
 	}
@@ -355,7 +355,7 @@ func (d *dockerDriver) RemoveFile(sessionID, rel string) {
 
 // execQuiet 静默执行（只要退出码，输出丢弃）——清理类内部命令用
 func (d *dockerDriver) execQuiet(ctx context.Context, id string, argv []string) (int, error) {
-	eid, err := d.client.createExec(ctx, id, argv)
+	eid, err := d.client.createExec(ctx, id, argv, nil)
 	if err != nil {
 		return 0, err
 	}
@@ -706,13 +706,17 @@ func (c *dockerClient) listLabeled(ctx context.Context) ([]string, error) {
 	return ids, nil
 }
 
-func (c *dockerClient) createExec(ctx context.Context, containerID string, cmd []string) (string, error) {
-	resp, err := c.do(ctx, http.MethodPost, "/containers/"+containerID+"/exec", nil, map[string]any{
+func (c *dockerClient) createExec(ctx context.Context, containerID string, cmd []string, env []string) (string, error) {
+	body := map[string]any{
 		"AttachStdout": true,
 		"AttachStderr": true,
 		"Cmd":          cmd,
 		"WorkingDir":   containerPath,
-	})
+	}
+	if len(env) > 0 {
+		body["Env"] = env
+	}
+	resp, err := c.do(ctx, http.MethodPost, "/containers/"+containerID+"/exec", nil, body)
 	if err != nil {
 		return "", err
 	}

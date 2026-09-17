@@ -30,6 +30,7 @@ backend/
 │   ├── jwt/                   # JWT 鉴权与中间件
 │   ├── log/                   # 结构化日志 (slog + lumberjack 轮转)
 │   ├── sandbox/               # 多驱动执行沙箱（本地隔离 / Docker 容器 / E2B 云端）与生命周期治理
+│   ├── skill/                 # 动态 Skill 插件引擎（SKILL.md 解析、目录注入、load_skill 装载）
 │   ├── storage/               # 统一对象存储（本地 uploads / 腾讯云 COS 签名直传）
 │   └── validate/              # 参数校验器与中文翻译
 ├── .gitignore

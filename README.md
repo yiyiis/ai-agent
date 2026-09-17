@@ -153,9 +153,9 @@ timeline
 - [x] 产物提取与存储体系：从工具输出中捕获提取工件（Artifacts），接入腾讯云 COS 存储
 
 ### 阶段五：动态 Skill 插件系统 (Dynamic Skill Plugin Engine)
-- [ ] `SKILL.md` 规范解析器：解析 YAML 元数据、输入参数契约与执行脚本
-- [ ] 动态目录注入 (Catalog Prompt)：未启用技能以精简“名字 + 用途摘要”进 System Prompt
-- [ ] 意图驱动自主装载：模型根据用户诉求调用 `load_skill` 动态激活挂载工具；支持机密密钥注入
+- [x] `SKILL.md` 规范解析器：解析 YAML 元数据、输入参数契约与执行脚本
+- [x] 动态目录注入 (Catalog Prompt)：未启用技能以精简“名字 + 用途摘要”进 System Prompt
+- [x] 意图驱动自主装载：模型根据用户诉求调用 `load_skill` 动态激活挂载工具；支持机密密钥注入
 
 ### 阶段六：开放 API 与分布式任务调度 (Open API & Async Run Dispatcher)
 - [ ] 开放 API 接口契约：API Key 鉴权、公司/租户隔离与白名单策略
@@ -364,6 +364,7 @@ ai-agent/
 │   │   └── session.go             # 会话持久化与状态更新
 │   ├── etc/                       # 配置文件目录
 │   │   └── config.yaml            # 系统核心配置文件
+│   ├── skills/                    # 技能库（阶段五：每个子目录一个 SKILL.md 插件）
 │   ├── pkg/                       # 核心基础设施与底层组件
 │   │   ├── agent/                 # Agent 执行内核、Turn 调度器与 Loop Guard
 │   │   ├── apiwarp/               # 泛型 Controller 适配器与统一响应

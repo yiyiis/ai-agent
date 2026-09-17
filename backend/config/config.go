@@ -6,6 +6,7 @@ import (
 	"backend/pkg/log"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
+	"backend/pkg/skill"
 	"backend/pkg/storage"
 	"fmt"
 	"os"
@@ -27,6 +28,7 @@ type Config struct {
 	LLM     provider.Config `yaml:"LLM" mapstructure:"LLM"`
 	COS     storage.Config `yaml:"COS" mapstructure:"COS"`
 	Sandbox sandbox.Config `yaml:"Sandbox" mapstructure:"Sandbox"`
+	Skill   skill.Config  `yaml:"Skill" mapstructure:"Skill"`
 }
 
 var globalConf Config

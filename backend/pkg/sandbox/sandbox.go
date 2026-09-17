@@ -44,10 +44,11 @@ type Driver interface {
 	Name() string
 	// EnvNote 运行环境契约说明，注入 bash 工具描述，让模型按真实环境写命令
 	EnvNote() string
-	// RunBash 在会话工作区内执行一条 bash 命令，timeoutSecs 为命令级超时
-	RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result
+	// RunBash 在会话工作区内执行一条 bash 命令，timeoutSecs 为命令级超时；
+	// env 为额外注入的环境变量（KEY=VALUE，阶段五：skill secrets）
+	RunBash(ctx context.Context, sessionID, command string, env []string, timeoutSecs int) Result
 	// RunPython 执行工作区内的一段 Python 脚本，scriptRel 为工作区相对路径
-	RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result
+	RunPython(ctx context.Context, sessionID, scriptRel string, env []string, timeoutSecs int) Result
 	// ReadFile 读取工作区内相对路径的文件（沙箱内的实时内容）
 	ReadFile(ctx context.Context, sessionID, rel string) ([]byte, error)
 	// WriteFile 写入工作区内相对路径的文件
@@ -115,14 +116,14 @@ func DriverName() string { return driver.Name() }
 // EnvNote 活动驱动的运行环境契约
 func EnvNote() string { return driver.EnvNote() }
 
-// RunBash 经活动驱动执行 bash 命令
-func RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
-	return driver.RunBash(ctx, sessionID, command, timeoutSecs)
+// RunBash 经活动驱动执行 bash 命令（env 额外注入的环境变量，可为 nil）
+func RunBash(ctx context.Context, sessionID, command string, env []string, timeoutSecs int) Result {
+	return driver.RunBash(ctx, sessionID, command, env, timeoutSecs)
 }
 
-// RunPython 经活动驱动执行 Python 脚本
-func RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
-	return driver.RunPython(ctx, sessionID, scriptRel, timeoutSecs)
+// RunPython 经活动驱动执行 Python 脚本（env 额外注入的环境变量，可为 nil）
+func RunPython(ctx context.Context, sessionID, scriptRel string, env []string, timeoutSecs int) Result {
+	return driver.RunPython(ctx, sessionID, scriptRel, env, timeoutSecs)
 }
 
 // Close 销毁会话沙箱（会话删除时调用；尽力而为，失败不阻塞删除流程）

@@ -202,6 +202,11 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		return nil, err
 	}
 
+	enabledIDs, err := dao.ListEnabledSkillIDs(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+
 	msgOuts := make([]MessageOut, 0, len(messages))
 	for _, m := range messages {
 		msgItem := MessageOut{
@@ -225,7 +230,7 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 	return &SessionDetailOut{
 		SessionOut:      toSessionOut(session),
 		Messages:        msgOuts,
-		EnabledSkillIDs: []int64{},
+		EnabledSkillIDs: enabledIDs,
 		PendingQuestion: pending,
 	}, nil
 }
@@ -315,7 +320,9 @@ type SetEnabledSkillsReq struct {
 	} `json:"skills"`
 }
 
-// SetEnabledSkills 设置会话启用的技能 (PUT /api/sessions/:id/skills)
+// SetEnabledSkills 设置会话启用的技能 (PUT /api/sessions/:id/skills)。
+// 整体替换语义：请求里的清单就是启用全集；技能 ID 先经注册表存在性校验，
+// 防止挂空关联。
 func SetEnabledSkills(ctx context.Context, req *SetEnabledSkillsReq) (*StatusOKResp, error) {
 	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
@@ -326,6 +333,32 @@ func SetEnabledSkills(ctx context.Context, req *SetEnabledSkillsReq) (*StatusOKR
 		return nil, err
 	}
 
-	// 预留技能关联同步逻辑
+	// 去重（同技能多次出现以最后一次为准）+ 存在性校验
+	seen := make(map[int64]dao.SessionSkillItem, len(req.Skills))
+	items := make([]dao.SessionSkillItem, 0, len(req.Skills))
+	for _, s := range req.Skills {
+		if s.SkillID <= 0 {
+			return nil, errors.NewMsg("技能 ID 非法")
+		}
+		seen[s.SkillID] = dao.SessionSkillItem{SkillID: s.SkillID, PinnedVersionNumber: s.PinnedVersionNumber}
+	}
+	ids := make([]int64, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	skills, err := dao.GetSkillsByIDs(ctx, ids)
+	if err != nil {
+		return nil, err
+	}
+	if len(skills) != len(ids) {
+		return nil, errors.NewMsg("存在无效的技能 ID，请刷新技能列表后重试")
+	}
+	for _, item := range seen {
+		items = append(items, item)
+	}
+
+	if err := dao.ReplaceSessionSkills(ctx, req.ID, items); err != nil {
+		return nil, err
+	}
 	return &StatusOKResp{Status: "ok"}, nil
 }

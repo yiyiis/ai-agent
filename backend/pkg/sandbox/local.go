@@ -103,7 +103,7 @@ func (d *localDriver) RemoveFile(sessionID, rel string) {
 	}
 }
 
-func (d *localDriver) RunBash(ctx context.Context, sessionID, command string, timeoutSecs int) Result {
+func (d *localDriver) RunBash(ctx context.Context, sessionID, command string, env []string, timeoutSecs int) Result {
 	if _, err := exec.LookPath("bash"); err != nil {
 		return Result{Err: errors.NewMsg("当前环境没有可用的 bash 解释器。")}
 	}
@@ -113,11 +113,11 @@ func (d *localDriver) RunBash(ctx context.Context, sessionID, command string, ti
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
-	stdout, stderr, code, killed := runSubprocess(cctx, "bash", []string{"-c", command}, dir)
+	stdout, stderr, code, killed := runSubprocess(cctx, "bash", []string{"-c", command}, dir, env)
 	return Result{Stdout: stdout, Stderr: stderr, ExitCode: code, Killed: killed}
 }
 
-func (d *localDriver) RunPython(ctx context.Context, sessionID, scriptRel string, timeoutSecs int) Result {
+func (d *localDriver) RunPython(ctx context.Context, sessionID, scriptRel string, env []string, timeoutSecs int) Result {
 	py, err := lookPython()
 	if err != nil {
 		return Result{Err: err}
@@ -128,7 +128,7 @@ func (d *localDriver) RunPython(ctx context.Context, sessionID, scriptRel string
 	}
 	cctx, cancel := context.WithTimeout(ctx, time.Duration(timeoutSecs)*time.Second)
 	defer cancel()
-	stdout, stderr, code, killed := runSubprocess(cctx, py, []string{scriptRel}, dir)
+	stdout, stderr, code, killed := runSubprocess(cctx, py, []string{scriptRel}, dir, env)
 	return Result{Stdout: stdout, Stderr: stderr, ExitCode: code, Killed: killed}
 }
 
@@ -137,10 +137,14 @@ func (d *localDriver) Close(sessionID string) {
 	_ = os.RemoveAll(filepath.Join(d.root, sessionID))
 }
 
-// runSubprocess 在 dir 下执行命令，超时由 ctx 控制；返回输出与退出码
-func runSubprocess(ctx context.Context, name string, argv []string, dir string) (string, string, int, bool) {
+// runSubprocess 在 dir 下执行命令，超时由 ctx 控制；env 为额外注入的环境变量
+//（KEY=VALUE，继承宿主环境）；返回输出与退出码
+func runSubprocess(ctx context.Context, name string, argv []string, dir string, env []string) (string, string, int, bool) {
 	cmd := exec.CommandContext(ctx, name, argv...)
 	cmd.Dir = dir
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

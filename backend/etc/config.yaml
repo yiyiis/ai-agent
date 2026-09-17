@@ -53,6 +53,13 @@ COS:
   Region: "YOUR_COS_REGION"
   BasePath: ""
 
+# 技能库（阶段五）：动态 Skill 插件的文件源头。
+# 每个技能是 <Dir>/ 下一个子目录，以 SKILL.md 为入口声明（YAML frontmatter：
+# name / description / tags）；机密密钥放 <Dir>/.secrets/<目录名>.env，
+# 不随技能文件挂载进沙箱，仅在启用/装载时注入进程环境变量。
+Skill:
+  Dir: "skills"
+
 # 执行沙箱：进程类工具（bash / python_exec）的执行载体，三驱动可切换
 #   local  —— 本地隔离执行（默认，零依赖开箱即用）
 #   docker —— 每会话独立容器：工作区目录绑定挂载进容器 /workspace，按需拉起、

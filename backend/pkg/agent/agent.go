@@ -479,6 +479,12 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
 	msgs := buildContext(session, history)
+	// 技能装配（阶段五）：启用技能挂载进沙箱 + Catalog 目录注入 System Prompt；
+	// 任一步失败降级为无技能对话，不阻塞整轮
+	ts := loadTurnSkills(ctx, session)
+	if section := ts.systemPromptSection(); section != "" {
+		msgs[0].Content = msgs[0].Content + "\n\n" + section
+	}
 	// 附件落入会话工作区（沙箱），工具可直接按文件名操作（多模态内容流属于阶段八）。
 	// ephemeral 工作区：每轮物化"历史 + 当轮"的全部附件，沙箱回收重建后原件照常可用
 	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
@@ -507,6 +513,11 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	}
 	msgs = append(msgs, userTurn)
 	toolSchemas := tools.Schemas()
+	if ts.hasCatalog() {
+		// 存在可按需装载的候选才暴露 load_skill——否则模型会看到一个
+		// 永远只能返回"没有这个技能"的工具，白白浪费 token 和调用轮次
+		toolSchemas = append(toolSchemas, tools.LoadSkillSchema())
+	}
 
 	// Loop guard：sig(=tool+args 哈希) -> 历次输出哈希
 	guard := map[string][]string{}
@@ -562,11 +573,23 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			emit(Event{Type: "tool_call_start", ID: tc.ID, Name: tc.Function.Name, Arguments: orEmptyJSON(tc.Function.Arguments)})
 		}
 
-		// 4. 并发执行，按发起顺序取回结果
-		exec := deps.execTool()
+		// 4. load_skill 串行先行（改写 turn 内的挂载列表与 secrets 合并表，
+		//    后续工具才拿得到新挂载的文件与机密），其余工具并发执行
 		outputs := make([]tools.Output, len(calls))
+		executed := make([]bool, len(calls))
+		for i, tc := range calls {
+			if tc.Function.Name == tools.LoadSkillTool {
+				outputs[i] = ts.runLoadSkill(ctx, sessionID, tc)
+				executed[i] = true
+			}
+		}
+		execCtx := tools.WithEnv(ctx, tools.SortedEnv(ts.envs))
+		exec := deps.execTool()
 		var wg sync.WaitGroup
 		for i, tc := range calls {
+			if executed[i] {
+				continue
+			}
 			wg.Add(1)
 			go func(i int, tc savedCall) {
 				defer wg.Done()
@@ -579,7 +602,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				if tools.CheckArgs(tc.Function.Name, args) != "" {
 					logArgAnomaly(sessionID, session.Model, tc, "参数缺失")
 				}
-				outputs[i] = exec(ctx, sessionID, tc.Function.Name, args)
+				outputs[i] = exec(execCtx, sessionID, tc.Function.Name, args)
 			}(i, tc)
 		}
 		wg.Wait()

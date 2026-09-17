@@ -15,8 +15,10 @@ import (
 	"fmt"
 	"log/slog"
 	"mime"
+	"path"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -30,6 +32,10 @@ const (
 	maxOutput    = 256 * 1024 // 工具输出上限
 	maxReadChars = 100 * 1024 // 单次读文件上限
 	bashTimeoutMax = 300      // bash 工具自身允许的最大超时（秒）
+
+	// SkillMountPrefix 工作区内 skill 挂载目录前缀（阶段五：pkg/skill.MountDir），
+	// 挂载文件是只读引用，写入类工具在此拦截
+	SkillMountPrefix = "skills/"
 )
 
 // ctrlRe 控制字符（保留 \t \n \r）剔除，避免二进制输出把消息变成乱码
@@ -159,6 +165,36 @@ func Schemas() []any {
 	}
 }
 
+// LoadSkillTool 意图驱动自主装载的工具名。schema 在此暴露，但真正的执行在
+// agent 层拦截（它要改写 turn 内的挂载列表与 secrets 环境变量，且没有沙箱
+// 命令要跑），tools 层只负责参数校验兜底。
+const LoadSkillTool = "load_skill"
+
+// LoadSkillSchema load_skill 的工具 schema。仅当本轮存在"未加载的候选
+// skill"时由 agent 层拼进工具列表——否则模型会看到一个永远只能返回
+// "没有这个 skill"的工具，白白浪费 token 和调用轮次。
+func LoadSkillSchema() map[string]any {
+	return map[string]any{
+		"type": "function",
+		"function": map[string]any{
+			"name": LoadSkillTool,
+			"description": "加载一个「Skill 目录」里列出的 skill：把它的文件挂载到工作区 skills/<目录名>/，" +
+				"并返回它的完整使用说明（SKILL.md）。\n" +
+				"**何时使用**：用户的需求落在目录中某个 skill 的用途范围内，而该 skill 还没被加载时。\n" +
+				"**何时不使用**：目录里没有匹配的 skill（直接正常回答即可）；" +
+				"或该 skill 已在「可用 Skills（已挂载）」中列出（说明已经加载好了，直接用）。\n" +
+				"加载后请按返回的说明用 bash / python_exec 调用其中的脚本。",
+			"parameters": map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name": map[string]any{"type": "string", "description": "skill 名，与 Skill 目录里列出的完全一致"},
+				},
+				"required": []string{"name"},
+			},
+		},
+	}
+}
+
 var requiredArgs = map[string][]string{
 	"read_file":       {"path"},
 	"write_file":      {"path", "content"},
@@ -166,6 +202,7 @@ var requiredArgs = map[string][]string{
 	"bash":            {"command"},
 	"python_exec":     {"code"},
 	"export_artifact": {"path"},
+	"load_skill":      {"name"},
 }
 
 // argExamples 各工具的参数示例：参数缺失时随纠错提示一起返回——把"补齐"
@@ -177,6 +214,7 @@ var argExamples = map[string]string{
 	"bash":            `{"command": "ls -la"}`,
 	"python_exec":     `{"code": "print(1)"}`,
 	"export_artifact": `{"path": "report.md"}`,
+	"load_skill":      `{"name": "fetch-url"}`,
 }
 
 // Attachment 导出工件的附件元数据（与前端 Attachment 契约一致，
@@ -186,6 +224,46 @@ type Attachment struct {
 	Filename    string `json:"filename"`
 	Size        *int64 `json:"size,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
+}
+
+// ---------- Skill secrets 的环境变量注入（阶段五） ----------
+
+// envCtxKey context 键类型（包私有，防止外部伪造键值碰撞）
+type envCtxKey struct{}
+
+// WithEnv 把 skill secrets（KEY=VALUE 形式）注入 context：bash / python_exec
+// 执行时读取并传给沙箱进程。agent 层在每批工具执行前按当轮已装载的 skill
+// 重建（load_skill 命中后同批后续工具即拿得到新合并的机密）。
+func WithEnv(ctx context.Context, env []string) context.Context {
+	if len(env) == 0 {
+		return ctx
+	}
+	return context.WithValue(ctx, envCtxKey{}, env)
+}
+
+// EnvFrom 取出 context 里注入的环境变量（未注入返回 nil）
+func EnvFrom(ctx context.Context) []string {
+	if v, ok := ctx.Value(envCtxKey{}).([]string); ok {
+		return v
+	}
+	return nil
+}
+
+// SortedEnv map 形式的 secrets → 排序后的 KEY=VALUE 切片（确定性输出，便于测试）
+func SortedEnv(m map[string]string) []string {
+	if len(m) == 0 {
+		return nil
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		out = append(out, k+"="+m[k])
+	}
+	return out
 }
 
 // Output 单次工具执行的完整产物
@@ -412,6 +490,9 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 
 	case "write_file":
 		rel := argString(args, "path")
+		if msg := skillMountGuard(rel); msg != "" {
+			return Output{Text: msg}
+		}
 		content := argString(args, "content")
 		if err := sandbox.WriteFile(ctx, sessionID, rel, []byte(content)); err != nil {
 			return Output{Text: "[执行失败] " + err.Error()}
@@ -420,6 +501,9 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 
 	case "edit_file":
 		path := argString(args, "path")
+		if msg := skillMountGuard(path); msg != "" {
+			return Output{Text: msg}
+		}
 		data, err := readWorkspaceFile(ctx, sessionID, path)
 		if err != nil {
 			return Output{Text: fileErrOutput(err, "[未改动] "+path+" 不存在，请先用 write_file 创建。")}
@@ -456,7 +540,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		if inner > bashTimeoutMax {
 			inner = bashTimeoutMax
 		}
-		res := sandbox.RunBash(ctx, sessionID, argString(args, "command"), inner)
+		res := sandbox.RunBash(ctx, sessionID, argString(args, "command"), EnvFrom(ctx), inner)
 		return Output{Text: formatSandboxResult(res)}
 
 	case "python_exec":
@@ -467,8 +551,13 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		}
 		defer sandbox.RemoveFile(sessionID, script)
 
-		res := sandbox.RunPython(ctx, sessionID, script, toolTimeouts["python_exec"])
+		res := sandbox.RunPython(ctx, sessionID, script, EnvFrom(ctx), toolTimeouts["python_exec"])
 		return Output{Text: formatSandboxResult(res)}
+
+	case LoadSkillTool:
+		// 正常路径由 agent 层拦截执行（改写挂载列表与 secrets）；落到这里
+		// 说明调用链装配异常，给出可定位的失败而不是"未知工具"
+		return Output{Text: "[执行失败] load_skill 需由会话引擎拦截执行（要改写技能挂载与机密注入），工具层不受理。"}
 
 	case "export_artifact":
 		path := argString(args, "path")
@@ -510,6 +599,17 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 // readWorkspaceFile 经沙箱驱动读取工作区文件
 func readWorkspaceFile(ctx context.Context, sessionID, rel string) ([]byte, error) {
 	return sandbox.ReadFile(ctx, sessionID, rel)
+}
+
+// skillMountGuard 挂载进工作区的 skill 文件是只读引用，写入类工具在此拦截。
+// 模型想"修一下 skill 脚本"时给一句可自纠正的提示，比放行后污染挂载源友好。
+func skillMountGuard(rel string) string {
+	clean := path.Clean(strings.TrimSpace(rel))
+	if clean == "skills" || strings.HasPrefix(clean, SkillMountPrefix) {
+		return "[未改动] " + rel + " 位于 skill 挂载目录 " + SkillMountPrefix + " 下，是只读的技能文件，不能修改。" +
+			"如需自定义脚本，请复制到工作区其他路径后再改，或告知用户由管理员更新该 skill。"
+	}
+	return ""
 }
 
 // fileErrOutput 文件读取错误的提示映射：不存在给可自纠正提示，其余给失败前缀
