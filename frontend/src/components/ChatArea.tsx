@@ -1356,8 +1356,13 @@ export function ChatArea({
         currentId = newSession.id
         activeIdRef.current = newSession.id
         loadedIdRef.current = newSession.id
+        // 草稿期选定的技能与 auto_skill 开关随建会话一并落库
+        //（auto_skill 后端默认开，仅关闭态需要显式同步）
         if (enabledEntries.length > 0) {
           await api.setEnabledSkills(newSession.id, enabledEntries)
+        }
+        if (!autoSkill) {
+          await api.updateSession(newSession.id, { auto_skill: false })
         }
         onSessionCreated?.(newSession.id)
       } catch (e) {
@@ -1558,7 +1563,6 @@ export function ChatArea({
       <SkillsPanel
         open={skillsOpen}
         onClose={() => setSkillsOpen(false)}
-        sessionId={activeIdRef.current ?? ''}
         enabledEntries={enabledEntries}
         onEnabledChange={async (entries) => {
           setEnabledEntries(entries)

@@ -17,7 +17,6 @@ import { SkillDetailModal } from './SkillDetailModal'
 interface Props {
   open: boolean
   onClose: () => void
-  sessionId: string
   /** 已启用的 skill + 各自锁定的版本（null = 跟随当前） */
   enabledEntries: EnabledSkillEntry[]
   onEnabledChange: (entries: EnabledSkillEntry[]) => void
@@ -29,7 +28,6 @@ interface Props {
 export function SkillsPanel({
   open,
   onClose,
-  sessionId,
   enabledEntries,
   onEnabledChange,
   autoSkill,
@@ -63,13 +61,11 @@ export function SkillsPanel({
   const isAutoLoaded = (id: number) =>
     enabledEntries.find((e) => e.skill_id === id)?.source === 'auto'
 
-  const commit = async (next: EnabledSkillEntry[]) => {
+  // 勾选变更只上抛给父层：已有会话由父层立即 PUT 持久化；新对话草稿态（尚无
+  // session）由父层本地暂存，首条消息发送时随 createSession 一并提交。
+  // 这里不再自行调 PUT——草稿态没有会话 ID，直接调会报"会话不存在"。
+  const commit = (next: EnabledSkillEntry[]) => {
     onEnabledChange(next)
-    try {
-      await api.setEnabledSkills(sessionId, next)
-    } catch (e) {
-      setError(String(e))
-    }
   }
 
   const toggle = async (id: number) => {
