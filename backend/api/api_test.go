@@ -74,13 +74,21 @@ func setupTestServer() {
 
 	// 技能管理（与 router.go 同构，验证静态段 upload 与 :id 共存不冲突）
 	engine.GET("/api/skills", Controller(api.ListSkills))
+	engine.POST("/api/skills", Controller(api.CreateEmptySkill))
 	engine.POST("/api/skills/upload", Controller(api.UploadSkill))
+	engine.GET("/api/skills/:id/download", Controller(api.DownloadSkill))
 	engine.PATCH("/api/skills/:id", Controller(api.UpdateSkill))
 	engine.DELETE("/api/skills/:id", Controller(api.DeleteSkill))
 	engine.GET("/api/skills/:id/body", Controller(api.GetSkillBody))
 	engine.GET("/api/skills/:id/secrets", Controller(api.GetSkillSecrets))
 	engine.PUT("/api/skills/:id/secrets", Controller(api.UpdateSkillSecrets))
 	engine.GET("/api/skills/:id/versions", Controller(api.ListSkillVersions))
+	engine.GET("/api/skills/:id/tree", Controller(api.GetSkillTree))
+	engine.GET("/api/skills/:id/file", Controller(api.GetSkillFile))
+	engine.PUT("/api/skills/:id/file", Controller(api.WriteSkillFile))
+	engine.POST("/api/skills/:id/file", Controller(api.CreateSkillFile))
+	engine.DELETE("/api/skills/:id/file", Controller(api.DeleteSkillFile))
+	engine.POST("/api/skills/:id/file/rename", Controller(api.RenameSkillFile))
 
 	testEngine = engine
 }

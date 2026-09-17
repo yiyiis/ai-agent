@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/go-playground/validator/v10"
 	"log/slog"
+	"mime"
 	"reflect"
 	"strconv"
 
@@ -25,6 +26,9 @@ type FilePathData struct {
 type FileBytesData struct {
 	FileType string // 文件类型
 	Data     []byte // 文件数据
+	// Filename 非空时追加 Content-Disposition（attachment），浏览器保存为该文件名；
+	// 中文等非 ASCII 名经 mime.FormatMediaType 按 RFC 2231 编码
+	Filename string
 }
 
 // SSEData SSE 流式响应：Controller 识别到该类型后切换为 text/event-stream 长连接。
@@ -205,8 +209,16 @@ func Controller[In any, Out any](fc func(ctx context.Context, in *In) (Out, erro
 			gCtx.Writer.Header().Set("Content-Type", outData.FileType)
 			gCtx.File(outData.Path)
 		case *FileBytesData:
+			if outData.Filename != "" {
+				gCtx.Writer.Header().Set("Content-Disposition",
+					mime.FormatMediaType("attachment", map[string]string{"filename": outData.Filename}))
+			}
 			gCtx.Data(200, outData.FileType, outData.Data)
 		case FileBytesData:
+			if outData.Filename != "" {
+				gCtx.Writer.Header().Set("Content-Disposition",
+					mime.FormatMediaType("attachment", map[string]string{"filename": outData.Filename}))
+			}
 			gCtx.Data(200, outData.FileType, outData.Data)
 		case *CookieResp:
 			writeCookies(gCtx, outData.Cookies)

@@ -46,15 +46,24 @@ func RegisterRouter(engine *gin.Engine) {
 		sessionGroup.GET("/:id/stream", Controller(api.AttachSessionStream))
 	}
 
-	// 技能与记忆模块（管理最小闭环：zip 上传 / 删除 / 编辑 / 详情 / 机密 / 版本历史）
+	// 技能与记忆模块（管理闭环：zip 上传 / 删除 / 编辑 / 详情 / 机密 / 版本历史 /
+	// 在线文件编辑 / 从空新建 / 下载）
 	engine.GET("/api/skills", Controller(api.ListSkills))
+	engine.POST("/api/skills", Controller(api.CreateEmptySkill))
 	engine.POST("/api/skills/upload", Controller(api.UploadSkill))
+	engine.GET("/api/skills/:id/download", Controller(api.DownloadSkill))
 	engine.PATCH("/api/skills/:id", Controller(api.UpdateSkill))
 	engine.DELETE("/api/skills/:id", Controller(api.DeleteSkill))
 	engine.GET("/api/skills/:id/body", Controller(api.GetSkillBody))
 	engine.GET("/api/skills/:id/secrets", Controller(api.GetSkillSecrets))
 	engine.PUT("/api/skills/:id/secrets", Controller(api.UpdateSkillSecrets))
 	engine.GET("/api/skills/:id/versions", Controller(api.ListSkillVersions))
+	engine.GET("/api/skills/:id/tree", Controller(api.GetSkillTree))
+	engine.GET("/api/skills/:id/file", Controller(api.GetSkillFile))
+	engine.PUT("/api/skills/:id/file", Controller(api.WriteSkillFile))
+	engine.POST("/api/skills/:id/file", Controller(api.CreateSkillFile))
+	engine.DELETE("/api/skills/:id/file", Controller(api.DeleteSkillFile))
+	engine.POST("/api/skills/:id/file/rename", Controller(api.RenameSkillFile))
 	engine.GET("/api/memories/status", Controller(api.MemoryStatus))
 	engine.GET("/api/memories", Controller(api.ListMemories))
 
