@@ -9,11 +9,13 @@ package agent
 import (
 	"context"
 	"crypto/md5"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -148,8 +150,11 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史人设污染）
-func buildContext(session *model.Session, history []model.Message) []provider.ChatMessage {
+// buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史人设污染，支持多模态视觉历史回放）
+func buildContext(ctx context.Context, session *model.Session, history []model.Message) []provider.ChatMessage {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	modelNote := fmt.Sprintf("当前对话由模型 %s 提供支持。如果用户询问你是什么模型，如实回答自己是 %s。", session.Model, session.Model)
 	toolNote := "## 文件操作规范\n" +
 		"- 修改已有文件时，优先使用 edit_file 进行局部精确替换，不要用 write_file 重写整个文件。\n" +
@@ -217,6 +222,41 @@ func buildContext(session *model.Session, history []model.Message) []provider.Ch
 			msgs = append(msgs, cm)
 		default: // user / system
 			flushDangling()
+			if m.Role == "user" && m.Attachments != nil && *m.Attachments != "" {
+				var atts []Attachment
+				if json.Unmarshal([]byte(*m.Attachments), &atts) == nil && len(atts) > 0 {
+					var imageParts []provider.ContentPart
+					for _, a := range atts {
+						if isImageAttachment(a) {
+							imgURL, err := resolveAttachmentImageURL(ctx, a)
+							if err == nil && imgURL != "" {
+								imageParts = append(imageParts, provider.ContentPart{
+									Type: string(provider.ContentPartTypeImageURL),
+									ImageURL: &provider.ImageURL{
+										URL: imgURL,
+									},
+								})
+							}
+						}
+					}
+					if len(imageParts) > 0 {
+						var parts []provider.ContentPart
+						if m.Content != "" {
+							parts = append(parts, provider.ContentPart{
+								Type: string(provider.ContentPartTypeText),
+								Text: m.Content,
+							})
+						}
+						parts = append(parts, imageParts...)
+						msgs = append(msgs, provider.ChatMessage{
+							Role:         "user",
+							Content:      m.Content,
+							ContentParts: parts,
+						})
+						continue
+					}
+				}
+			}
 			msgs = append(msgs, provider.ChatMessage{Role: m.Role, Content: m.Content})
 		}
 	}
@@ -455,6 +495,148 @@ func workspaceName(orig string) string {
 	return out
 }
 
+// isImageAttachment 判断附件是否为图片（基于 ContentType 或扩展名）
+func isImageAttachment(a Attachment) bool {
+	ct := strings.ToLower(strings.TrimSpace(a.ContentType))
+	if strings.HasPrefix(ct, "image/") {
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(a.Filename))
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".svg":
+		return true
+	}
+	return false
+}
+
+// resolveAttachmentImageURL 将图片附件解析为大模型视觉接口可直接消费的 URL（Base64 Data URL 或公开 HTTP(S) URL）
+func resolveAttachmentImageURL(ctx context.Context, a Attachment) (string, error) {
+	if strings.HasPrefix(a.URL, "data:image/") {
+		return a.URL, nil
+	}
+
+	// 本地存储驱动（/api/uploads/ URL）：直接读本地 uploads/ 目录并转为 Data URL（避免外部大模型无法访问本地相对路径）
+	if name := strings.TrimPrefix(a.URL, "/api/uploads/"); name != "" && name != a.URL {
+		p := filepath.Join(storage.LocalRoot, filepath.Base(name))
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return "", err
+		}
+		mimeType := a.ContentType
+		if mimeType == "" || !strings.HasPrefix(mimeType, "image/") {
+			mimeType = storage.NormalizeContentType(mime.TypeByExtension(filepath.Ext(a.Filename)))
+			if !strings.HasPrefix(mimeType, "image/") {
+				mimeType = http.DetectContentType(data)
+			}
+		}
+		return fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data)), nil
+	}
+
+	// HTTP/HTTPS 链接
+	if strings.HasPrefix(a.URL, "http://") || strings.HasPrefix(a.URL, "https://") {
+		// 本地回环或局域网私有地址（云端模型无法直接回连），尝试下载后转为 Data URL
+		u, err := url.Parse(a.URL)
+		if err == nil {
+			host := strings.ToLower(u.Hostname())
+			if host == "localhost" || host == "127.0.0.1" || strings.HasPrefix(host, "192.168.") || strings.HasPrefix(host, "10.") || strings.HasPrefix(host, "172.") {
+				data, err := downloadAttachment(ctx, a.URL)
+				if err == nil && len(data) > 0 {
+					mimeType := a.ContentType
+					if mimeType == "" || !strings.HasPrefix(mimeType, "image/") {
+						mimeType = storage.NormalizeContentType(mime.TypeByExtension(filepath.Ext(a.Filename)))
+						if !strings.HasPrefix(mimeType, "image/") {
+							mimeType = http.DetectContentType(data)
+						}
+					}
+					return fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data)), nil
+				}
+			}
+		}
+		// 外部公网直链（如公开读 COS、云端 CDN 等），直接使用 URL
+		return a.URL, nil
+	}
+
+	return "", fmt.Errorf("不支持的图片 URL 协议: %s", a.URL)
+}
+
+// buildMultimodalUserMessage 组装用户消息（兼顾沙箱工作区物化提示与多模态视觉 ContentParts）
+func buildMultimodalUserMessage(ctx context.Context, userContent string, turnAttachments []Attachment, placed []Attachment) provider.ChatMessage {
+	var textPrompt string
+	if len(placed) > 0 {
+		var b strings.Builder
+		if userContent != "" {
+			b.WriteString(userContent)
+			b.WriteString("\n\n")
+		}
+		b.WriteString("[用户上传的附件已放入当前工作区，可直接用 read_file 等工具按文件名读取]")
+		for _, a := range placed {
+			fmt.Fprintf(&b, "\n- %s", a.Filename)
+		}
+		textPrompt = b.String()
+	} else if len(turnAttachments) > 0 {
+		var b strings.Builder
+		if userContent != "" {
+			b.WriteString(userContent)
+			b.WriteString("\n\n")
+		}
+		b.WriteString("[用户上传的附件]")
+		for _, a := range turnAttachments {
+			size := ""
+			if a.Size != nil {
+				size = fmt.Sprintf(", %d bytes", *a.Size)
+			}
+			fmt.Fprintf(&b, "\n- %s (%s%s)", a.Filename, a.ContentType, size)
+		}
+		textPrompt = b.String()
+	} else {
+		textPrompt = userContent
+	}
+
+	// 提取并解析视觉图片输入
+	var imageParts []provider.ContentPart
+	for _, a := range turnAttachments {
+		if isImageAttachment(a) {
+			imgURL, err := resolveAttachmentImageURL(ctx, a)
+			if err == nil && imgURL != "" {
+				imageParts = append(imageParts, provider.ContentPart{
+					Type: string(provider.ContentPartTypeImageURL),
+					ImageURL: &provider.ImageURL{
+						URL: imgURL,
+					},
+				})
+			} else {
+				slog.Warn("解析图片附件失败，退化为普通引用", "filename", a.Filename, "err", err)
+			}
+		}
+	}
+
+	// 无图片输入时返回纯文本 ChatMessage
+	if len(imageParts) == 0 {
+		return provider.ChatMessage{Role: "user", Content: textPrompt}
+	}
+
+	// 组装多模态 ContentParts：文本段 + 图片段
+	var parts []provider.ContentPart
+	if textPrompt != "" {
+		parts = append(parts, provider.ContentPart{
+			Type: string(provider.ContentPartTypeText),
+			Text: textPrompt,
+		})
+	}
+	parts = append(parts, imageParts...)
+
+	fallbackText := textPrompt
+	if fallbackText == "" {
+		fallbackText = "[图片]"
+	}
+
+	return provider.ChatMessage{
+		Role:         "user",
+		Content:      fallbackText,
+		ContentParts: parts,
+	}
+}
+
 // Run 执行一轮完整对话（含多轮工具调用），事件经 emit 回调发出。
 // session 为已加载的会话实体，history 为本轮之前的历史消息（不含本条用户输入），
 // attachments 为用户随本条消息上传的附件。
@@ -470,6 +652,16 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		if len(r) > 20 {
 			autoTitle = string(r[:20]) + "..."
 		}
+	} else if len(attachments) > 0 {
+		if isImageAttachment(attachments[0]) {
+			autoTitle = "[图片] " + attachments[0].Filename
+		} else {
+			autoTitle = "[附件] " + attachments[0].Filename
+		}
+		r := []rune(autoTitle)
+		if len(r) > 20 {
+			autoTitle = string(r[:20]) + "..."
+		}
 	}
 	userMsgID, err := saveMessage(ctx, sessionID, "user", userContent, "", nil, "", "", attachments)
 	if err != nil {
@@ -481,39 +673,16 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	}
 
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
-	msgs := buildContext(session, history)
+	msgs := buildContext(ctx, session, history)
 	// 技能装配（阶段五）：启用技能挂载进沙箱 + Catalog 目录注入 System Prompt；
 	// 任一步失败降级为无技能对话，不阻塞整轮
 	ts := loadTurnSkills(ctx, session)
 	if section := ts.systemPromptSection(); section != "" {
 		msgs[0].Content = msgs[0].Content + "\n\n" + section
 	}
-	// 附件落入会话工作区（沙箱），工具可直接按文件名操作（多模态内容流属于阶段八）。
-	// ephemeral 工作区：每轮物化"历史 + 当轮"的全部附件，沙箱回收重建后原件照常可用
+	// 附件落入会话工作区（沙箱），同时构造包含视觉图片的多模态用户消息
 	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
-	userTurn := provider.ChatMessage{Role: "user", Content: userContent}
-	if len(placed) > 0 {
-		var b strings.Builder
-		b.WriteString(userContent)
-		b.WriteString("\n\n[用户上传的附件已放入当前工作区，可直接用 read_file 等工具按文件名读取]")
-		for _, a := range placed {
-			fmt.Fprintf(&b, "\n- %s", a.Filename)
-		}
-		userTurn.Content = b.String()
-	} else if len(attachments) > 0 {
-		// 未能落入工作区（下载失败等），退化为仅告知引用清单
-		var b strings.Builder
-		b.WriteString(userContent)
-		b.WriteString("\n\n[用户上传的附件]")
-		for _, a := range attachments {
-			size := ""
-			if a.Size != nil {
-				size = fmt.Sprintf(", %d bytes", *a.Size)
-			}
-			fmt.Fprintf(&b, "\n- %s (%s%s)", a.Filename, a.ContentType, size)
-		}
-		userTurn.Content = b.String()
-	}
+	userTurn := buildMultimodalUserMessage(ctx, userContent, attachments, placed)
 	msgs = append(msgs, userTurn)
 	toolSchemas := tools.Schemas()
 	if ts.hasCatalog() {

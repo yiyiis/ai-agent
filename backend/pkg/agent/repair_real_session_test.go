@@ -32,7 +32,7 @@ func TestBuildContextRepairsRealPoisonedSession(t *testing.T) {
 	if len(history) == 0 {
 		t.Skip("目标会话已不存在（数据被清理）")
 	}
-	msgs := buildContext(&model.Session{SessionID: sid, Model: conf.LLM.DefaultModel}, history)
+	msgs := buildContext(ctx, &model.Session{SessionID: sid, Model: conf.LLM.DefaultModel}, history)
 
 	var pending map[string]bool
 	for i, m := range msgs {

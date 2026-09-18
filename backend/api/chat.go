@@ -12,12 +12,13 @@ import (
 	"backend/pkg/errors"
 	"backend/pkg/jwt"
 	"backend/pkg/provider"
+	"strings"
 	"github.com/gin-gonic/gin"
 )
 
 type SendMessageReq struct {
 	ID          string             `uri:"id"`
-	Content     string             `json:"content" binding:"required"`
+	Content     string             `json:"content"`
 	Attachments []agent.Attachment `json:"attachments"`
 }
 
@@ -64,6 +65,10 @@ func relaySSE(turn *agent.Turn, fromSeq int) *apiwarp.SSEData {
 // 流开始前的失败（登录态/会话隔离/Provider 缺失/并发互斥）走标准信封错误；
 // 流开始后由后台 Turn 驱动 ReAct 循环，协议事件经 ssePayload 转写为 SSE 帧。
 func SendMessageStream(ctx context.Context, req *SendMessageReq) (*apiwarp.SSEData, error) {
+	if strings.TrimSpace(req.Content) == "" && len(req.Attachments) == 0 {
+		return nil, errors.NewMsg("内容和附件不能同时为空")
+	}
+
 	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
 		return nil, errors.NewMsg("登录态已失效")
@@ -141,13 +146,17 @@ func RegenerateLastMessage(ctx context.Context, req *RegenerateMessageReq) (*api
 type EditMessageReq struct {
 	SessionID   string             `uri:"id"`
 	MessageID   string             `uri:"mid"`
-	Content     string             `json:"content" binding:"required"`
+	Content     string             `json:"content"`
 	Attachments []agent.Attachment `json:"attachments"`
 }
 
 // EditUserMessage 编辑任意一条历史提问并重新生成 (PUT /api/sessions/:id/messages/:mid)：
 // 从该条 user 消息起整段截断（含其后的全部回答与工具记录），再以编辑后的内容重开一轮。
 func EditUserMessage(ctx context.Context, req *EditMessageReq) (*apiwarp.SSEData, error) {
+	if strings.TrimSpace(req.Content) == "" && len(req.Attachments) == 0 {
+		return nil, errors.NewMsg("内容和附件不能同时为空")
+	}
+
 	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
 		return nil, errors.NewMsg("登录态已失效")

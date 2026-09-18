@@ -216,8 +216,10 @@ export function MessageBubble({
               }}
               onKeyDown={(e) => {
                 if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
-                  e.preventDefault()
-                  submitEdit()
+                  if (draft.trim() || (attachments && attachments.length > 0)) {
+                    e.preventDefault()
+                    submitEdit()
+                  }
                 } else if (e.key === 'Escape') {
                   e.preventDefault()
                   onCancelEdit?.()
@@ -239,7 +241,7 @@ export function MessageBubble({
               </button>
               <button
                 onClick={submitEdit}
-                disabled={!draft.trim()}
+                disabled={!draft.trim() && !(attachments && attachments.length > 0)}
                 className="px-3 py-1.5 rounded-full text-xs bg-[#1a73e8] hover:bg-[#1666d0] text-white disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
               >
                 重新提问

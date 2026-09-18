@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"strings"
 	"testing"
 
@@ -22,7 +23,7 @@ func TestBuildContextRepairsDanglingToolCalls(t *testing.T) {
 		{Role: "assistant", Content: "hi"},
 	}
 
-	msgs := buildContext(session, history)
+	msgs := buildContext(context.Background(), session, history)
 
 	var seq []string
 	for _, m := range msgs {

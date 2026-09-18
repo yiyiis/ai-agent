@@ -443,3 +443,76 @@ func TestAuthFlow(t *testing.T) {
 		t.Fatalf("expected logout code=0, got %d (%s)", env.Code, env.Msg)
 	}
 }
+
+func TestSendMessage_MultimodalInputValidation(t *testing.T) {
+	setupTestServer()
+
+	token, err := jwt.GenAccessToken(jwt.TokenClaims{
+		UserID:    105,
+		CompanyID: 1,
+		Name:      "User 105",
+		Username:  "user105",
+		UserType:  constants.User,
+	})
+	if err != nil {
+		t.Fatalf("failed to generate token: %v", err)
+	}
+
+	// 1. 创建会话
+	createBody, _ := json.Marshal(map[string]string{
+		"title": "多模态测试会话",
+	})
+	w := httptest.NewRecorder()
+	req, _ := http.NewRequest("POST", "/api/sessions", bytes.NewReader(createBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-token", token)
+	testEngine.ServeHTTP(w, req)
+	env := decodeEnvelope(t, w)
+	if env.Code != 0 {
+		t.Fatalf("create session failed: %s", env.Msg)
+	}
+	var s api.SessionOut
+	_ = json.Unmarshal(env.Data, &s)
+
+	// 2. 内容和附件均为空时，应该报错拦截
+	emptyBody, _ := json.Marshal(map[string]any{
+		"content":     "",
+		"attachments": []any{},
+	})
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/api/sessions/"+s.ID+"/messages", bytes.NewReader(emptyBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-token", token)
+	testEngine.ServeHTTP(w, req)
+	env = decodeEnvelope(t, w)
+	if env.Code == 0 || !strings.Contains(env.Msg, "内容和附件不能同时为空") {
+		t.Fatalf("expected validation error for empty content and attachments, got code=%d msg=%s", env.Code, env.Msg)
+	}
+
+	// 3. 内容为空但包含图片附件时，入参校验通过（不会被 binding:required 400 拦截）
+	imgBody, _ := json.Marshal(map[string]any{
+		"content": "",
+		"attachments": []map[string]any{
+			{
+				"url":          "data:image/png;base64,AAAA",
+				"filename":     "test.png",
+				"content_type": "image/png",
+			},
+		},
+	})
+	w = httptest.NewRecorder()
+	req, _ = http.NewRequest("POST", "/api/sessions/"+s.ID+"/messages", bytes.NewReader(imgBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-token", token)
+	testEngine.ServeHTTP(w, req)
+	// 无论上游是否真正配置了 LLM 运行，它绝不能报 binding 相关的参数错误或"内容和附件不能同时为空"
+	if w.Header().Get("Content-Type") == "text/event-stream" {
+		// 成功建立了 SSE 流
+	} else {
+		env = decodeEnvelope(t, w)
+		if strings.Contains(env.Msg, "内容和附件不能同时为空") || strings.Contains(env.Msg, "Field validation") {
+			t.Fatalf("should not fail parameter validation with image attachment: msg=%s", env.Msg)
+		}
+	}
+}
+
