@@ -188,6 +188,7 @@ func ListEnabledSkillIDs(ctx context.Context, sessionID string) ([]int64, error)
 type SessionSkillItem struct {
 	SkillID             int64
 	PinnedVersionNumber *int64
+	Source              string // "full", "auto", "auto_loaded"
 }
 
 // ReplaceSessionSkills 整体替换会话启用的技能集合（PUT 语义，事务内删旧插新）
@@ -203,11 +204,15 @@ func ReplaceSessionSkills(ctx context.Context, sessionID string, items []Session
 		}
 		rows := make([]*model.SessionSkill, 0, len(items))
 		for _, it := range items {
+			source := it.Source
+			if source == "" {
+				source = "full"
+			}
 			rows = append(rows, &model.SessionSkill{
 				SessionID:           sessionID,
 				SkillID:             it.SkillID,
 				PinnedVersionNumber: it.PinnedVersionNumber,
-				Source:              "manual",
+				Source:              source,
 			})
 		}
 		if err := ss.WithContext(txCtx).Create(rows...); err != nil {
@@ -217,28 +222,31 @@ func ReplaceSessionSkills(ctx context.Context, sessionID string, items []Session
 	})
 }
 
-// AddSessionSkillIfAbsent 记录 load_skill 自动装载（幂等：已存在时保持原记录，
-// 不覆盖手动启用的 pinned 版本）。单会话 Turn 互斥下无并发写入，先查后插即可。
-func AddSessionSkillIfAbsent(ctx context.Context, sessionID string, skillID int64) error {
+// AddOrPromoteSessionSkill 记录或提升 load_skill 自动装载（若之前是 auto 候选，提升为 auto_loaded）
+func AddOrPromoteSessionSkill(ctx context.Context, sessionID string, skillID int64) error {
 	q := db.Ctx(ctx)
 	ss := q.SessionSkill
-	n, err := ss.WithContext(ctx).
+	row, err := ss.WithContext(ctx).
 		Where(ss.SessionID.Eq(sessionID), ss.SkillID.Eq(skillID)).
-		Count()
+		First()
 	if err != nil {
-		return errors.Join(err, errors.New("记录自动装载技能失败"), errors.NewMsg("系统异常"))
+		return ss.WithContext(ctx).Create(&model.SessionSkill{
+			SessionID: sessionID,
+			SkillID:   skillID,
+			Source:    "auto_loaded",
+		})
 	}
-	if n > 0 {
-		return nil
-	}
-	if err := ss.WithContext(ctx).Create(&model.SessionSkill{
-		SessionID: sessionID,
-		SkillID:   skillID,
-		Source:    "auto",
-	}); err != nil {
-		return errors.Join(err, errors.New("记录自动装载技能失败"), errors.NewMsg("系统异常"))
+	if row.Source == "auto" {
+		_, _ = ss.WithContext(ctx).
+			Where(ss.ID.Eq(row.ID)).
+			Update(ss.Source, "auto_loaded")
 	}
 	return nil
+}
+
+// AddSessionSkillIfAbsent 记录 load_skill 自动装载（兼容旧名）
+func AddSessionSkillIfAbsent(ctx context.Context, sessionID string, skillID int64) error {
+	return AddOrPromoteSessionSkill(ctx, sessionID, skillID)
 }
 
 // MarshalTags 标签切片 → skills.tags 列的 JSON 文本（空切片返回空串）

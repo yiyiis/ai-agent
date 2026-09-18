@@ -37,10 +37,9 @@ func BuildSkillsPrompt(entries []Entry) string {
 	lines := []string{
 		"## 可用 Skills（已挂载）",
 		"",
-		"你拥有以下 skill 可调用。每个 skill 是一个文件目录，已挂载到工作区 " + MountDir + "/<目录名>/ 路径下，",
-		"以 SKILL.md 为入口说明。需要时用 read_file 读取 SKILL.md 了解使用方式，",
-		"再按指引用 bash 或 python_exec 调用其中的脚本/代码。",
-		"skill 配置的机密密钥已注入进程环境变量，可直接读取（如 os.environ['XXX_KEY']）。",
+		"以下技能已完成沙箱工作区挂载并在当前会话直接可用：",
+		"每个技能在工作区中的完整路径为 `" + MountDir + "/<目录名>/`。若需要查阅完整使用说明，请使用 `read_file` 读取其入口文件 `" + MountDir + "/<目录名>/SKILL.md`，随后按指引用 bash 或 python_exec 调用其中的脚本。",
+		"技能配置的机密密钥已直接注入当前进程环境变量（可直接从 os.environ 读取）。",
 		"",
 	}
 	for _, e := range entries {
@@ -48,7 +47,7 @@ func BuildSkillsPrompt(entries []Entry) string {
 		if desc == "" {
 			desc = "（无描述）"
 		}
-		lines = append(lines, fmt.Sprintf("- **%s**（%s/）：%s", e.Name, e.DirName, desc))
+		lines = append(lines, fmt.Sprintf("- **%s**（%s/）：%s（入口文件：`%s/%s/SKILL.md`）", e.Name, e.DirName, desc, MountDir, e.DirName))
 	}
 	return strings.Join(lines, "\n")
 }

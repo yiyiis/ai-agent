@@ -37,10 +37,17 @@ type MessageOut struct {
 	CreatedAt   string          `json:"created_at"`
 }
 
+type EnabledSkillOut struct {
+	SkillID             int64  `json:"skill_id"`
+	PinnedVersionNumber *int64 `json:"pinned_version_number"`
+	Source              string `json:"source"`
+}
+
 type SessionDetailOut struct {
 	SessionOut
-	Messages        []MessageOut `json:"messages"`
-	EnabledSkillIDs []int64      `json:"enabled_skill_ids"`
+	Messages        []MessageOut      `json:"messages"`
+	EnabledSkillIDs []int64           `json:"enabled_skill_ids"`
+	EnabledSkills   []EnabledSkillOut `json:"enabled_skills"`
 	// 读取时回滚掉的悬空提问（服务中断/中止留下的无回答轮次），
 	// 前端应把它还原到输入框让用户重发
 	PendingQuestion *PendingQuestionOut `json:"pending_question,omitempty"`
@@ -202,9 +209,19 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		return nil, err
 	}
 
-	enabledIDs, err := dao.ListEnabledSkillIDs(ctx, req.ID)
+	skillRows, err := dao.ListSessionSkills(ctx, req.ID)
 	if err != nil {
 		return nil, err
+	}
+	enabledIDs := make([]int64, 0, len(skillRows))
+	enabledSkills := make([]EnabledSkillOut, 0, len(skillRows))
+	for _, sr := range skillRows {
+		enabledIDs = append(enabledIDs, sr.Skill.ID)
+		enabledSkills = append(enabledSkills, EnabledSkillOut{
+			SkillID:             sr.Skill.ID,
+			PinnedVersionNumber: sr.Pinned,
+			Source:              sr.Source,
+		})
 	}
 
 	msgOuts := make([]MessageOut, 0, len(messages))
@@ -231,6 +248,7 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		SessionOut:      toSessionOut(session),
 		Messages:        msgOuts,
 		EnabledSkillIDs: enabledIDs,
+		EnabledSkills:   enabledSkills,
 		PendingQuestion: pending,
 	}, nil
 }
@@ -317,6 +335,7 @@ type SetEnabledSkillsReq struct {
 	Skills []struct {
 		SkillID             int64  `json:"skill_id"`
 		PinnedVersionNumber *int64 `json:"pinned_version_number"`
+		Source              string `json:"source"`
 	} `json:"skills"`
 }
 
@@ -340,7 +359,15 @@ func SetEnabledSkills(ctx context.Context, req *SetEnabledSkillsReq) (*StatusOKR
 		if s.SkillID <= 0 {
 			return nil, errors.NewMsg("技能 ID 非法")
 		}
-		seen[s.SkillID] = dao.SessionSkillItem{SkillID: s.SkillID, PinnedVersionNumber: s.PinnedVersionNumber}
+		src := s.Source
+		if src == "" {
+			src = "auto"
+		}
+		seen[s.SkillID] = dao.SessionSkillItem{
+			SkillID:             s.SkillID,
+			PinnedVersionNumber: s.PinnedVersionNumber,
+			Source:              src,
+		}
 	}
 	ids := make([]int64, 0, len(seen))
 	for id := range seen {

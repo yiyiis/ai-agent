@@ -65,7 +65,20 @@ func loadTurnSkills(ctx context.Context, session *model.Session) *turnSkills {
 		slog.Warn("加载会话启用技能失败，本轮降级为无技能对话", "session", session.SessionID, "err", errors.Stack(err))
 		return ts
 	}
+
+	// 分流：全量挂载（full / auto_loaded）vs 智能按需候选（auto）
+	var fullRows []dao.SessionSkillRow
+	var autoRows []dao.SessionSkillRow
 	for _, row := range rows {
+		if row.Source == "auto" {
+			autoRows = append(autoRows, row)
+		} else {
+			fullRows = append(fullRows, row)
+		}
+	}
+
+	// 1. 挂载常驻全量技能
+	for _, row := range fullRows {
 		entry := skill.Entry{DirName: row.Skill.DirName, Name: row.Skill.Name, Description: row.Skill.Description}
 		if _, err := skill.MountToSandbox(ctx, session.SessionID, row.Skill.DirName); err != nil {
 			slog.Warn("挂载启用技能失败，本轮跳过该技能", "session", session.SessionID, "skill", row.Skill.DirName, "err", errors.Stack(err))
@@ -76,34 +89,49 @@ func loadTurnSkills(ctx context.Context, session *model.Session) *turnSkills {
 	}
 	ts.envs = skill.CollectEnvs(dirNames(ts.enabled))
 
+	// 2. 组装按需候选 Catalog（严格互斥去重：已在 full 中的绝不重复进 catalog）
 	if !session.AutoSkill {
 		return ts
 	}
-	all, err := dao.ListSkills(ctx)
-	if err != nil {
-		slog.Warn("加载技能目录失败，本轮不提供按需装载", "session", session.SessionID, "err", errors.Stack(err))
-		return ts
-	}
-	enabledIDs := make(map[int64]bool, len(rows))
-	for _, row := range rows {
-		enabledIDs[row.Skill.ID] = true
-	}
-	for _, s := range all {
-		if enabledIDs[s.ID] {
-			continue
+
+	if len(autoRows) > 0 {
+		for _, row := range autoRows {
+			if _, exists := ts.enabledByName[row.Skill.Name]; exists {
+				continue // 去重：已全量挂载的剔除
+			}
+			if row.Skill.Confidential && (row.Skill.OwnerID == 0 || row.Skill.OwnerID != session.UserID) {
+				continue
+			}
+			item := catalogItem{
+				Entry: skill.Entry{DirName: row.Skill.DirName, Name: row.Skill.Name, Description: row.Skill.Description},
+				ID:    row.Skill.ID,
+			}
+			ts.catalog = append(ts.catalog, item)
+			ts.catalogByName[item.Name] = item
 		}
-		// 机密技能只对所有者进目录：load_skill 会把 SKILL.md 正文吐回上下文，
-		// 等于"预览"，而机密的语义就是非所有者不可预览
-		if s.Confidential && (s.OwnerID == 0 || s.OwnerID != session.UserID) {
-			continue
+	} else {
+		// 降级兜底：若会话未单独配置按需列表，但开启了 auto_skill，则全库未启用技能进 Catalog
+		all, err := dao.ListSkills(ctx)
+		if err != nil {
+			slog.Warn("加载技能目录失败，本轮不提供按需装载", "session", session.SessionID, "err", errors.Stack(err))
+			return ts
 		}
-		item := catalogItem{
-			Entry: skill.Entry{DirName: s.DirName, Name: s.Name, Description: s.Description},
-			ID:    s.ID,
+		for _, s := range all {
+			if _, exists := ts.enabledByName[s.Name]; exists {
+				continue
+			}
+			if s.Confidential && (s.OwnerID == 0 || s.OwnerID != session.UserID) {
+				continue
+			}
+			item := catalogItem{
+				Entry: skill.Entry{DirName: s.DirName, Name: s.Name, Description: s.Description},
+				ID:    s.ID,
+			}
+			ts.catalog = append(ts.catalog, item)
+			ts.catalogByName[item.Name] = item
 		}
-		ts.catalog = append(ts.catalog, item)
-		ts.catalogByName[item.Name] = item
 	}
+
 	return ts
 }
 
@@ -200,7 +228,16 @@ func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc sav
 		ts.envs[k] = v
 	}
 	ts.autoLoaded = append(ts.autoLoaded, rawName)
-	if err := dao.AddSessionSkillIfAbsent(ctx, sessionID, item.ID); err != nil {
+	ts.enabled = append(ts.enabled, item.Entry)
+	ts.enabledByName[rawName] = item.DirName
+	delete(ts.catalogByName, rawName)
+	for idx, c := range ts.catalog {
+		if c.ID == item.ID {
+			ts.catalog = append(ts.catalog[:idx], ts.catalog[idx+1:]...)
+			break
+		}
+	}
+	if err := dao.AddOrPromoteSessionSkill(ctx, sessionID, item.ID); err != nil {
 		// 持久化失败不影响本轮使用，只是刷新后关联丢失，告警即可
 		slog.Warn("自动装载技能关联持久化失败", "session", sessionID, "skill", item.DirName, "err", errors.Stack(err))
 	}

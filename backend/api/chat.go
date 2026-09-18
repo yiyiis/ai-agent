@@ -40,7 +40,10 @@ func startTurn(session *model.Session, build func(ctx context.Context) (history 
 		if err != nil {
 			return err
 		}
-		return agent.Run(ctx, agent.Deps{Provider: p}, session, history, content, attachments, emit)
+		deps := agent.Deps{
+			Provider: p,
+		}
+		return agent.Run(ctx, deps, session, history, content, attachments, emit)
 	})
 	if err != nil {
 		return nil, errors.NewMsg("该会话已有正在进行的回答，请等待完成或先停止")

@@ -465,6 +465,18 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		rel := argString(args, "path")
 		data, err := readWorkspaceFile(ctx, sessionID, rel)
 		if err != nil {
+			cleanPath := path.Clean(strings.TrimSpace(rel))
+			if !strings.HasPrefix(cleanPath, SkillMountPrefix) {
+				// 尝试追加 skills/ 前缀重试读取（如 "fetch-url/SKILL.md" -> "skills/fetch-url/SKILL.md"）
+				alt := path.Join(SkillMountPrefix, cleanPath)
+				if altData, altErr := readWorkspaceFile(ctx, sessionID, alt); altErr == nil {
+					data = altData
+					err = nil
+					rel = alt
+				}
+			}
+		}
+		if err != nil {
 			return Output{Text: fileErrOutput(err, "[未读取] "+rel+" 不存在或不是文件。")}
 		}
 		text := string(data)

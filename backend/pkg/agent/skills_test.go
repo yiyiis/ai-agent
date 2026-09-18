@@ -182,9 +182,9 @@ func TestLoadSkillAutoMount(t *testing.T) {
 	if err != nil || !strings.Contains(string(data), "fetch") {
 		t.Fatalf("技能文件未挂载进沙箱: %v %q", err, data)
 	}
-	// 6. 关联以 source=auto 落库（幂等）
+	// 6. 关联以 source=auto_loaded 落库（幂等）
 	rows, err := dao.ListSessionSkills(ctx, session.SessionID)
-	if err != nil || len(rows) != 1 || rows[0].Source != "auto" || rows[0].Skill.Name != "fetch-url" {
+	if err != nil || len(rows) != 1 || rows[0].Source != "auto_loaded" || rows[0].Skill.Name != "fetch-url" {
 		t.Fatalf("自动装载关联落库异常: %v %+v", err, rows)
 	}
 }

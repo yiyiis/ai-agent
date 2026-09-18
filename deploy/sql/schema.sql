@@ -105,7 +105,7 @@ CREATE TABLE `session_skills` (
   `session_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
   `skill_id` bigint NOT NULL,
   `pinned_version_number` bigint DEFAULT NULL,
-  `source` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'manual',
+  `source` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'full' COMMENT '来源：full 常驻全量 | auto 对话按需',
   PRIMARY KEY (`id`),
   UNIQUE KEY `uk_session_skill` (`session_id`,`skill_id`),
   KEY `idx_session_skills_session_id` (`session_id`),

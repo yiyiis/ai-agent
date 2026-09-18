@@ -18,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"backend/pkg/errors"
 	"backend/pkg/sandbox"
@@ -221,5 +222,20 @@ func MountToSandbox(ctx context.Context, sessionID, dirName string) (int, error)
 			return 0, errors.Wrapf(err, "挂载 skill 文件进沙箱失败: %s", dirName)
 		}
 	}
+
+	// 挂载确认与沙箱健康检查：回读 SKILL.md，确保沙箱真正就绪且文件写入已落盘
+	checkDst := path.Join(MountDir, dirName, "SKILL.md")
+	verified := false
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, readErr := sandbox.ReadFile(ctx, sessionID, checkDst); readErr == nil {
+			verified = true
+			break
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !verified {
+		return 0, errors.NewMsg("沙箱挂载校验失败，文件未就绪: " + dirName)
+	}
+
 	return len(files), nil
 }

@@ -120,7 +120,7 @@ export const api = {
    */
   setEnabledSkills: (
     sessionId: string,
-    skills: Array<{ skill_id: number; pinned_version_number?: number | null }>,
+    skills: Array<{ skill_id: number; pinned_version_number?: number | null; source?: string }>,
   ) =>
     http<void>(`/sessions/${sessionId}/skills`, {
       method: 'PUT',

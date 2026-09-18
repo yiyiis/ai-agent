@@ -41,8 +41,8 @@ export interface EnabledSkillEntry {
   skill_id: number
   /** NULL = 跟随当前激活版本 */
   pinned_version_number: number | null
-  /** 'manual' = 用户勾选；'auto' = 对话中模型按意图自动加载 */
-  source?: string
+  /** 'full' = 常驻全量; 'auto' = 智能按需; 'auto_loaded' = 运行时动态装载 */
+  source?: 'full' | 'auto' | 'auto_loaded' | string
 }
 
 export interface SessionDetail extends Session {

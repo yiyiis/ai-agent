@@ -1197,13 +1197,13 @@ export function ChatArea({
       // 并给一条提示条，让用户知道这轮多用了什么能力
       setEnabledEntries((prev) =>
         prev.some((e) => e.skill_id === ev.skill_id)
-          ? prev
+          ? prev.map((e) => (e.skill_id === ev.skill_id ? { ...e, source: 'auto_loaded' } : e))
           : [
               ...prev,
               {
                 skill_id: ev.skill_id,
                 pinned_version_number: null,
-                source: 'auto',
+                source: 'auto_loaded',
               },
             ],
       )
@@ -1343,15 +1343,15 @@ export function ChatArea({
   )
 
   // 斜杠选中技能的启用入口（Composer.submit 在 onSend 之前调用）：
-  // 并入启用列表 + 弹提示条；已有会话立即落库，草稿态经 pendingSkillRef
+  // 并入启用列表（常驻全量） + 弹提示条；已有会话立即落库，草稿态经 pendingSkillRef
   // 由 send 的建会话分支提交
   const useSkill = (s: Skill) => {
-    const next = enabledEntries.some((e) => e.skill_id === s.id)
-      ? enabledEntries
-      : [...enabledEntries, { skill_id: s.id, pinned_version_number: null }]
+    const next: EnabledSkillEntry[] = enabledEntries.some((e) => e.skill_id === s.id)
+      ? enabledEntries.map((e) => (e.skill_id === s.id ? { ...e, source: 'full' } : e))
+      : [...enabledEntries, { skill_id: s.id, pinned_version_number: null, source: 'full' }]
     pendingSkillRef.current = s
     setEnabledEntries(next)
-    setNoticeBanner(`已启用技能：${s.name}`)
+    setNoticeBanner(`已启用技能（常驻）：${s.name}`)
     if (noticeTimerRef.current) clearTimeout(noticeTimerRef.current)
     noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
     if (activeIdRef.current) {
@@ -1383,9 +1383,13 @@ export function ChatArea({
         //  斜杠刚选的技能经 ref 合并——send 闭包里的 enabledEntries 还是旧值）
         const pending = pendingSkillRef.current
         pendingSkillRef.current = null
-        const entriesForCreate = pending && !enabledEntries.some((e) => e.skill_id === pending.id)
-          ? [...enabledEntries, { skill_id: pending.id, pinned_version_number: null }]
-          : enabledEntries
+        const entriesForCreate: EnabledSkillEntry[] =
+          pending && !enabledEntries.some((e) => e.skill_id === pending.id)
+            ? [
+                ...enabledEntries,
+                { skill_id: pending.id, pinned_version_number: null, source: 'full' },
+              ]
+            : enabledEntries
         if (entriesForCreate.length > 0) {
           await api.setEnabledSkills(newSession.id, entriesForCreate)
         }
@@ -1418,7 +1422,10 @@ export function ChatArea({
     if (editingId) return // 就地编辑在气泡内提交，不走底部输入框
     await runStream(
       (onEvent, opts) =>
-        streamMessage(currentId!, content, onEvent, { ...opts, attachments }),
+        streamMessage(currentId!, content, onEvent, {
+          ...opts,
+          attachments,
+        }),
       {
         id: `temp-${Date.now()}`,
         role: 'user',
