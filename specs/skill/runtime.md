@@ -1,7 +1,7 @@
 # Skill 运行时装配与沙箱执行规范 (Runtime Specification)
 
 > **版本**：v1.2.0  
-> **核心组件**：`backend/pkg/agent/skills.go`、`backend/pkg/skill/store.go`、`backend/pkg/skill/prompt.go`
+> **核心组件**：[`backend/pkg/agent/skills.go`](../../backend/pkg/agent/skills.go)、[`backend/pkg/skill/store.go`](../../backend/pkg/skill/store.go)、[`backend/pkg/skill/prompt.go`](../../backend/pkg/skill/prompt.go)
 
 ---
 

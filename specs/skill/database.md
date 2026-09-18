@@ -2,7 +2,7 @@
 
 > **版本**：v1.2.0  
 > **数据库引擎**：MySQL 8.0+ / InnoDB / `utf8mb4`  
-> **ORM 映射**：GORM Gen (`backend/dal/model/`)
+> **ORM 映射**：GORM Gen ([`backend/dal/model/`](../../backend/dal/model/))
 
 ---
 

@@ -172,9 +172,9 @@ sequenceDiagram
 
 详细设计与实现细节已拆分为以下各专属技术规范文档，请参阅：
 
-- [数据模型与数据库字段规范 (database.md)](file:///d:/code_data/code/goproject/src/ai-agent/specs/skill/database.md)  
+- [数据模型与数据库字段规范 (database.md)](./database.md)  
   包含 `skills`、`skill_versions`、`session_skills`、`skill_runs` 及 `sessions.auto_skill` 的详细 DDL、字段说明、索引及约束。
-- [接口契约与 API 规范 (api.md)](file:///d:/code_data/code/goproject/src/ai-agent/specs/skill/api.md)  
+- [接口契约与 API 规范 (api.md)](./api.md)  
   包含技能增删改查、在线文件树编辑、Zip 打包上传下载、机密读写、会话状态绑定及 SSE 流式协议。
-- [运行时装配与沙箱规范 (runtime.md)](file:///d:/code_data/code/goproject/src/ai-agent/specs/skill/runtime.md)  
+- [运行时装配与沙箱规范 (runtime.md)](./runtime.md)  
   包含 Turn 级装配逻辑、沙箱安全限制（文件数/容量）、防竞态回读探活、提示词装配算法及 `load_skill` 拦截器机制。

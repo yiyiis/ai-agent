@@ -3,6 +3,7 @@
 > **版本**：v1.2.0  
 > **协议**：HTTP/1.1、HTTP/2、Server-Sent Events (SSE)  
 > **认证方式**：`Authorization: Bearer <JWT_TOKEN>`  
+> **核心代码实现**：[`backend/api/skills.go`](../../backend/api/skills.go)、[`backend/api/skill_files.go`](../../backend/api/skill_files.go)、[`backend/api/sessions.go`](../../backend/api/sessions.go)  
 > **默认数据响应封套**：`{"code": 0, "data": ..., "msg": "success"}`（特定流式与裸数据接口除外）
 
 ---
