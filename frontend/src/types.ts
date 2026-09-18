@@ -5,6 +5,8 @@ export interface Session {
   system_prompt: string | null
   /** 自动按用户意图选 skill；关掉后只用手工勾选的 skill */
   auto_skill?: boolean
+  user_id?: number
+  creator_name?: string
   created_at: string
   updated_at: string
 }
@@ -92,6 +94,7 @@ export interface LoginUser {
   name: string
   phone?: string
   username?: string
+  user_type?: number // 1: 超管, 2: 企管, 3: 普通用户
 }
 
 export interface LoginResult {

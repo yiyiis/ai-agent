@@ -25,6 +25,7 @@ export default function App() {
           <AppInner
             userName={identity.name}
             userId={identity.user_id}
+            userType={identity.user_type}
             onLogout={identity.onLogout}
           />
         )}
@@ -36,15 +37,18 @@ export default function App() {
 function AppInner({
   userName,
   userId,
+  userType,
   onLogout,
 }: {
   userName: string
   userId: number
+  userType?: number
   onLogout: () => void
 }) {
   const navigate = useNavigate()
   const location = useLocation()
   const [sessions, setSessions] = useState<Session[]>([])
+  const [sessionScope, setSessionScope] = useState<'mine' | 'all'>('mine')
   const [initLoading, setInitLoading] = useState(true)
   const [toastMsg, setToastMsg] = useState<{ title: string; variant?: 'error' | 'info' | 'success' } | null>(null)
 
@@ -59,15 +63,20 @@ function AppInner({
         ? 'memories'
         : 'chat'
 
-  const refresh = async () => {
+  const refresh = async (targetScope: 'mine' | 'all' = sessionScope) => {
     try {
-      const list = await api.listSessions()
+      const list = await api.listSessions(targetScope)
       setSessions(list)
       return list
     } catch (e) {
       console.error('加载会话列表失败', e)
       return []
     }
+  }
+
+  const handleScopeChange = (nextScope: 'mine' | 'all') => {
+    setSessionScope(nextScope)
+    refresh(nextScope)
   }
 
   // 初次加载会话列表
@@ -124,6 +133,9 @@ function AppInner({
         onOpenMemories={() => navigate('/memories')}
         userName={userName}
         userId={userId}
+        userType={userType}
+        scope={sessionScope}
+        onScopeChange={handleScopeChange}
         onLogout={onLogout}
       />
       <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-[#131314] relative">

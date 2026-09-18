@@ -26,6 +26,9 @@ interface Props {
   onOpenMemories: () => void
   userName?: string
   userId?: number
+  userType?: number
+  scope?: 'mine' | 'all'
+  onScopeChange?: (scope: 'mine' | 'all') => void
   onLogout: () => void
 }
 
@@ -41,6 +44,9 @@ export function Sidebar({
   onOpenMemories,
   userName,
   userId,
+  userType,
+  scope,
+  onScopeChange,
   onLogout,
 }: Props) {
   const [collapsed, setCollapsed] = useState(() => {
@@ -173,19 +179,48 @@ export function Sidebar({
         {/* 最近对话区域（仅在展开时显示） */}
         {!collapsed && (
           <>
-            <div className="px-4 pt-4 pb-1 text-xs font-medium text-[#747775] dark:text-[#9aa0a6]">
-              最近
-            </div>
+            {/* 会话范围分流切换 Tab (管理员/超管专享) */}
+            {(userType === 1 || userType === 2) && onScopeChange ? (
+              <div className="px-3 pt-3 pb-1">
+                <div className="flex bg-[#f0f4f9] dark:bg-[#1e1f20] p-0.5 rounded-xl text-xs font-medium border border-[#e3e3e3]/50 dark:border-[#333537]/50">
+                  <button
+                    onClick={() => onScopeChange('mine')}
+                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all text-center ${
+                      (scope ?? 'mine') === 'mine'
+                        ? 'bg-white dark:bg-[#28292a] text-[#1f1f1f] dark:text-[#e3e3e3] shadow-sm font-semibold'
+                        : 'text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#e3e3e3]'
+                    }`}
+                  >
+                    我的对话
+                  </button>
+                  <button
+                    onClick={() => onScopeChange('all')}
+                    className={`flex-1 py-1.5 px-2 rounded-lg transition-all text-center ${
+                      scope === 'all'
+                        ? 'bg-white dark:bg-[#28292a] text-[#1f1f1f] dark:text-[#e3e3e3] shadow-sm font-semibold'
+                        : 'text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#e3e3e3]'
+                    }`}
+                  >
+                    {userType === 1 ? '全平台' : '企业全部'}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="px-4 pt-4 pb-1 text-xs font-medium text-[#747775] dark:text-[#9aa0a6]">
+                最近
+              </div>
+            )}
             <div className="flex-1 overflow-y-auto scrollbar-thin px-3 py-1 space-y-0.5">
               {sessions.length === 0 ? (
                 <div className="text-center text-[#747775] dark:text-[#9aa0a6] text-xs py-8">
-                  暂无历史对话
+                  {scope === 'all' ? '暂无企业历史对话' : '暂无历史对话'}
                 </div>
               ) : (
                 sessions.map((s) => (
                   <SessionItem
                     key={s.id}
                     session={s}
+                    showCreator={scope === 'all'}
                     active={view === 'chat' && s.id === activeId}
                     onSelect={() => onSelect(s.id)}
                     onDelete={() => onDelete(s.id)}
@@ -265,12 +300,14 @@ export function Sidebar({
 function SessionItem({
   session,
   active,
+  showCreator,
   onSelect,
   onDelete,
   onRename,
 }: {
   session: Session
   active: boolean
+  showCreator?: boolean
   onSelect: () => void
   onDelete: () => void
   onRename: (title: string) => void
@@ -310,14 +347,21 @@ function SessionItem({
   return (
     <div
       className={cn(
-        'group relative flex items-center gap-2 px-3.5 py-2 rounded-full cursor-pointer text-xs transition-colors',
+        'group relative flex items-center gap-2 px-3.5 py-2 rounded-xl cursor-pointer text-xs transition-colors',
         active
           ? 'bg-[#d3e3fd] text-[#041e49] dark:bg-[#004a77] dark:text-[#c2e7ff] font-semibold'
           : 'text-[#444746] dark:text-[#c4c7c5] hover:bg-[#e1e7f0] dark:hover:bg-[#28292a]',
       )}
       onClick={onSelect}
     >
-      <span className="flex-1 truncate">{session.title}</span>
+      <div className="flex-1 min-w-0 flex flex-col justify-center">
+        <span className="truncate">{session.title}</span>
+        {showCreator && session.creator_name && (
+          <span className="text-[10px] text-[#747775] dark:text-[#9aa0a6] truncate font-normal">
+            {session.creator_name}
+          </span>
+        )}
+      </div>
 
       <div className="relative shrink-0">
         <button

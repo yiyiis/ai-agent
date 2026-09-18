@@ -259,3 +259,31 @@ func CheckSessionWriteAccess(tc jwt.TokenClaims, session *model.Session) error {
 	}
 	return errors.NewMsg("会话不存在或无权向此会话发送消息")
 }
+
+// GetUserNamesByIDs 批量查询用户昵称或用户名（用于会话列表等场景展示创建人）
+func GetUserNamesByIDs(ctx context.Context, userIDs []int64) (map[int64]string, error) {
+	if len(userIDs) == 0 {
+		return map[int64]string{}, nil
+	}
+	int32IDs := make([]int32, 0, len(userIDs))
+	for _, id := range userIDs {
+		int32IDs = append(int32IDs, int32(id))
+	}
+	query := db.Ctx(ctx)
+	u := query.UserInfo
+	users, err := query.WithContext(ctx).UserInfo.
+		Where(u.UserID.In(int32IDs...)).
+		Find()
+	if err != nil {
+		return nil, err
+	}
+	res := make(map[int64]string, len(users))
+	for _, user := range users {
+		name := user.Nickname
+		if name == "" {
+			name = user.Username
+		}
+		res[int64(user.UserID)] = name
+	}
+	return res, nil
+}

@@ -35,6 +35,7 @@ type UserInfoResp struct {
 	Name      string `json:"name"`
 	Phone     string `json:"phone,omitempty"`
 	Username  string `json:"username,omitempty"`
+	UserType  int32  `json:"user_type"`
 }
 
 type LoginResp struct {
@@ -105,6 +106,7 @@ func UserLogin(ctx context.Context, req *LoginReq) (*apiwarp.CookieResp, error) 
 				Name:      name,
 				Phone:     user.Phone,
 				Username:  user.Username,
+				UserType:  user.UserType,
 			},
 		},
 	}, nil
@@ -123,6 +125,7 @@ func AuthMe(ctx context.Context, _ *AuthMeReq) (*UserInfoResp, error) {
 		CompanyID: identity.CompanyID,
 		Name:      identity.Name,
 		Username:  identity.Username,
+		UserType:  int32(identity.UserType),
 	}, nil
 }
 
@@ -195,6 +198,7 @@ func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieRes
 				CompanyID: targetCompanyID,
 				Name:      nickname,
 				Username:  newUser.Username,
+				UserType:  newUser.UserType,
 			},
 		},
 	}, nil

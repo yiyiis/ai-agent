@@ -22,6 +22,8 @@ type SessionOut struct {
 	Model        string  `json:"model"`
 	SystemPrompt *string `json:"system_prompt"`
 	AutoSkill    bool    `json:"auto_skill"`
+	UserID       int64   `json:"user_id,omitempty"`
+	CreatorName  string  `json:"creator_name,omitempty"`
 	CreatedAt    string  `json:"created_at"`
 	UpdatedAt    string  `json:"updated_at"`
 }
@@ -75,6 +77,7 @@ func toSessionOut(s *model.Session) SessionOut {
 		Model:        s.Model,
 		SystemPrompt: promptPtr,
 		AutoSkill:    s.AutoSkill,
+		UserID:       s.UserID,
 		CreatedAt:    s.CreatedAt.Format(time.RFC3339),
 		UpdatedAt:    s.UpdatedAt.Format(time.RFC3339),
 	}
@@ -189,9 +192,29 @@ func ListSessions(ctx context.Context, req *ListSessionsReq) (*[]SessionOut, err
 		return nil, err
 	}
 
+	// 收集涉及的用户 ID 批量查昵称/用户名，方便全企会话列表下展示创建人
+	userIDs := make([]int64, 0, len(sessions))
+	for i := range sessions {
+		if sessions[i].UserID > 0 {
+			userIDs = append(userIDs, sessions[i].UserID)
+		}
+	}
+	var nameMap map[int64]string
+	if len(userIDs) > 0 {
+		nameMap, _ = dao.GetUserNamesByIDs(ctx, userIDs)
+	}
+
 	res := make([]SessionOut, 0, len(sessions))
 	for i := range sessions {
-		res = append(res, toSessionOut(&sessions[i]))
+		out := toSessionOut(&sessions[i])
+		if sessions[i].UserID == 0 {
+			out.CreatorName = "开放API (系统任务)"
+		} else if nameMap != nil {
+			if n, ok := nameMap[sessions[i].UserID]; ok {
+				out.CreatorName = n
+			}
+		}
+		res = append(res, out)
 	}
 	return &res, nil
 }

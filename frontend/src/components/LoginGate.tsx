@@ -10,6 +10,7 @@ export interface Identity {
   user_id: number
   company_id: number
   name: string
+  user_type?: number
 }
 
 interface Props {
@@ -35,7 +36,12 @@ export function LoginGate({ children }: Props) {
       const me = await api.me()
       setState({
         kind: 'authed',
-        identity: { user_id: me.user_id, company_id: me.company_id, name: me.name ?? '' },
+        identity: {
+          user_id: me.user_id,
+          company_id: me.company_id,
+          name: me.name ?? '',
+          user_type: me.user_type,
+        },
       })
     } catch {
       setState({ kind: 'unauthed' })

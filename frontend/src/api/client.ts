@@ -1,6 +1,7 @@
 import type {
   Attachment,
   LoginResult,
+  LoginUser,
   Memory,
   Model,
   Session,
@@ -65,7 +66,8 @@ async function unwrapEnvelope<T>(res: Response): Promise<T> {
 }
 
 export const api = {
-  listSessions: () => http<Session[]>('/sessions'),
+  listSessions: (scope?: 'mine' | 'all') =>
+    http<Session[]>(`/sessions${scope === 'all' ? '?scope=all' : ''}`),
 
   // ---- 跨会话记忆 ----
   memoryStatus: () =>
@@ -351,8 +353,8 @@ export const api = {
     return unwrapEnvelope<Attachment>(res)
   },
 
-  // 启动时 ping 一下，确认登录态并拿到 user_id / company_id
-  me: () => http<{ user_id: number; company_id: number; name?: string }>('/auth/me'),
+  // 启动时 ping 一下，确认登录态并拿到 user_id / company_id / user_type
+  me: () => http<LoginUser>('/auth/me'),
 }
 
 export type StreamEvent =
