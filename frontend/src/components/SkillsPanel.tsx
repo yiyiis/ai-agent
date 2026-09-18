@@ -20,9 +20,6 @@ interface Props {
   /** 已启用的 skill + 各自锁定的版本（null = 跟随当前） */
   enabledEntries: EnabledSkillEntry[]
   onEnabledChange: (entries: EnabledSkillEntry[]) => void
-  /** 是否允许模型按用户意图自动加载未勾选的 skill */
-  autoSkill: boolean
-  onAutoSkillChange: (next: boolean) => void
 }
 
 export function SkillsPanel({
@@ -30,8 +27,6 @@ export function SkillsPanel({
   onClose,
   enabledEntries,
   onEnabledChange,
-  autoSkill,
-  onAutoSkillChange,
 }: Props) {
   const [skills, setSkills] = useState<Skill[]>([])
   const [uploading, setUploading] = useState(false)
@@ -187,24 +182,13 @@ export function SkillsPanel({
           </button>
         </header>
 
-        {/* 智能按需加载全局总开关 */}
-        <label className="flex items-start gap-2.5 px-4 py-3 border-b border-neutral-200 dark:border-[#3c4043] cursor-pointer hover:bg-neutral-50 dark:hover:bg-[#28292a]">
-          <input
-            type="checkbox"
-            checked={autoSkill}
-            onChange={(e) => onAutoSkillChange(e.target.checked)}
-            className="mt-0.5 shrink-0"
-          />
-          <div className="min-w-0">
-            <div className="flex items-center gap-1.5 text-sm font-medium">
-              <Sparkles className="w-3.5 h-3.5 text-neutral-500 dark:text-[#9aa0a6]" />
-              允许模型按需加载技能
-            </div>
-            <p className="text-xs text-neutral-400 dark:text-[#747775] mt-0.5">
-              设为「按需」的技能将在提示词中注入摘要，由模型自主决策装载；设为「常驻」的技能每轮始终预载。
-            </p>
-          </div>
-        </label>
+        {/* 模式说明注释条 */}
+        <div className="px-4 py-2.5 bg-neutral-50/70 dark:bg-[#202122] border-b border-neutral-200 dark:border-[#3c4043] flex items-start gap-2">
+          <Sparkles className="w-3.5 h-3.5 text-neutral-400 dark:text-[#9aa0a6] mt-0.5 shrink-0" />
+          <p className="text-xs text-neutral-500 dark:text-[#9aa0a6] leading-relaxed">
+            设为<span className="text-neutral-700 dark:text-[#e3e3e3] font-medium">「按需」</span>的技能将在提示词中注入摘要，由模型自主决策装载；设为<span className="text-neutral-700 dark:text-[#e3e3e3] font-medium">「常驻」</span>的技能每轮始终预载。
+          </p>
+        </div>
 
         {/* 批量操作工具栏 */}
         <div className="px-4 py-2 border-b border-neutral-200 dark:border-[#3c4043] flex items-center justify-between gap-2 bg-neutral-50/70 dark:bg-[#252728]">

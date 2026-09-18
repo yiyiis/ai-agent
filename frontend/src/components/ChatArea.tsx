@@ -1619,20 +1619,6 @@ export function ChatArea({
             }
           }
         }}
-        autoSkill={autoSkill}
-        onAutoSkillChange={async (next) => {
-          const prev = autoSkill
-          setAutoSkill(next)
-          if (!activeIdRef.current) return
-          try {
-            await api.updateSession(activeIdRef.current, { auto_skill: next })
-          } catch (e) {
-            setAutoSkill(prev)
-            setErrorBanner(`切换自动选 skill 失败：${String(e)}`)
-            if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
-            errorTimerRef.current = setTimeout(() => setErrorBanner(null), 6000)
-          }
-        }}
       />
 
       {loading ? (
