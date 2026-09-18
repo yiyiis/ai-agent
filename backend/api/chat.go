@@ -175,8 +175,11 @@ func EditUserMessage(ctx context.Context, req *EditMessageReq) (*apiwarp.SSEData
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionWriteAccess(identity, session); err != nil {
+		return nil, err
 	}
 
 	msg, err := dao.GetMessageByMessageID(ctx, req.MessageID)
@@ -218,8 +221,11 @@ func AttachSessionStream(ctx context.Context, req *AttachStreamReq) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionAccess(identity, session); err != nil {
+		return nil, err
 	}
 
 	turn := turnRegistry.Get(req.ID)
@@ -246,8 +252,11 @@ func StopSessionTurn(ctx context.Context, req *StopTurnReq) (*StatusOKResp, erro
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionWriteAccess(identity, session); err != nil {
+		return nil, err
 	}
 
 	turnRegistry.Abort(req.ID)

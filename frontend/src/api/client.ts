@@ -522,6 +522,10 @@ export async function attachStream(
   )
   if (res.status === 401 && onUnauthorized) onUnauthorized()
   if (res.status === 204) return false
+  const contentType = res.headers.get('content-type') || ''
+  if (!res.ok || !contentType.includes('text/event-stream')) {
+    return false
+  }
   await consumeStream(res, onEvent, opts)
   return true
 }
@@ -540,7 +544,9 @@ export async function hasActiveStream(sessionId: string): Promise<boolean> {
       },
     )
     ctrl.abort()
-    return res.ok && res.status !== 204
+    if (!res.ok || res.status === 204) return false
+    const contentType = res.headers.get('content-type') || ''
+    return contentType.includes('text/event-stream')
   } catch {
     return false
   }
