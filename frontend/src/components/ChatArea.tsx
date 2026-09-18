@@ -644,6 +644,16 @@ export function ChatArea({
   // 启用的 skill + 各自锁定的版本（null = 跟随激活）
   const [enabledEntries, setEnabledEntries] = useState<EnabledSkillEntry[]>([])
   const [allSkills, setAllSkills] = useState<Skill[]>([])
+  // 严格会话隔离：仅当前会话已配置/启用的技能供输入框 / 快捷调用
+  const sessionActiveSkills = useMemo(() => {
+    const map = new Map(enabledEntries.map((e) => [e.skill_id, e.source]))
+    return allSkills
+      .filter((s) => map.has(s.id))
+      .map((s) => ({
+        ...s,
+        sessionSource: map.get(s.id),
+      }))
+  }, [allSkills, enabledEntries])
   const [models, setModels] = useState<Model[]>([])
   const [currentModel, setCurrentModel] = useState<string>('')
   // 上一轮对话实际使用的模型：用于在模型真正变化的那一轮展示切换分隔条
@@ -1648,7 +1658,7 @@ export function ChatArea({
               disabled={streaming}
               streaming={streaming}
               onStop={stop}
-              skills={allSkills}
+              skills={sessionActiveSkills}
               models={models}
               currentModel={currentModel}
               onModelChange={handleModelChange}
@@ -1877,7 +1887,7 @@ export function ChatArea({
               disabled={streaming}
               streaming={streaming}
               onStop={stop}
-              skills={allSkills}
+              skills={sessionActiveSkills}
               models={models}
               currentModel={currentModel}
               onModelChange={handleModelChange}

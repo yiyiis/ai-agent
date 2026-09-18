@@ -277,7 +277,7 @@ export function Composer({
           {filtered.length === 0 ? (
             <div className="px-4 py-6 text-center text-xs text-[#747775] dark:text-[#9aa0a6]">
               {skills.length === 0
-                ? '当前没有启用的技能'
+                ? '当前会话未启用任何技能（可在右上角 Skills 面板中启用）'
                 : '没有匹配的技能'}
             </div>
           ) : (
@@ -298,10 +298,23 @@ export function Composer({
                       : 'hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] text-[#1f1f1f] dark:text-[#f1f3f4]')
                   }
                 >
-                  <div className="flex items-center gap-2 min-w-0">
-                    <span className="text-xs font-semibold text-[#1a73e8] dark:text-[#8ab4f8] font-mono">
+                  <div className="flex items-center gap-2 min-w-0 flex-1">
+                    <span className="text-xs font-semibold text-[#1a73e8] dark:text-[#8ab4f8] font-mono shrink-0">
                       /{s.name}
                     </span>
+                    {(s as any).sessionSource === 'full' ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-blue-100 dark:bg-blue-900/50 text-blue-700 dark:text-blue-300 font-medium shrink-0">
+                        常驻
+                      </span>
+                    ) : (s as any).sessionSource === 'auto' ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-100 dark:bg-purple-900/50 text-purple-700 dark:text-purple-300 font-medium shrink-0">
+                        按需
+                      </span>
+                    ) : (s as any).sessionSource === 'auto_loaded' ? (
+                      <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-100 dark:bg-emerald-900/50 text-emerald-700 dark:text-emerald-300 font-medium shrink-0">
+                        已装载
+                      </span>
+                    ) : null}
                     {s.description && (
                       <span className="text-xs text-[#747775] dark:text-[#9aa0a6] truncate">
                         {s.description}
