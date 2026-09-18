@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 
 	"backend/api"
 	"backend/config"
 	"backend/pkg/db"
+	"backend/pkg/dispatcher"
 	"backend/pkg/jwt"
 	"backend/pkg/log"
 	"backend/pkg/provider"
@@ -42,6 +44,11 @@ func main() {
 	// 5. 初始化技能库并同步注册表（阶段五：SKILL.md 目录 → skills 表投影）
 	skill.Init(conf.Skill)
 	api.InitSkillRegistry()
+
+	// 阶段六：初始化并启动后台异步任务调度器 (Dispatcher)
+	disp := dispatcher.Init(10)
+	disp.Start(context.Background())
+	defer disp.Stop()
 
 	// 6. 初始化 Gin Engine
 	gin.SetMode(gin.ReleaseMode)

@@ -90,6 +90,22 @@ func setupTestServer() {
 	engine.DELETE("/api/skills/:id/file", Controller(api.DeleteSkillFile))
 	engine.POST("/api/skills/:id/file/rename", Controller(api.RenameSkillFile))
 
+	// 阶段六：Web 控制台技能执行历史、统计与重试 (SkillRunsPanel)
+	engine.GET("/api/skills/:id/runs", Controller(api.ListSkillRuns))
+	engine.GET("/api/skills/:id/runs/stats", Controller(api.GetSkillRunStats))
+	engine.GET("/api/skills/:id/runs/:run_id", Controller(api.GetSkillRunDetail))
+	engine.POST("/api/skills/:id/runs/:run_id/retry", Controller(api.RetrySkillRun))
+
+	// 阶段六：开放 API 网关（API Key 独立鉴权与多租户隔离）
+	openApiGroup := engine.Group("/api/v1")
+	openApiGroup.Use(api.ApiKeyAuthMiddleware())
+	{
+		openApiGroup.POST("/skill-runs", api.SubmitSkillRun)
+		openApiGroup.GET("/skill-runs/:run_id", api.GetSkillRun)
+		openApiGroup.POST("/skill-runs/:run_id/cancel", api.CancelSkillRun)
+		openApiGroup.GET("/skills", api.ListApiSkills)
+	}
+
 	testEngine = engine
 }
 

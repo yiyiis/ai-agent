@@ -6,6 +6,7 @@ import (
 
 	"backend/constants"
 	"backend/dal/model"
+	"backend/dao"
 	"backend/pkg/apiwarp"
 	"backend/pkg/db"
 	"backend/pkg/errors"
@@ -22,9 +23,10 @@ func Ping(c *gin.Context) {
 }
 
 type LoginReq struct {
-	Account  string `json:"account"`
-	Username string `json:"username"`
-	Password string `json:"password" binding:"required"`
+	Account     string `json:"account"`
+	Username    string `json:"username"`
+	Password    string `json:"password" binding:"required"`
+	CompanyCode string `json:"company_code"` // 可选企业唯一代号 (如: default, corp_a)
 }
 
 type UserInfoResp struct {
@@ -54,12 +56,24 @@ func UserLogin(ctx context.Context, req *LoginReq) (*apiwarp.CookieResp, error) 
 		return nil, errors.NewMsg("账号或用户名不能为空")
 	}
 
-	// 从 user_info 查询用户（软删除由 gorm.DeletedAt 自动过滤）
+	// 1. 若指定了企业代号，先解析企业 ID
+	var targetCompanyID int64
+	companyCode := strings.TrimSpace(req.CompanyCode)
+	if companyCode != "" {
+		comp, compErr := dao.GetCompanyByCode(ctx, companyCode)
+		if compErr != nil || comp == nil {
+			return nil, errors.NewMsg("指定的企业不存在")
+		}
+		targetCompanyID = comp.ID
+	}
+
+	// 2. 从 user_info 查询用户
 	u := db.Ctx(ctx).UserInfo
-	user, err := u.WithContext(ctx).
-		Where(u.Username.Eq(account)).
-		Or(u.Phone.Eq(account)).
-		First()
+	do := u.WithContext(ctx)
+	if targetCompanyID > 0 {
+		do = do.Where(u.CompanyID.Eq(targetCompanyID))
+	}
+	user, err := do.Where(do.Where(u.Username.Eq(account)).Or(u.Phone.Eq(account))).First()
 	if err != nil || user.Password != req.Password {
 		return nil, errors.NewMsg("账号或密码错误")
 	}
@@ -71,7 +85,7 @@ func UserLogin(ctx context.Context, req *LoginReq) (*apiwarp.CookieResp, error) 
 
 	claims := jwt.TokenClaims{
 		UserID:    int64(user.UserID),
-		CompanyID: 1, // 默认公司/租户 ID
+		CompanyID: user.CompanyID, // 真实绑定的企业租户 ID
 		Name:      name,
 		Username:  user.Username,
 		UserType:  constants.UserType(user.UserType),
@@ -87,7 +101,7 @@ func UserLogin(ctx context.Context, req *LoginReq) (*apiwarp.CookieResp, error) 
 			Token: token,
 			User: UserInfoResp{
 				UserID:    int64(user.UserID),
-				CompanyID: 1,
+				CompanyID: user.CompanyID,
 				Name:      name,
 				Phone:     user.Phone,
 				Username:  user.Username,
@@ -113,17 +127,35 @@ func AuthMe(ctx context.Context, _ *AuthMeReq) (*UserInfoResp, error) {
 }
 
 type UserRegisterReq struct {
-	Username string `json:"username" binding:"required"`
-	Password string `json:"password" binding:"required"`
-	Nickname string `json:"nickname"`
+	Username    string `json:"username" binding:"required"`
+	Password    string `json:"password" binding:"required"`
+	Nickname    string `json:"nickname"`
+	CompanyCode string `json:"company_code"` // 可选企业代号，默认为 default
 }
 
 // UserRegister 用户快速注册 (POST /api/auth/register)
 func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieResp, error) {
+	companyCode := strings.TrimSpace(req.CompanyCode)
+	if companyCode == "" {
+		companyCode = "default"
+	}
+
+	comp, err := dao.GetCompanyByCode(ctx, companyCode)
+	if err != nil || comp == nil {
+		// 若为 default 企业且尚未初始化，主动确保存在
+		if companyCode == "default" {
+			comp, _ = dao.EnsureDefaultCompany(ctx)
+		}
+		if comp == nil {
+			return nil, errors.NewMsg("指定的归属企业不存在")
+		}
+	}
+	targetCompanyID := comp.ID
+
 	u := db.Ctx(ctx).UserInfo
-	count, _ := u.WithContext(ctx).Where(u.Username.Eq(req.Username)).Count()
+	count, _ := u.WithContext(ctx).Where(u.Username.Eq(req.Username), u.CompanyID.Eq(targetCompanyID)).Count()
 	if count > 0 {
-		return nil, errors.NewMsg("该用户名已被注册")
+		return nil, errors.NewMsg("该企业下该用户名已被注册")
 	}
 
 	nickname := req.Nickname
@@ -132,10 +164,11 @@ func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieRes
 	}
 
 	newUser := model.UserInfo{
-		Username: req.Username,
-		Nickname: nickname,
-		Password: req.Password,
-		UserType: int32(constants.User),
+		CompanyID: targetCompanyID,
+		Username:  req.Username,
+		Nickname:  nickname,
+		Password:  req.Password,
+		UserType:  int32(constants.User),
 	}
 	if err := db.Ctx(ctx).UserInfo.WithContext(ctx).Create(&newUser); err != nil {
 		return nil, errors.Join(err, errors.New("create user"), errors.NewMsg("用户创建失败"))
@@ -143,7 +176,7 @@ func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieRes
 
 	claims := jwt.TokenClaims{
 		UserID:    int64(newUser.UserID),
-		CompanyID: 1,
+		CompanyID: targetCompanyID,
 		Name:      nickname,
 		Username:  newUser.Username,
 		UserType:  constants.User,
@@ -159,7 +192,7 @@ func UserRegister(ctx context.Context, req *UserRegisterReq) (*apiwarp.CookieRes
 			Token: token,
 			User: UserInfoResp{
 				UserID:    int64(newUser.UserID),
-				CompanyID: 1,
+				CompanyID: targetCompanyID,
 				Name:      nickname,
 				Username:  newUser.Username,
 			},

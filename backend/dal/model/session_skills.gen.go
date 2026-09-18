@@ -12,7 +12,7 @@ type SessionSkill struct {
 	SessionID           string `gorm:"column:session_id;type:varchar(36);not null;uniqueIndex:uk_session_skill,priority:1;index:idx_session_skills_session_id,priority:1" json:"session_id"`
 	SkillID             int64  `gorm:"column:skill_id;type:bigint;not null;uniqueIndex:uk_session_skill,priority:2;index:idx_session_skills_skill_id,priority:1" json:"skill_id"`
 	PinnedVersionNumber *int64 `gorm:"column:pinned_version_number;type:bigint" json:"pinned_version_number"`
-	Source              string `gorm:"column:source;type:varchar(16);not null;default:full" json:"source"`
+	Source              string `gorm:"column:source;type:varchar(16);not null;default:full;comment:来源：full 常驻全量 | auto 对话按需" json:"source"` // 来源：full 常驻全量 | auto 对话按需
 }
 
 // TableName SessionSkill's table name

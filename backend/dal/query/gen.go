@@ -18,6 +18,7 @@ import (
 var (
 	Q             = new(Query)
 	ApiKey        *apiKey
+	Company       *company
 	Memory        *memory
 	Message       *message
 	Session       *session
@@ -33,6 +34,7 @@ var (
 func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 	*Q = *Use(db, opts...)
 	ApiKey = &Q.ApiKey
+	Company = &Q.Company
 	Memory = &Q.Memory
 	Message = &Q.Message
 	Session = &Q.Session
@@ -49,6 +51,7 @@ func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
 		db:            db,
 		ApiKey:        newApiKey(db, opts...),
+		Company:       newCompany(db, opts...),
 		Memory:        newMemory(db, opts...),
 		Message:       newMessage(db, opts...),
 		Session:       newSession(db, opts...),
@@ -66,6 +69,7 @@ type Query struct {
 	db *gorm.DB
 
 	ApiKey        apiKey
+	Company       company
 	Memory        memory
 	Message       message
 	Session       session
@@ -84,6 +88,7 @@ func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
 		db:            db,
 		ApiKey:        q.ApiKey.clone(db),
+		Company:       q.Company.clone(db),
 		Memory:        q.Memory.clone(db),
 		Message:       q.Message.clone(db),
 		Session:       q.Session.clone(db),
@@ -109,6 +114,7 @@ func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
 		db:            db,
 		ApiKey:        q.ApiKey.replaceDB(db),
+		Company:       q.Company.replaceDB(db),
 		Memory:        q.Memory.replaceDB(db),
 		Message:       q.Message.replaceDB(db),
 		Session:       q.Session.replaceDB(db),
@@ -124,6 +130,7 @@ func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 
 type queryCtx struct {
 	ApiKey        IApiKeyDo
+	Company       ICompanyDo
 	Memory        IMemoryDo
 	Message       IMessageDo
 	Session       ISessionDo
@@ -139,6 +146,7 @@ type queryCtx struct {
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
 		ApiKey:        q.ApiKey.WithContext(ctx),
+		Company:       q.Company.WithContext(ctx),
 		Memory:        q.Memory.WithContext(ctx),
 		Message:       q.Message.WithContext(ctx),
 		Session:       q.Session.WithContext(ctx),

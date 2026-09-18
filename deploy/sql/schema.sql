@@ -9,11 +9,25 @@ CREATE DATABASE IF NOT EXISTS `ai_agent` DEFAULT CHARACTER SET utf8mb4 COLLATE u
 USE `ai_agent`;
 SET FOREIGN_KEY_CHECKS = 0;
 
--- user_info 为 ai-agent 扩展表（mirror 原型无用户表，身份由中台 SSO JWT 签发；
--- 本项目独立部署，web 控制台自带登录/注册，故保留此表）
+DROP TABLE IF EXISTS `companies`;
+CREATE TABLE `companies` (
+  `id` bigint NOT NULL AUTO_INCREMENT COMMENT '企业主键 ID',
+  `name` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '企业/租户名称',
+  `code` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '企业全局唯一英文字符标识/代号',
+  `status` int NOT NULL DEFAULT 1 COMMENT '状态：1正常，0禁用',
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
+  `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `idx_companies_code` (`code`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='企业与租户表';
+
+INSERT INTO `companies` (`id`, `name`, `code`, `status`) VALUES (1, '默认企业', 'default', 1) ON DUPLICATE KEY UPDATE `id`=`id`;
+
+-- user_info 为 ai-agent 用户表，归属于特定 company_id
 DROP TABLE IF EXISTS `user_info`;
 CREATE TABLE `user_info` (
   `user_id` int NOT NULL AUTO_INCREMENT COMMENT '用户id',
+  `company_id` bigint NOT NULL DEFAULT 1 COMMENT '所属企业 ID',
   `username` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '用户名',
   `nickname` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '' COMMENT '昵称',
   `password` varchar(255) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '密码',
@@ -23,7 +37,9 @@ CREATE TABLE `user_info` (
   `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) COMMENT '创建时间',
   `updated_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3) ON UPDATE CURRENT_TIMESTAMP(3) COMMENT '更新时间',
   `deleted_at` datetime(3) DEFAULT NULL COMMENT '删除时间',
-  PRIMARY KEY (`user_id`)
+  PRIMARY KEY (`user_id`),
+  UNIQUE KEY `idx_company_username` (`company_id`, `username`),
+  KEY `idx_user_info_company_id` (`company_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 DROP TABLE IF EXISTS `sessions`;

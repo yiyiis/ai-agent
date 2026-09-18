@@ -28,6 +28,7 @@ var tables = []struct {
 	Model string
 	Opts  []gen.ModelOpt
 }{
+	{"companies", "Company", nil},
 	{"user_info", "UserInfo", []gen.ModelOpt{
 		// deleted_at 生成 gorm.DeletedAt 保持软删除（gen 对软删除无约定式推断，需显式标记）
 		gen.FieldGORMTag("deleted_at", func(tag field.GormTag) field.GormTag {

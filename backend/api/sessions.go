@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"backend/config"
+	"backend/constants"
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/errors"
@@ -79,15 +80,18 @@ func toSessionOut(s *model.Session) SessionOut {
 	}
 }
 
-// loadOwnedSession 加载会话并严格实施用户隔离：
+// loadOwnedSession 加载会话并按三级 RBAC 权限严格实施租户与用户隔离：
 // 不存在与他人会话统一报"会话不存在"，防存在性探测
 func loadOwnedSession(ctx context.Context, identity jwt.TokenClaims, sessionID string) (*model.Session, error) {
 	session, err := dao.GetSessionBySessionID(ctx, sessionID)
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionAccess(identity, session); err != nil {
+		return nil, err
 	}
 	return session, nil
 }
@@ -154,16 +158,33 @@ func CreateSession(ctx context.Context, req *CreateSessionReq) (*SessionOut, err
 	return &out, nil
 }
 
-type ListSessionsReq struct{}
+type ListSessionsReq struct {
+	Scope string `form:"scope"`
+}
 
-// ListSessions 获取当前用户所有会话列表 (GET /api/sessions)
-func ListSessions(ctx context.Context, _ *ListSessionsReq) (*[]SessionOut, error) {
+// ListSessions 获取会话列表 (GET /api/sessions)
+// 支持根据角色与 scope 动态过滤：普通员工仅查本人会话；
+// 企管 scope=all 查本企业全员会话与 API 任务会话；超管 scope=all 查全平台会话。
+func ListSessions(ctx context.Context, req *ListSessionsReq) (*[]SessionOut, error) {
 	identity, err := jwt.GetTokenClaimsFromCtx(ctx)
 	if err != nil || identity.UserID == 0 {
 		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	sessions, _, err := dao.ListSessions(ctx, identity.UserID, identity.CompanyID, 100, 0)
+	queryUserID := identity.UserID
+	queryCompanyID := identity.CompanyID
+
+	if req != nil && req.Scope == "all" {
+		if identity.UserType == constants.SuperManager {
+			queryUserID = 0
+			queryCompanyID = 0
+		} else if identity.UserType == constants.Manager {
+			queryUserID = 0
+			queryCompanyID = identity.CompanyID
+		}
+	}
+
+	sessions, _, err := dao.ListSessions(ctx, queryUserID, queryCompanyID, 100, 0)
 	if err != nil {
 		return nil, err
 	}

@@ -46,7 +46,7 @@ type sessionSkill struct {
 	SessionID           field.String
 	SkillID             field.Int64
 	PinnedVersionNumber field.Int64
-	Source              field.String
+	Source              field.String // 来源：full 常驻全量 | auto 对话按需
 
 	fieldMap map[string]field.Expr
 }

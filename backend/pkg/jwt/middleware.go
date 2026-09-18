@@ -14,8 +14,8 @@ import (
 func CheckLogin(gCtx *gin.Context) {
 	reqPath := gCtx.Request.URL.Path
 
-	// 1. 白名单路径直接放行
-	if slices.Contains(config.IgnorePath, reqPath) || slices.Contains(config.IgnorePath, gCtx.FullPath()) {
+	// 1. 白名单路径与开放 API (/api/v1) 直接放行（开放 API 由专属的 ApiKeyAuthMiddleware 鉴权）
+	if slices.Contains(config.IgnorePath, reqPath) || slices.Contains(config.IgnorePath, gCtx.FullPath()) || strings.HasPrefix(reqPath, "/api/v1") {
 		gCtx.Next()
 		return
 	}

@@ -77,13 +77,16 @@ func SendMessageStream(ctx context.Context, req *SendMessageReq) (*apiwarp.SSEDa
 		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	// 查询目标会话并严格实施用户隔离（不区分不存在与无权，防存在性探测）
+	// 查询目标会话并严格实施租户与用户写入权限校验
 	session, err := dao.GetSessionBySessionID(ctx, req.ID)
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionWriteAccess(identity, session); err != nil {
+		return nil, err
 	}
 
 	// 历史在后台 workload 内加载（用户消息由 agent 落库后自行装配进循环）
@@ -110,8 +113,11 @@ func RegenerateLastMessage(ctx context.Context, req *RegenerateMessageReq) (*api
 	if err != nil {
 		return nil, err
 	}
-	if session == nil || session.UserID != identity.UserID {
+	if session == nil {
 		return nil, errors.NewMsg("会话不存在")
+	}
+	if err := dao.CheckSessionWriteAccess(identity, session); err != nil {
+		return nil, err
 	}
 
 	msgs, err := dao.ListMessagesBySessionID(ctx, req.SessionID)
