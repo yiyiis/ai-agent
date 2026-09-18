@@ -37,14 +37,22 @@ func SyncSkills(ctx context.Context, items []SkillRegistryItem) error {
 		return errors.Join(err, errors.New("查询技能注册表失败"), errors.NewMsg("系统异常"))
 	}
 	byDir := make(map[string]*model.Skill, len(existing))
+	byName := make(map[string]*model.Skill, len(existing))
 	for _, row := range existing {
 		byDir[row.DirName] = row
+		byName[row.Name] = row
 	}
 
 	itemByDir := make(map[string]SkillRegistryItem, len(items))
+	itemByName := make(map[string]SkillRegistryItem, len(items))
 	for _, it := range items {
 		itemByDir[it.DirName] = it
+		itemByName[it.Name] = it
 		row, ok := byDir[it.DirName]
+		if !ok {
+			// 若按目录未匹配，尝试按唯一 Name 匹配（应对目录重命名场景，避免触发唯一键冲突）
+			row, ok = byName[it.Name]
+		}
 		if !ok {
 			tags := tagsPtr(it.TagsJSON)
 			if err := sk.WithContext(ctx).Create(&model.Skill{
@@ -57,10 +65,14 @@ func SyncSkills(ctx context.Context, items []SkillRegistryItem) error {
 			}
 			continue
 		}
-		if row.Name == it.Name && row.Description == it.Description && strEqPtr(row.Tags, tagsPtr(it.TagsJSON)) {
+		if row.Name == it.Name && row.DirName == it.DirName && row.Description == it.Description && strEqPtr(row.Tags, tagsPtr(it.TagsJSON)) {
 			continue // 无变化，免写
 		}
-		updates := map[string]interface{}{"name": it.Name, "description": it.Description}
+		updates := map[string]interface{}{
+			"name":        it.Name,
+			"dir_name":    it.DirName,
+			"description": it.Description,
+		}
 		if tags := tagsPtr(it.TagsJSON); tags != nil {
 			updates["tags"] = *tags
 		}
@@ -73,7 +85,9 @@ func SyncSkills(ctx context.Context, items []SkillRegistryItem) error {
 	var staleIDs []int64
 	for _, row := range existing {
 		if _, ok := itemByDir[row.DirName]; !ok {
-			staleIDs = append(staleIDs, row.ID)
+			if _, okByName := itemByName[row.Name]; !okByName {
+				staleIDs = append(staleIDs, row.ID)
+			}
 		}
 	}
 	if len(staleIDs) > 0 {
