@@ -94,42 +94,19 @@ func loadTurnSkills(ctx context.Context, session *model.Session) *turnSkills {
 		return ts
 	}
 
-	if len(autoRows) > 0 {
-		for _, row := range autoRows {
-			if _, exists := ts.enabledByName[row.Skill.Name]; exists {
-				continue // 去重：已全量挂载的剔除
-			}
-			if row.Skill.Confidential && (row.Skill.OwnerID == 0 || row.Skill.OwnerID != session.UserID) {
-				continue
-			}
-			item := catalogItem{
-				Entry: skill.Entry{DirName: row.Skill.DirName, Name: row.Skill.Name, Description: row.Skill.Description},
-				ID:    row.Skill.ID,
-			}
-			ts.catalog = append(ts.catalog, item)
-			ts.catalogByName[item.Name] = item
+	for _, row := range autoRows {
+		if _, exists := ts.enabledByName[row.Skill.Name]; exists {
+			continue // 去重：已全量挂载的剔除
 		}
-	} else {
-		// 降级兜底：若会话未单独配置按需列表，但开启了 auto_skill，则全库未启用技能进 Catalog
-		all, err := dao.ListSkills(ctx)
-		if err != nil {
-			slog.Warn("加载技能目录失败，本轮不提供按需装载", "session", session.SessionID, "err", errors.Stack(err))
-			return ts
+		if row.Skill.Confidential && (row.Skill.OwnerID == 0 || row.Skill.OwnerID != session.UserID) {
+			continue
 		}
-		for _, s := range all {
-			if _, exists := ts.enabledByName[s.Name]; exists {
-				continue
-			}
-			if s.Confidential && (s.OwnerID == 0 || s.OwnerID != session.UserID) {
-				continue
-			}
-			item := catalogItem{
-				Entry: skill.Entry{DirName: s.DirName, Name: s.Name, Description: s.Description},
-				ID:    s.ID,
-			}
-			ts.catalog = append(ts.catalog, item)
-			ts.catalogByName[item.Name] = item
+		item := catalogItem{
+			Entry: skill.Entry{DirName: row.Skill.DirName, Name: row.Skill.Name, Description: row.Skill.Description},
+			ID:    row.Skill.ID,
 		}
+		ts.catalog = append(ts.catalog, item)
+		ts.catalogByName[item.Name] = item
 	}
 
 	return ts

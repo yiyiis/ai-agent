@@ -103,6 +103,15 @@ func TestLoadSkillAutoMount(t *testing.T) {
 	session.AutoSkill = true
 	t.Cleanup(func() { sandbox.Close(session.SessionID) })
 
+	q := db.Ctx(ctx)
+	skillRow, err := q.Skill.WithContext(ctx).Where(q.Skill.DirName.Eq("fetch-url")).First()
+	if err != nil {
+		t.Fatalf("query skill: %v", err)
+	}
+	if err := dao.ReplaceSessionSkills(ctx, session.SessionID, []dao.SessionSkillItem{{SkillID: skillRow.ID, Source: "auto"}}); err != nil {
+		t.Fatalf("configure auto skill: %v", err)
+	}
+
 	fp := &fakeProvider{rounds: [][]provider.StreamChunk{
 		{ // 第 1 轮：装载技能 + 顺手验证同批工具已拿得到 secrets
 			{ToolCalls: []provider.ToolCallDelta{
@@ -200,6 +209,15 @@ func TestLoadSkillUnknownName(t *testing.T) {
 	}
 	session.AutoSkill = true
 
+	q := db.Ctx(ctx)
+	skillRow, err := q.Skill.WithContext(ctx).Where(q.Skill.DirName.Eq("fetch-url")).First()
+	if err != nil {
+		t.Fatalf("query skill: %v", err)
+	}
+	if err := dao.ReplaceSessionSkills(ctx, session.SessionID, []dao.SessionSkillItem{{SkillID: skillRow.ID, Source: "auto"}}); err != nil {
+		t.Fatalf("configure auto skill: %v", err)
+	}
+
 	fp := &fakeProvider{rounds: [][]provider.StreamChunk{
 		{ // 第 1 轮：模型叫错名字
 			{ToolCalls: []provider.ToolCallDelta{
@@ -228,8 +246,8 @@ func TestLoadSkillUnknownName(t *testing.T) {
 		}
 	}
 	rows, err := dao.ListSessionSkills(ctx, session.SessionID)
-	if err != nil || len(rows) != 0 {
-		t.Fatalf("未命中不应落关联: %v %+v", err, rows)
+	if err != nil || len(rows) != 1 || rows[0].Source != "auto" {
+		t.Fatalf("未命中不应额外落库或晋升关联: %v %+v", err, rows)
 	}
 }
 
@@ -286,3 +304,39 @@ func TestEnabledSkillMountedAndPrompted(t *testing.T) {
 		t.Fatalf("启用技能未在 turn 开始挂载: %v", err)
 	}
 }
+
+// TestEmptyAutoRowsDoesNotInjectCatalog 当会话未勾选任何 auto 技能时，
+// 即使开启了 auto_skill，也不应将全库技能塞入 Catalog，更不暴露 load_skill
+func TestEmptyAutoRowsDoesNotInjectCatalog(t *testing.T) {
+	ctx := setupDB(t)
+	seedSkillLib(t, ctx)
+
+	session := newTestSession(t, ctx)
+	if err := dao.UpdateSession(ctx, session.SessionID, map[string]interface{}{"auto_skill": true}); err != nil {
+		t.Fatalf("enable auto_skill: %v", err)
+	}
+	session.AutoSkill = true
+
+	fp := &fakeProvider{rounds: [][]provider.StreamChunk{
+		{{Content: "没有按需技能，直接回答"}, {FinishReason: "stop"}},
+	}}
+	cp := &capturingProvider{fakeProvider: fp}
+
+	if err := Run(ctx, Deps{Provider: cp}, session, nil, "你好", nil, func(ev Event) {}); err != nil {
+		t.Fatalf("run: %v", err)
+	}
+
+	req := cp.firstReq()
+	sys := req.Messages[0].Content
+	if strings.Contains(sys, "Skill 目录（按需加载）") {
+		t.Fatalf("未配置 auto 技能时，不应向 prompt 注入技能目录:\n%s", sys)
+	}
+	for _, s := range req.Tools {
+		if m, ok := s.(map[string]any); ok {
+			if fn, ok := m["function"].(map[string]any); ok && fn["name"] == tools.LoadSkillTool {
+				t.Fatal("未配置 auto 技能时，不应向模型暴露 load_skill 工具")
+			}
+		}
+	}
+}
+

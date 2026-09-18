@@ -42,8 +42,8 @@ flowchart TD
    - 任何已经在 `ts.enabled`（已全量挂载）中的技能，**绝对不能**重复进入 `ts.catalog`。
 2. **机密权限过滤**：
    - 若技能标记为 `confidential = true`，且当前用户非创建者所有者，则该技能禁止进入候选目录。
-3. **全局智能推荐兜底**：
-   - 当 `session.auto_skill = true` 且 `autoRows` 为空时，系统自动退化为「全库可见技能兜底候选」，将所有公开且未启用的技能纳入 Catalog。
+3. **按需严格匹配原则（无未授权侵入）**：
+   - Catalog 候选集严格且仅来自用户在会话中显式配置为 `auto` 的技能记录（`autoRows`）。若会话未配置任何 `auto` 技能（`autoRows` 为空），则 Catalog 保持为空，Prompt 不注入目录段，亦不暴露 `load_skill` 工具。系统绝不越俎代庖将全库未勾选技能推入，充分尊重用户的配置意图。
 
 ---
 

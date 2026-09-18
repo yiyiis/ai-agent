@@ -180,10 +180,10 @@ ALTER TABLE `sessions`
 ```
 
 - **`auto_skill = 1`（默认开启）**：
-  - 如果 `session_skills` 中存在 `source = 'auto'` 的记录，则将其装配为 Catalog 候选集；
-  - 若 `session_skills` 中无任何记录，则将全库所有对该用户可见的技能作为兜底 Catalog 候选集提供。
-- **`auto_skill = 0`（关闭）**：
-  - 彻底停用按需加载机制，不向 System Prompt 注入目录段，且完全**隐藏** `load_skill` 工具调用定义。会话仅运行 `full` 或已装载的技能。
+  - 会话允许智能按需加载能力。系统将 `session_skills` 中用户显式勾选为 `source = 'auto'` 的技能装配为 Catalog 候选集；
+  - 若 `session_skills` 中未配置任何 `source = 'auto'` 技能，则 Catalog 为空，系统不会越权将全库技能自动推入，保持干净简洁。
+- **`auto_skill = 0`（总开关关闭）**：
+  - 彻底停用按需加载机制。即使 `session_skills` 中存在 `auto` 记录，也一律不装配 Catalog 候选集，不向 System Prompt 注入目录段，且完全**隐藏** `load_skill` 工具调用定义。会话仅运行 `full` 或此前已装载的技能。
 
 ---
 
