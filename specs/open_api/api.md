@@ -35,16 +35,16 @@
 
 #### 请求字段详解
 - **`skill_name`** (`string`, 必填)：需要调用的技能名称，必须严格匹配 `skills.name`。
-- **`params`** (`object`, 可选)：传递给技能的输入参数，必须符合该技能在 `SKILL.md` 或 `manifest.json` 中声明的 `parameters` 模式。
-- **`mode`** (`string`, 可选)：执行模式，默认 `"auto"`：
-  - `"auto"`：由技能的 `manifest.json` 自行决定；
+- **`params`** (`object`, 可选)：传递给技能的输入参数。若该技能包含 `manifest.json`，网关层将严格依据 `input_schema` 执行强校验（必填项 `required` 缺漏、数据类型不符直接报 400 拦截）。
+- **`mode`** (`string`, 可选)：执行模式：
+  - 不传（默认）：自动采用技能 `manifest.default_mode`（未配置则默认 `"script"`）；
   - `"script"`：强制以纯脚本模式在隔离沙箱中执行，零大模型开销，不创建会话记录；
   - `"llm"`：强制拉起轻量大模型 ReAct Agent 执行（创建会话并写入消息记录）。
 - **`model`** (`string`, 可选)：当以 LLM 模式执行时的模型覆盖选项；不填则遵循技能自身配置或后端默认模型。
 - **`user_id`** (`int64`, 可选)：**有头模式与无头模式区分开关**：
   - `user_id = 0`（或不传，默认）：**大模型无头模式**。会话以系统无头账号（`user_id = 0`）运行，不污染普通员工的“我的对话”列表，仅在企业管理员全量审计视图中可见。
   - `user_id > 0`：**大模型有头模式**。外部业务系统代替企业指定员工（必须通过租户所属检验）发起会话，会话挂载于该员工名下，员工登录网页端后可在左侧列表直接查看、追溯并继续输入提问。
-- **`max_attempts`** (`int`, 可选)：最大允许尝试次数，默认 `1`，上限 `5`。
+- **`max_attempts`** (`int`, 可选)：最大允许尝试次数，默认取 `manifest.retry.max_attempts` 或 `1`，上限 `5`。
 - **`idempotency_key`** (`string`, 可选)：客户端传入的幂等键（防网络重试导致的重复提交）。若已存在相同 Key 且未终结的任务，直接返回已存在的任务信息。
 
 #### 响应示例 (`201 Created` / `200 OK`)
@@ -62,7 +62,11 @@
 ```
 
 #### 常见异常状态码
-- **`400 Bad Request`**：技能不存在、参数不合规范、`mode` 非法、或指定的 `user_id` 不属于当前企业。
+- **`400 Bad Request`**：
+  - 目标技能不存在；
+  - 技能未启用 API 模式（`manifest.api_enabled = false`）；
+  - 入参不符合契约（缺少必填字段或类型不匹配，如 `缺少必填参数: url`）；
+  - `mode` 非法或指定的 `user_id` 不属于当前企业。
 - **`401 Unauthorized`**：缺少 API Key 或 API Key 无效/已停用。
 - **`403 Forbidden`**：该 API Key 的白名单（`allowed_skills`）中未包含指定的技能。
 - **`429 Too Many Requests`**：当前 Key 的并发在跑任务数已达上限（`max_concurrent`）。
@@ -98,14 +102,12 @@
     "artifacts": [
       {
         "name": "hn_content.md",
-        "url": "https://cos.myqcloud.com/artifacts/run_7c9b8e12/hn_content.md"
+        "url": "/api/uploads/ab12cd34_hn_content.md",
+        "filename": "hn_content.md",
+        "size": 15820,
+        "content_type": "text/markdown"
       }
-    ],
-    "stderr_tail": "",
-    "attempt": 1,
-    "max_attempts": 3,
-    "failure_kind": null,
-    "attempts": []
+    ]
   },
   "msg": "success"
 }
@@ -122,7 +124,44 @@
 
 ### 1.4 查询当前 Key 可用的技能清单 (List Available Skills)
 - **路径**：`GET /api/v1/skills`
-- **说明**：列出经过当前 API Key 的 `allowed_skills` 白名单过滤后、且在元数据中声明了 `api_enabled = true` 的全部外部可调用技能清单及它们的入参 Schema。
+- **说明**：列出经过当前 API Key 的 `allowed_skills` 白名单过滤后、且在元数据中声明了 `api_enabled = true` 的全部外部可调用技能清单，包含入参 Schema 与完整 Manifest 视图。
+- **响应示例** (`200 OK`)：
+```json
+{
+  "code": 0,
+  "data": [
+    {
+      "name": "fetch-url",
+      "description": "抓取目标网页并输出纯净的正文或 Markdown 内容",
+      "dir_name": "fetch-url",
+      "tags": ["web", "scraper"],
+      "parameters": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": { "type": "string", "description": "完整网页网址" }
+        }
+      },
+      "manifest": {
+        "api_enabled": true,
+        "version": "1.0",
+        "command": "python skills/{dir}/scripts/fetch.py {url}",
+        "stdin": "none",
+        "timeout_sec": 30,
+        "default_mode": "sync",
+        "input_schema": {
+          "type": "object",
+          "required": ["url"],
+          "properties": {
+            "url": { "type": "string", "description": "完整网页网址" }
+          }
+        }
+      }
+    }
+  ],
+  "msg": "success"
+}
+```
 
 ---
 

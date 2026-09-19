@@ -1,11 +1,14 @@
 package dispatcher
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"os"
+	"path"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -16,6 +19,7 @@ import (
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/skill"
+	"backend/pkg/storage"
 	"backend/pkg/tools"
 )
 
@@ -84,6 +88,9 @@ func (e *RunExecutor) executeScript(ctx context.Context, run *model.SkillRun, sk
 	secrets := skill.ReadSecrets(dirName)
 	envList := tools.SortedEnv(secrets)
 
+	// 读取技能清单契约 (manifest.json)
+	manifest, _ := skill.ReadManifest(dirName)
+
 	// 注入环境变量
 	paramsJSON := "{}"
 	if run.Params != nil && strings.TrimSpace(*run.Params) != "" {
@@ -94,13 +101,15 @@ func (e *RunExecutor) executeScript(ctx context.Context, run *model.SkillRun, sk
 		"SKILL_NAME="+run.SkillName,
 		"SKILL_DIR="+dirName,
 		"SKILL_RUN_ID="+run.RunID,
+		"SKILL_RUN_ATTEMPT="+fmt.Sprintf("%d", run.Attempt),
 	)
 
-	// 3. 构建执行命令
-	cmd := e.detectCommand(run, dirName, paramsJSON)
-
-	// 4. 执行命令并记录耗时
+	// 3. 构建执行命令与参数输入管道
+	workdir := path.Join("workdir", run.RunID)
 	timeoutSec := 120
+	if manifest != nil && manifest.TimeoutSec > 0 {
+		timeoutSec = manifest.TimeoutSec
+	}
 	if run.ExecContext != nil {
 		var ec map[string]any
 		if json.Unmarshal([]byte(*run.ExecContext), &ec) == nil {
@@ -110,10 +119,54 @@ func (e *RunExecutor) executeScript(ctx context.Context, run *model.SkillRun, sk
 		}
 	}
 
+	var explicitCmd string
+	if run.ExecContext != nil {
+		var ec map[string]any
+		if json.Unmarshal([]byte(*run.ExecContext), &ec) == nil {
+			if c, ok := ec["command"].(string); ok && strings.TrimSpace(c) != "" {
+				explicitCmd = c
+			}
+		}
+	}
+
+	var cmd string
+	if explicitCmd != "" {
+		cmd = explicitCmd
+	} else if manifest != nil && strings.TrimSpace(manifest.Command) != "" {
+		// 标准 manifest 契约模式：占位符替换
+		cmdTpl := strings.ReplaceAll(manifest.Command, "/skills/", "skills/")
+		vars := map[string]string{
+			"dir":     dirName,
+			"workdir": workdir,
+			"run_id":  run.RunID,
+		}
+		if run.Params != nil && strings.TrimSpace(*run.Params) != "" {
+			var pMap map[string]any
+			if json.Unmarshal([]byte(*run.Params), &pMap) == nil {
+				for k, v := range pMap {
+					vars[k] = fmt.Sprintf("%v", v)
+				}
+			}
+		}
+		cmdBody := skill.RenderTemplate(cmdTpl, vars)
+
+		if manifest.Stdin != "none" {
+			// 将 params JSON 安全落盘至工作区并通过 stdin 重定向喂入
+			inputRel := path.Join(workdir, "input.json")
+			_ = sandbox.WriteFile(ctx, sessionID, inputRel, []byte(paramsJSON))
+			cmd = fmt.Sprintf("mkdir -p %s && %s < %s", workdir, cmdBody, inputRel)
+		} else {
+			cmd = fmt.Sprintf("mkdir -p %s && %s", workdir, cmdBody)
+		}
+	} else {
+		// 向下兼容：无 manifest 时走原有探测逻辑
+		cmd = e.detectCommand(run, dirName, paramsJSON)
+	}
+
 	res := sandbox.RunBash(ctx, sessionID, cmd, envList, timeoutSec)
 	dur := time.Since(start).Milliseconds()
 
-	// 5. 分析执行结果与错误分类
+	// 4. 分析执行结果与错误分类
 	if res.Err != nil || res.ExitCode != 0 || res.Killed {
 		fKind := ClassifyFailure(res.Err, res.Stdout, res.Stderr, res.ExitCode, res.Killed)
 		err := res.Err
@@ -131,17 +184,8 @@ func (e *RunExecutor) executeScript(ctx context.Context, run *model.SkillRun, sk
 		}
 	}
 
-	// 6. 成功产出解析
-	var resObj map[string]any
-	stdoutTrimmed := strings.TrimSpace(res.Stdout)
-	if strings.HasPrefix(stdoutTrimmed, "{") && strings.HasSuffix(stdoutTrimmed, "}") {
-		_ = json.Unmarshal([]byte(stdoutTrimmed), &resObj)
-	}
-	if resObj == nil {
-		resObj = map[string]any{
-			"output": stdoutTrimmed,
-		}
-	}
+	// 5. 产物与结构化结果抽取 (日志与结果彻底解耦)
+	resObj, artifacts := e.extractResults(ctx, sessionID, manifest, res.Stdout, workdir)
 
 	return &ExecResult{
 		Stdout:     res.Stdout,
@@ -149,7 +193,148 @@ func (e *RunExecutor) executeScript(ctx context.Context, run *model.SkillRun, sk
 		ExitCode:   0,
 		DurationMs: dur,
 		ResultJSON: resObj,
+		Artifacts:  artifacts,
 	}
+}
+
+var defaultResultRe = regexp.MustCompile(`(?s)\[API_RESULT_BEGIN\]\s*(.+?)\s*\[API_RESULT_END\]`)
+
+// extractResults 依据 manifest.result_extractors 抽取结构化结果与文件产物
+func (e *RunExecutor) extractResults(
+	ctx context.Context,
+	sessionID string,
+	manifest *skill.Manifest,
+	stdout, workdir string,
+) (map[string]any, []map[string]any) {
+	resObj := make(map[string]any)
+	var artifacts []map[string]any
+
+	if manifest != nil && len(manifest.ResultExtractors) > 0 {
+		for _, ext := range manifest.ResultExtractors {
+			name := ext.Name
+			if name == "" {
+				name = "result"
+			}
+			typ := strings.ToLower(ext.Type)
+
+			switch typ {
+			case "regex_stdout":
+				patStr := ext.Pattern
+				if ext.DotAll && !strings.HasPrefix(patStr, "(?s)") {
+					patStr = "(?s)" + patStr
+				}
+				re, err := regexp.Compile(patStr)
+				if err != nil {
+					continue
+				}
+				allMatches := re.FindAllStringSubmatch(stdout, -1)
+				if len(allMatches) > 0 {
+					lastMatch := allMatches[len(allMatches)-1]
+					grp := ext.Group
+					if grp <= 0 {
+						grp = 1
+					}
+					if len(lastMatch) > grp {
+						captured := strings.TrimSpace(lastMatch[grp])
+						if ext.AsJSON {
+							var parsed any
+							if json.Unmarshal([]byte(captured), &parsed) == nil {
+								resObj[name] = parsed
+							} else {
+								resObj[name] = captured
+							}
+						} else {
+							resObj[name] = captured
+						}
+					}
+				}
+
+			case "regex_all_stdout":
+				patStr := ext.Pattern
+				if ext.DotAll && !strings.HasPrefix(patStr, "(?s)") {
+					patStr = "(?s)" + patStr
+				}
+				re, err := regexp.Compile(patStr)
+				if err != nil {
+					continue
+				}
+				allMatches := re.FindAllStringSubmatch(stdout, -1)
+				var items []any
+				grp := ext.Group
+				if grp <= 0 {
+					grp = 1
+				}
+				for _, m := range allMatches {
+					if len(m) > grp {
+						captured := strings.TrimSpace(m[grp])
+						if ext.AsJSON {
+							var parsed any
+							if json.Unmarshal([]byte(captured), &parsed) == nil {
+								items = append(items, parsed)
+							} else {
+								items = append(items, captured)
+							}
+						} else {
+							items = append(items, captured)
+						}
+					}
+				}
+				resObj[name] = items
+
+			case "file":
+				fileRel := strings.ReplaceAll(ext.Path, "{workdir}", workdir)
+				data, readErr := sandbox.ReadFile(ctx, sessionID, fileRel)
+				if readErr == nil && len(data) > 0 {
+					if ext.Upload {
+						baseName := filepath.Base(fileRel)
+						if obj, upErr := storage.Default().Put(ctx, baseName, bytes.NewReader(data), int64(len(data)), ""); upErr == nil {
+							artifacts = append(artifacts, map[string]any{
+								"name":         name,
+								"url":          obj.URL,
+								"filename":     obj.Filename,
+								"size":         obj.Size,
+								"content_type": obj.ContentType,
+							})
+							resObj[name] = obj.URL
+						}
+					} else if ext.AsJSON {
+						var parsed any
+						if json.Unmarshal(data, &parsed) == nil {
+							resObj[name] = parsed
+						} else {
+							resObj[name] = string(data)
+						}
+					} else {
+						resObj[name] = string(data)
+					}
+				}
+			}
+		}
+	}
+
+	// 未配置抽取器或抽取结果为空时，走通用默认兜底逻辑
+	if len(resObj) == 0 {
+		stdoutTrimmed := strings.TrimSpace(stdout)
+		if m := defaultResultRe.FindStringSubmatch(stdoutTrimmed); len(m) > 1 {
+			captured := strings.TrimSpace(m[1])
+			var parsed map[string]any
+			if json.Unmarshal([]byte(captured), &parsed) == nil {
+				resObj = parsed
+			} else {
+				resObj = map[string]any{"output": captured}
+			}
+		} else if strings.HasPrefix(stdoutTrimmed, "{") && strings.HasSuffix(stdoutTrimmed, "}") {
+			_ = json.Unmarshal([]byte(stdoutTrimmed), &resObj)
+		}
+	}
+
+	if len(resObj) == 0 {
+		resObj = map[string]any{
+			"output": strings.TrimSpace(stdout),
+		}
+	}
+
+	return resObj, artifacts
 }
 
 // detectCommand 探测或构造技能的调用命令
@@ -290,7 +475,22 @@ func (e *RunExecutor) executeLLM(ctx context.Context, run *model.SkillRun, sk *m
 	if run.Params != nil && strings.TrimSpace(*run.Params) != "" {
 		paramsStr = *run.Params
 	}
+
 	userPrompt := fmt.Sprintf("请执行技能 `%s`，输入参数为：%s", run.SkillName, paramsStr)
+
+	// 若配置了 manifest.llm_prompt_template，使用模板渲染专属提示词
+	manifest, _ := skill.ReadManifest(dirName)
+	if manifest != nil && strings.TrimSpace(manifest.LLMPromptTemplate) != "" {
+		vars := map[string]string{
+			"skill_name":  run.SkillName,
+			"skill_dir":   dirName,
+			"params_json": paramsStr,
+			"run_id":      run.RunID,
+			"session_id":  sessionID,
+		}
+		userPrompt = skill.RenderTemplate(manifest.LLMPromptTemplate, vars)
+	}
+
 	var finalAnswer strings.Builder
 	emit := func(ev agent.Event) {
 		if ev.Type == "answer" {

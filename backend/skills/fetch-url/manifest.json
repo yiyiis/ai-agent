@@ -1,0 +1,23 @@
+{
+  "api_enabled": true,
+  "version": "1.0",
+  "description": "抓取目标网页并输出纯净的正文或 Markdown 内容",
+  "command": "python skills/{dir}/scripts/fetch.py {url}",
+  "stdin": "none",
+  "timeout_sec": 30,
+  "default_mode": "sync",
+  "input_schema": {
+    "type": "object",
+    "required": ["url"],
+    "properties": {
+      "url": {
+        "type": "string",
+        "description": "需要抓取的完整网页地址，必须以 http:// 或 https:// 开头"
+      },
+      "mode": {
+        "type": "string",
+        "description": "抓取模式：jina 或 raw，默认 jina"
+      }
+    }
+  }
+}

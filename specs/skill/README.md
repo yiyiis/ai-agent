@@ -36,6 +36,7 @@ Skill（技能）模块是平台赋予大语言模型（LLM）调用外部专业
 skills/
 ├── <dir_name>/
 │   ├── SKILL.md                 # [必需] 入口声明文件 (YAML Frontmatter + Markdown)
+│   ├── manifest.json            # [可选/开放API推荐] 对外 API 契约声明文件 (命令模板/入参Schema/产物抽取)
 │   ├── scripts/                 # [推荐] 可执行脚本目录 (Python / Shell / Node.js)
 │   │   ├── main.py
 │   │   └── helper.sh
@@ -65,6 +66,63 @@ parameters:                      # 可选，供开放 API 任务驱动入参定�
 
 环境变量 `BRAVE_API_KEY` 已自动注入进程环境中，无需手动传递。
 ```
+
+### 2.2 manifest.json 对外 API 执行契约规范
+
+当 Skill 需要对外通过开放 API（`POST /api/v1/skill-runs`）调用时，推荐在技能根目录下提供 `manifest.json`，实现**零代码改动接入、安全参数注入与产物解耦抽取**：
+
+```json
+{
+  "api_enabled": true,
+  "version": "1.0",
+  "description": "抓取目标网页并输出纯净的正文或 Markdown 内容",
+  "command": "python skills/{dir}/scripts/fetch.py --workdir {workdir} {url}",
+  "stdin": "params_json",
+  "timeout_sec": 30,
+  "default_mode": "sync",
+  "input_schema": {
+    "type": "object",
+    "required": ["url"],
+    "properties": {
+      "url": { "type": "string", "description": "需要抓取的目标页面 URL" },
+      "timeout": { "type": "integer", "default": 10, "description": "超时秒数" }
+    }
+  },
+  "result_extractors": [
+    {
+      "name": "data",
+      "type": "regex_stdout",
+      "pattern": "\\[API_RESULT_BEGIN\\]\\s*(.+?)\\s*\\[API_RESULT_END\\]",
+      "group": 1,
+      "dotall": true,
+      "as_json": true
+    },
+    {
+      "name": "report",
+      "type": "file",
+      "path": "{workdir}/*.xlsx",
+      "upload": true
+    }
+  ],
+  "llm_enabled": false,
+  "llm_prompt_template": "请执行技能 {skill_name}，参数为：{params_json}",
+  "retry": {
+    "max_attempts": 3,
+    "on": ["sandbox", "timeout", "script_error"],
+    "backoff_sec": 10
+  }
+}
+```
+
+#### 核心字段释义：
+- **`api_enabled`** (`bool`)：硬门槛。若为 `false`，开放 API 网关直接拦截拒绝调用（返回 400）。
+- **`command`** (`string`)：沙箱执行命令模板。支持 `{dir}`, `{workdir}`, `{run_id}` 及入参占位符（如 `{url}`）。
+- **`stdin`** (`string`)：`"params_json" | "none"`。若为 `"params_json"`，runner 将调用方 `params` 自动落盘至 `{workdir}/input.json` 并通过标准输入管道 `< input.json` 喂给脚本，杜绝 Shell 转义与注入漏洞。
+- **`input_schema`** (`object`)：标准 JSON-Schema。在网关层执行入参强校验，缺必填项直接拦截。
+- **`result_extractors`** (`array`)：日志与结果解耦抽取器：
+  - `regex_stdout`：正则抓取标准输出中的结构化段落（如被 `[API_RESULT_BEGIN]...[API_RESULT_END]` 包裹的内容），支持 `as_json: true` 自动反序列化；
+  - `file`：从沙箱工作区抽取文件产物，支持 `upload: true` 自动上传至对象存储并回填公开 URL。
+- **`llm_prompt_template`** (`string`)：大模型模式下的定制化 Prompt 模板，支持替换 `{params_json}`, `{skill_name}`, `{workdir}`。
 
 ---
 

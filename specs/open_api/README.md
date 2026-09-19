@@ -31,6 +31,9 @@
 5. **全链路审计与运维可见性 (Audit & Observability)**  
    `skill_runs` 表留存完整快照，包含入参快照、最终产物、耗时、多轮重试快照（`attempts`）与控制台末尾日志。
 
+6. **契约驱动与解耦抽取 (Manifest-driven Contract & Decoupled Extraction)**  
+   全面引入 `manifest.json` 契约体系：网关层依据 `input_schema` 前置强校验拦截非法入参（返回 400）；执行引擎通过标准输入（`stdin: params_json`）管道向沙箱安全注参，并利用结构化抽取器（`result_extractors` 正则/文件）使纯净业务数据与脚本调试日志彻底解耦，同时对无 manifest 历史技能保持 100% 平滑降级兼容。
+
 ---
 
 ## 2. 总体架构拓扑图
@@ -44,7 +47,9 @@ flowchart TD
         KeyAuth -->|有效| TenantCheck[公司/租户隔离校验]
         TenantCheck --> WhitelistCheck{技能白名单匹配?}
         WhitelistCheck -->|拒绝| Err403[返回 403 Forbidden]
-        WhitelistCheck -->|通过| ConcurrencyGuard{并发数 < max_concurrent?}
+        WhitelistCheck -->|通过| ManifestCheck{manifest: api_enabled & input_schema 校验}
+        ManifestCheck -->|未启用或参数不合规| Err400[返回 400 Bad Request]
+        ManifestCheck -->|通过| ConcurrencyGuard{并发数 < max_concurrent?}
         ConcurrencyGuard -->|超限| Err429[返回 429 Too Many Requests]
     end
 
@@ -55,12 +60,12 @@ flowchart TD
         CreateRun --> WorkerPool[分布式/后台 Worker 工作池]
         
         WorkerPool --> ModeCheck{执行模式 mode}
-        ModeCheck -->|script (纯脚本)| SandboxExec[沙箱直接执行 Python/Bash 脚本]
+        ModeCheck -->|script (纯脚本)| SandboxExec[沙箱执行: stdin 管道注入 input.json / 占位符渲染]
         ModeCheck -->|llm (模型推理)| LLMBranch{有头 or 无头?}
         LLMBranch -->|有头 user_id > 0| HeadedExec[物化真实用户 Session 并执行 Agent]
         LLMBranch -->|无头 user_id = 0| HeadlessExec[物化无头审计 Session 并执行 Agent]
         
-        SandboxExec --> InspectResult[抓取标准输出/产出物 Artifacts]
+        SandboxExec --> InspectResult[结果抽取器: 正则提取 API_RESULT / 文件上传 OSS]
         HeadedExec --> InspectResult
         HeadlessExec --> InspectResult
     end

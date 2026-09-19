@@ -61,20 +61,28 @@ WHERE api_key_id = ? AND status IN ('pending', 'running');
 
 ## 3. 双模执行引擎 (Execution Modes)
 
-技能在设计时可以通过 `SKILL.md` frontmatter 或配套 `manifest.json` 声明其执行倾向：
+技能在设计时可以通过 `SKILL.md` frontmatter 或配套 `manifest.json` 声明其执行倾向，调度执行器（`RunExecutor`）依据契约动态分流：
 
 ### 3.1 纯脚本直连模式 (`mode = script`)
 适用于确定性强、计算型或已有成熟代码的技能（如文本格式化、微积分计算、爬虫脚本）：
-1. **沙箱分配**：为该任务申请独立隔离沙箱环境；
-2. **参数注入**：输入参数 `params` 转换为 JSON，通过环境变量 `SKILL_PARAMS_JSON` 或命令行 `--params '<json>'` 注入脚本进程；
-3. **机密合并**：从宿主机 `.secrets/<dir_name>.env` 读取该技能私密配置注入进程环境；
-4. **输出解析**：脚本约定在标准输出（Stdout）打印 JSON 结果，调度器捕获后直接解析为 `result` 实体；生成的临时文件从沙箱指定目录打包提取为 `artifacts`。
+1. **沙箱分配与工作区隔离**：为该次任务分配独立沙箱会话（`run_<run_id>`），并在沙箱内建立独占工作目录 `workdir/<run_id>`；
+2. **契约化命令与管道注参 (Manifest-Driven)**：
+   - **命令模板渲染**：若技能包含 `manifest.json`，命令模板中的 `{dir}`、`{workdir}`、`{run_id}` 及入参占位符（如 `{url}`）将自动动态插值渲染；
+   - **安全标准输入通道 (`stdin: "params_json"`)**：调用方 `params` 自动落盘至沙箱工作区 `workdir/<run_id>/input.json`，并以 `< input.json` 喂给脚本进程，彻底杜绝命令行参数空格截断与注入隐患；
+   - **环境变量双通道**：同时注入 `SKILL_PARAMS_JSON`、`SKILL_NAME`、`SKILL_RUN_ID` 与 `SKILL_RUN_ATTEMPT`；
+   - **向下平滑兼容 (Fallback)**：若显式指定了 `command` 覆盖，或技能未提供 `manifest.json`，自动降级走原有 `detectCommand` 与参数探测逻辑。
+3. **机密注入**：从宿主机 `.secrets/<dir_name>.env` 读取该技能私密配置并合并注入环境变量；
+4. **日志与结果彻底解耦抽取 (`result_extractors`)**：
+   - **`regex_stdout`**：通过正则提取标记段（如 `[API_RESULT_BEGIN]...[API_RESULT_END]`），若设置 `as_json: true` 则直接反序列化为对象存入 `result`。即使脚本输出大量控制台日志、Warning 或调试信息，也绝不污染最终结构化结果；
+   - **`file`**：抽取指定产物文件（如 `{workdir}/*.xlsx`），支持 `upload: true` 自动上传至对象存储（COS/Local），并在 `artifacts[]` 中记录下载 URL、文件名与大小。
 
 ### 3.2 大模型 Agent 编排模式 (`mode = llm`)
 适用于需要语义理解、多步骤推理或模糊指令的技能（如合同审查、多源信息归纳）：
-1. 调度器初始化一个专有临时会话，将该技能以 `full` 挂载；
-2. 构造针对性系统任务提示词，将 `params` 作为用户需求输入给大模型；
-3. 模型在沙箱中按需调用脚本工具并输出最终总结，整个过程结构化收敛为 `result`。
+1. 调度器初始化专有会话（`run_<run_id>`），将该技能全量挂载进沙箱；
+2. **模板化任务提示词**：
+   - 若 `manifest.json` 声明了 `llm_prompt_template`，通过插值 `{skill_name}`、`{params_json}`、`{workdir}` 渲染专业的高阶提示词与边界约束；
+   - 若未声明模板，平滑降级为默认指引 Prompt；
+3. 模型在沙箱中按需调用工具执行多轮 ReAct 推理，最终总结与产物收敛写入 `result` 与 `artifacts`。
 
 ---
 

@@ -119,6 +119,41 @@ func SubmitSkillRun(c *gin.Context) {
 		}
 	}
 
+	// 2.5 读取技能清单契约 (manifest.json) 并前置校验
+	manifest, mErr := skill.ReadManifest(sk.DirName)
+	if mErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{
+			"code": http.StatusInternalServerError,
+			"msg":  "读取技能契约失败: " + mErr.Error(),
+		})
+		return
+	}
+
+	if manifest != nil {
+		// 若显式配置了 api_enabled: false，则拦截外部 API 访问
+		if !manifest.APIEnabled {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code": http.StatusBadRequest,
+				"msg":  fmt.Sprintf("技能 `%s` 未启用开放 API 模式 (api_enabled=false)", req.SkillName),
+			})
+			return
+		}
+
+		// 校验输入参数 input_schema
+		if err := skill.ValidateParams(req.Params, manifest.InputSchema); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"code": http.StatusBadRequest,
+				"msg":  "入参校验失败: " + err.Error(),
+			})
+			return
+		}
+
+		// 回填缺省模式
+		if req.Mode == "" && manifest.DefaultMode != "" {
+			req.Mode = manifest.DefaultMode
+		}
+	}
+
 	// 3. 校验有头模式下关联的 user_id 是否合法且属于当前企业
 	if req.UserID > 0 {
 		targetUser, uErr := dao.GetUserById(ctx, int32(req.UserID))
@@ -168,6 +203,9 @@ func SubmitSkillRun(c *gin.Context) {
 	}
 
 	maxAttempts := req.MaxAttempts
+	if maxAttempts <= 0 && manifest != nil && manifest.Retry != nil && manifest.Retry.MaxAttempts > 0 {
+		maxAttempts = int64(manifest.Retry.MaxAttempts)
+	}
 	if maxAttempts <= 0 {
 		maxAttempts = 1
 	}
@@ -186,6 +224,17 @@ func SubmitSkillRun(c *gin.Context) {
 	execCtxMap := map[string]any{
 		"mode":  req.Mode,
 		"model": req.Model,
+	}
+	if manifest != nil {
+		if manifest.TimeoutSec > 0 {
+			execCtxMap["timeout_sec"] = manifest.TimeoutSec
+		}
+		if manifest.Command != "" {
+			execCtxMap["command"] = manifest.Command
+		}
+		if manifest.Stdin != "" {
+			execCtxMap["stdin"] = manifest.Stdin
+		}
 	}
 	execCtxBytes, _ := json.Marshal(execCtxMap)
 	execCtxStr := string(execCtxBytes)
@@ -324,11 +373,21 @@ func ListApiSkills(c *gin.Context) {
 			_ = json.Unmarshal([]byte(*s.Tags), &tags)
 		}
 
-		// 尝试从 SKILL.md 解析 parameters
+		// 尝试从 SKILL.md 或 manifest.json 解析 parameters
 		var paramsMeta map[string]any
-		if body, err := skill.ReadSkillMD(s.DirName); err == nil {
-			parsed := skill.ParseSkillMD(body)
-			paramsMeta = parsed.Parameters
+		var manifestView any
+		if m, _ := skill.ReadManifest(s.DirName); m != nil {
+			manifestView = m
+			if len(m.InputSchema) > 0 {
+				paramsMeta = m.InputSchema
+			}
+		}
+
+		if paramsMeta == nil {
+			if body, err := skill.ReadSkillMD(s.DirName); err == nil {
+				parsed := skill.ParseSkillMD(body)
+				paramsMeta = parsed.Parameters
+			}
 		}
 
 		results = append(results, gin.H{
@@ -337,6 +396,7 @@ func ListApiSkills(c *gin.Context) {
 			"dir_name":    s.DirName,
 			"tags":        tags,
 			"parameters":  paramsMeta,
+			"manifest":    manifestView,
 		})
 	}
 
