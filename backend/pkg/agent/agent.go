@@ -432,7 +432,13 @@ func materializeAttachments(ctx context.Context, sessionID string, attachments [
 		} else {
 			continue
 		}
-		safe := workspaceName(a.Filename)
+		safe := ""
+		if a.Path != "" {
+			safe = workspaceRelPath(a.Path)
+		}
+		if safe == "" {
+			safe = workspaceName(a.Filename)
+		}
 		if safe == "" {
 			safe = fallbackWorkspaceName(a.URL)
 		}
@@ -443,7 +449,10 @@ func materializeAttachments(ctx context.Context, sessionID string, attachments [
 		if err := sandbox.WriteFile(ctx, sessionID, safe, data); err != nil {
 			continue
 		}
-		a.Filename = safe
+		a.Path = safe
+		if a.Filename == "" {
+			a.Filename = filepath.Base(safe)
+		}
 		placed = append(placed, a)
 	}
 	return placed
@@ -473,6 +482,35 @@ func downloadAttachment(ctx context.Context, rawURL string) ([]byte, error) {
 		return nil, fmt.Errorf("下载附件失败: HTTP %d", resp.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(resp.Body, storage.MaxBytes+1))
+}
+
+// workspaceRelPath 把相对路径（如 src/components/Header.tsx）清洗为安全的工作区相对路径：
+// 规范化斜杠、剥离 /workspace/ 前缀、拒绝越界（../ 与绝对路径）、对各路径段清洗非法字符；
+// 保留合法的多级子目录。无效时返回空串。
+func workspaceRelPath(orig string) string {
+	s := strings.TrimSpace(orig)
+	if s == "" {
+		return ""
+	}
+	s = filepath.ToSlash(s)
+	if s == "/workspace" {
+		return ""
+	}
+	s = strings.TrimPrefix(s, "/workspace/")
+	s = path.Clean(s)
+	if s == "" || s == "." || path.IsAbs(s) || strings.HasPrefix(s, "../") {
+		return ""
+	}
+	segments := strings.Split(s, "/")
+	var cleaned []string
+	for _, seg := range segments {
+		cleanSeg := workspaceName(seg)
+		if cleanSeg == "" {
+			return ""
+		}
+		cleaned = append(cleaned, cleanSeg)
+	}
+	return strings.Join(cleaned, "/")
 }
 
 // workspaceName 把原始文件名转成各平台都能落盘的名字：去路径成分、
@@ -568,9 +606,13 @@ func buildMultimodalUserMessage(ctx context.Context, userContent string, turnAtt
 			b.WriteString(userContent)
 			b.WriteString("\n\n")
 		}
-		b.WriteString("[用户上传的附件已放入当前工作区，可直接用 read_file 等工具按文件名读取]")
+		b.WriteString("[用户上传或会话归档的附件已放入工作区，可直接用 read_file 等工具按路径读取]")
 		for _, a := range placed {
-			fmt.Fprintf(&b, "\n- %s", a.Filename)
+			target := a.Path
+			if target == "" {
+				target = a.Filename
+			}
+			fmt.Fprintf(&b, "\n- %s", target)
 		}
 		textPrompt = b.String()
 	} else if len(turnAttachments) > 0 {

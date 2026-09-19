@@ -120,3 +120,66 @@ func TestWorkspaceName(t *testing.T) {
 		}
 	}
 }
+
+func TestWorkspaceRelPath(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"src/components/Header.tsx", "src/components/Header.tsx"},
+		{"/workspace/src/utils/calc.py", "src/utils/calc.py"},
+		{"nested/sub/data.csv", "nested/sub/data.csv"},
+		{"report.md", "report.md"},
+		{"../etc/passwd", ""},
+		{"/etc/passwd", ""},
+		{"src/../../etc/passwd", ""},
+		{"..", ""},
+		{".", ""},
+		{"/workspace", ""},
+		{"", ""},
+	}
+	for _, c := range cases {
+		if got := workspaceRelPath(c.in); got != c.want {
+			t.Errorf("workspaceRelPath(%q) = %q, 期望 %q", c.in, got, c.want)
+		}
+	}
+}
+
+func TestMaterializeAttachmentsWithPath(t *testing.T) {
+	uploadsRoot, wsRoot := redirectDirs(t)
+
+	if err := os.WriteFile(filepath.Join(uploadsRoot, "11223344_Header.tsx"), []byte("export const Header = () => null"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(uploadsRoot, "55667788_legacy.txt"), []byte("legacy root file"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	placed := materializeAttachments(context.Background(), "sess-path", []Attachment{
+		{
+			URL:      "/api/uploads/11223344_Header.tsx",
+			Filename: "Header.tsx",
+			Path:     "src/components/Header.tsx",
+		},
+		{
+			URL:      "/api/uploads/55667788_legacy.txt",
+			Filename: "legacy.txt",
+		},
+	})
+
+	if len(placed) != 2 {
+		t.Fatalf("expected 2 placed attachments, got %d: %+v", len(placed), placed)
+	}
+
+	// 1. 验证带 Path 的附件物化在多级子目录，且未在根目录平铺
+	nestedData, err := os.ReadFile(filepath.Join(wsRoot, "sess-path", "src", "components", "Header.tsx"))
+	if err != nil || string(nestedData) != "export const Header = () => null" {
+		t.Fatalf("nested file mismatch: %q, err=%v", string(nestedData), err)
+	}
+	if _, err := os.Stat(filepath.Join(wsRoot, "sess-path", "Header.tsx")); !os.IsNotExist(err) {
+		t.Fatalf("Header.tsx should not exist at root: err=%v", err)
+	}
+
+	// 2. 验证不带 Path 的老附件平稳落入根目录
+	legacyData, err := os.ReadFile(filepath.Join(wsRoot, "sess-path", "legacy.txt"))
+	if err != nil || string(legacyData) != "legacy root file" {
+		t.Fatalf("legacy file mismatch: %q, err=%v", string(legacyData), err)
+	}
+}

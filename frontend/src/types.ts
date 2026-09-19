@@ -23,6 +23,7 @@ export interface ToolCall {
 export interface Attachment {
   url: string
   filename: string
+  path?: string | null
   size?: number | null
   content_type?: string | null
 }

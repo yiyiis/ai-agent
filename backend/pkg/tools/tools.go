@@ -222,8 +222,17 @@ var argExamples = map[string]string{
 type Attachment struct {
 	URL         string `json:"url"`
 	Filename    string `json:"filename"`
+	Path        string `json:"path,omitempty"` // 工作区相对路径（空则回退为 Filename）
 	Size        *int64 `json:"size,omitempty"`
 	ContentType string `json:"content_type,omitempty"`
+}
+
+// RelPath 返回在沙箱工作区中的相对路径，无 Path 时回退到 Filename
+func (a Attachment) RelPath() string {
+	if a.Path != "" {
+		return a.Path
+	}
+	return a.Filename
 }
 
 // ---------- Skill secrets 的环境变量注入（阶段五） ----------
@@ -594,12 +603,16 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 			return Output{Text: "[执行失败] 导出产物上传失败，请稍后重试或告知用户。"}
 		}
 		size := obj.Size
+		relPath := filepath.ToSlash(strings.TrimSpace(path))
+		relPath = strings.TrimPrefix(relPath, "/workspace/")
+		relPath = strings.TrimPrefix(relPath, "/")
 		return Output{
 			Text: fmt.Sprintf("已导出 %s（%d 字节，%s）。链接：%s。请在回复中告知用户该产出物已生成。",
 				obj.Filename, size, contentType, obj.URL),
 			Attachments: []Attachment{{
 				URL:         obj.URL,
 				Filename:    obj.Filename,
+				Path:        relPath,
 				Size:        &size,
 				ContentType: contentType,
 			}},

@@ -22,6 +22,8 @@ AI Agent 是一个基于 **Go (Golang)** 构建的高性能、高并发、生产
   - [5.4 模型上下文协议 (MCP) 接入规范](#54-模型上下文协议-mcp-接入规范)
   - [5.5 长期记忆网络与智能压缩 (Memory & Compaction)](#55-长期记忆网络与智能压缩-memory--compaction)
   - [5.6 隔离沙箱环境与工件产物提取](#56-隔离沙箱环境与工件产物提取)
+  - [5.7 企业级多租户与开放任务调度引擎 (Dispatcher & Multi-Tenant RBAC)](#57-企业级多租户与开放任务调度引擎-dispatcher--multi-tenant-rbac)
+  - [5.8 沙箱文件系统双层架构与相对路径复原 (Two-Tier Storage & Sandbox Path Preservation)](#58-沙箱文件系统双层架构与相对路径复原-two-tier-storage--sandbox-path-preservation)
 - [六、协议规范](#六协议规范)
   - [6.1 SSE 实时流式事件协议](#61-sse-实时流式事件协议)
   - [6.2 开放接口 (Open API) 规范](#62-开放接口-open-api-规范)
@@ -151,6 +153,7 @@ timeline
 - [x] 多驱动沙箱架构：本地隔离运行、Docker Container 容器沙箱与 E2B 云端沙箱三驱动无缝切换
 - [x] 容器生命周期治理：按需拉起、环境隔离注入、只读挂载与超时强制销毁
 - [x] 产物提取与存储体系：从工具输出中捕获提取工件（Artifacts），接入腾讯云 COS 存储
+- [x] 工作区相对路径持久化：支持多级子目录（Path）精准复原，平铺对象存储（COS/uploads）与沙箱工程目录树解耦
 
 ### 阶段五：动态 Skill 插件系统 (Dynamic Skill Plugin Engine)
 - [x] `SKILL.md` 规范解析器：解析 YAML 元数据、输入参数契约与执行脚本
@@ -158,9 +161,10 @@ timeline
 - [x] 意图驱动自主装载：模型根据用户诉求调用 `load_skill` 动态激活挂载工具；支持机密密钥注入
 
 ### 阶段六：开放 API 与分布式任务调度 (Open API & Async Run Dispatcher)
-- [ ] 开放 API 接口契约：API Key 鉴权、公司/租户隔离与白名单策略
-- [ ] 异步任务调度器 (`/api/v1/skill-runs`)：任务提交、状态轮询与持久化追踪
-- [ ] 容灾重试派发引擎：错误分类器（网络抖动/限流/服务异常）与指数退避重试调度
+- [x] 开放 API 接口契约：API Key 鉴权（Bearer 格式）、企业/租户多租户隔离与白名单策略
+- [x] 异步任务调度器 (`/api/v1/skill-runs`)：任务提交（支持同步等待/异步排队）、状态轮询与持久化追踪
+- [x] 容灾重试派发引擎：错误分类器（网络抖动/限流/服务异常/沙箱故障等）与指数退避重试调度（Dispatcher + Worker Pool）
+- [x] 企业级三级 RBAC 权限体系：超级管理员 (1)、企业管理员 (2)、普通员工 (3)，实现会话按企业/个人隔离与细粒度读写鉴权
 
 ### 阶段七：上下文预算、长程记忆与压缩 (Context Budget, Compaction & Long-Term Memory)
 - [ ] 归一化 Token 审计：输入、输出、Cache 命中及 Reasoning Token 独立度量
@@ -170,7 +174,8 @@ timeline
 ### 阶段八：MCP 协议集成与多模态交互 (MCP Integration & Multimodal Modalities)
 - [ ] Model Context Protocol (MCP) 客户端：基于 SSE Transport 接入外部标准化工具与资源
 - [ ] Anthropic Claude 原生协议适配器：Messages 协议与流式双向映射
-- [ ] 视觉与人机协同：Vision 图像多块识别接入；`request_input` 挂起机制实现人机交互确认
+- [x] 视觉多模态输入接入 (Vision Multimodal)：图片附件自动解析为 Base64 Data URL 或公网直链，无缝注入模型 ContentParts
+- [ ] 人机协同中断确认：`request_input` 挂起机制实现人机交互确认与工具继续执行
 
 ---
 
@@ -276,6 +281,58 @@ parameters:
 - **沙箱运行态**：每个会话分配独立的工作目录与隔离环境（本地受限或 Docker 容器）；
 - **产物拦截 (Artifacts Export)**：当工具执行生成文件（如图片、CSV、PPT 等），沙箱调度器自动拦截输出并提取为工件元数据，生成可下载的文件下载链接或同步挂载至腾讯云 COS。
 
+### 5.7 企业级多租户与开放任务调度引擎 (Dispatcher & Multi-Tenant RBAC)
+
+```mermaid
+flowchart TD
+    Req[客户端 / API 调用方] --> Auth{API Key / JWT 鉴权}
+    Auth --> TenantCheck[多租户与 RBAC 权限校验]
+    TenantCheck --> Dispatcher[Dispatcher 派发队列]
+    Dispatcher --> WorkerPool[固定容量 Worker Pool]
+    WorkerPool --> Exec[无头沙箱隔离执行]
+    Exec --> Success([执行成功 -> 更新状态落库])
+    Exec -- 失败 --> Classifier{智能错误分类器}
+    Classifier -- 可重试: 网络抖动/限流/临时异常 --> Backoff[指数退避延时重试]
+    Backoff --> Dispatcher
+    Classifier -- 不可重试: 参数非法/权限不足 --> Failed([标记失败 -> 终止重试])
+```
+
+- **三级 RBAC 权限体系**：
+  - `超级管理员 (UserType=1)`：拥有平台全量会话检索与跨租户运维介入排查权限；
+  - `企业管理员 (UserType=2)`：管理本企业下的技能分配、API Key 授权与员工会话审计，支持会话范围分流（`scope: mine | all`）；
+  - `普通员工 (UserType=3)`：严格物理隔离，仅可见与操作本人的会话与沙箱工作区。
+- **开放 API 调度器 (`/api/v1/skill-runs`)**：
+  - 采用无头会话（Headless Session，`user_id=0`）驱动，支持同步等待执行结果或异步队列提交后轮询；
+  - 内置**智能错误分类器 (Classifier)**：精准识别可恢复错误（网络连接重置、上游限流 429、沙箱拉起冲突）与终态错误（Schema 校验失败、认证失效），结合指数退避算法（Exponential Backoff）自动容灾重试。
+
+### 5.8 沙箱文件系统双层架构与相对路径复原 (Two-Tier Storage & Sandbox Path Preservation)
+
+针对 Agent 长对话场景下容器生命周期（Reap 超时销毁、节点漂移）与复杂项目多级目录维护的矛盾，系统采用双层存储模型：
+
+```text
+[用户上传 / export_artifact 导出]
+                 │
+                 ▼
+┌────────────────────────────────────────────────────────┐
+│ 第一层：全局平铺对象存储池 (COS / 本地 uploads/)         │
+│  - 纯文件名 + 6 字节防碰撞随机前缀（如 3a9f_Header.tsx）   │
+│  - 零层级、无状态、提供永久只读下载与 CDN 图片预览     │
+└────────────────────────────────────────────────────────┘
+                 │
+                 │ materializeAttachments (沙箱唤醒与物化)
+                 ▼
+┌────────────────────────────────────────────────────────┐
+│ 第二层：沙箱运行时工作区 (Workspace Sandbox)             │
+│  - 依托 Attachment.Path 保留完整的工程相对路径         │
+│  - 自动递归建目录（如 src/components/Header.tsx）       │
+│  - 沙箱即使销毁 100 次，重建物化后多级层级结构 100% 原样复原│
+└────────────────────────────────────────────────────────┘
+```
+
+- **双字段解耦**：
+  - `Filename`：纯文件名，专供前端卡片展示与浏览器下载；
+  - `Path`：工作区相对路径，专供沙箱多级落盘（`workspaceRelPath` 严防 `../` 越界）与大模型准确定位。
+
 ---
 
 ## 六、协议规范
@@ -328,20 +385,32 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 
 除了面向 Web UI 的会话接口，系统对外提供带 API Key 鉴权的开放异步执行规范：
 
-| 请求方法 | 路由路径 | 接口职责与功能 |
-| :--- | :--- | :--- |
-| `POST` | `/api/sessions` | 创建新会话 |
-| `GET` | `/api/sessions` | 分页获取当前用户的历史会话列表 |
-| `GET` | `/api/sessions/:id` | 获取特定会话详情及完整历史消息 |
-| `PATCH` | `/api/sessions/:id` | 修改会话标题 |
-| `DELETE` | `/api/sessions/:id` | 删除会话及级联清理历史记录与摘要 |
-| `POST` | `/api/sessions/:id/messages` | 发起流式对话（SSE 协议长连接，轮次在后台 Turn 引擎执行） |
-| `POST` | `/api/sessions/:id/messages/stop` | 优雅中止该会话正在进行的轮次（幂等） |
-| `GET` | `/api/sessions/:id/stream` | 断线重连补播（`from_seq` 游标；`live_only=1` 仅接在跑轮次，无可接返回 204） |
-| `GET` | `/api/models` | 获取当前环境支持的模型矩阵与默认窗口上限 |
-| `GET` | `/api/memories` | 检索与管理长期记忆实体 |
-| `POST` | `/api/v1/skill-runs` | 开放异步 Skill 任务提交接口（API Key 鉴权） |
-| `GET` | `/api/v1/skill-runs/:run_id`| 轮询异步任务执行状态与执行结果 |
+| 模块 | 请求方法 | 路由路径 | 接口职责与功能 |
+| :--- | :--- | :--- | :--- |
+| **认证与用户** | `POST` | `/api/auth/login` | 账号密码登录，获取 JWT Token |
+| | `POST` | `/api/auth/register` | 用户注册（分配所属企业租户） |
+| | `GET` | `/api/auth/me` | 查询当前登录人信息、企业归属及 RBAC 角色级别 |
+| **会话管理** | `POST` | `/api/sessions` | 创建新会话（可选绑定 Skill 插件与模型） |
+| | `GET` | `/api/sessions` | 获取会话列表（支持 `scope=mine` 仅看个人，或管理员 `scope=all` 看企业全量） |
+| | `GET` | `/api/sessions/:id` | 获取特定会话详情及历史完整消息 |
+| | `PATCH` | `/api/sessions/:id` | 修改会话标题 |
+| | `DELETE` | `/api/sessions/:id` | 删除会话及级联清理历史记录与沙箱工作区 |
+| **流式交互** | `POST` | `/api/sessions/:id/messages` | 发起流式对话（SSE 长连接，轮次托管于后台 Turn 引擎） |
+| | `POST` | `/api/sessions/:id/messages/stop` | 优雅中止正在进行的对话轮次（幂等） |
+| | `POST` | `/api/sessions/:id/messages/regenerate` | 截断最后一轮并基于该轮用户输入重新生成回答 |
+| | `POST` | `/api/sessions/:id/messages/edit` | 编辑历史中最近一条用户消息并重新触发流式回答 |
+| | `GET` | `/api/sessions/:id/stream` | 断线重连补播（`from_seq` 游标；`live_only=1` 仅接在跑轮次） |
+| **文件与产物** | `POST` | `/api/uploads` | 通用附件上传（支持图片/文档，平铺落盘 `uploads/` 或直传 COS） |
+| | `GET` | `/api/uploads/:name` | 本地存储模式下的附件/导出工件下载与预览路由 |
+| **技能管理** | `GET` | `/api/skills` | 获取当前环境已启用的动态技能列表 |
+| | `GET` | `/api/skills/catalog` | 获取技能广场全部轻量摘要目录（注入 System Prompt 用） |
+| | `POST` | `/api/skills` | 上传 Zip 技能包动态安装/更新技能 |
+| | `POST` | `/api/skills/:id/toggle` | 会话级别启用/停用特定技能 |
+| **开放调度 API** | `POST` | `/api/v1/skill-runs` | 开放执行 Skill 任务（API Key 鉴权，支持同步等待/异步派发） |
+| | `GET` | `/api/v1/skill-runs` | 分页查询开放异步任务执行状态列表 |
+| | `GET` | `/api/v1/skill-runs/:run_id` | 轮询单个任务的运行状态、执行耗时与终态产出 |
+| | `POST` | `/api/v1/skill-runs/:run_id/retry` | 手动重试因外部可恢复原因失败的异步任务 |
+| **系统元数据** | `GET` | `/api/models` | 获取当前系统支持的模型矩阵与默认窗口上限 |
 
 ---
 
@@ -350,39 +419,48 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 ```text
 ai-agent/
 ├── backend/                       # Go 后端核心系统
-│   ├── api/                       # 控制层（会话、聊天、技能、开放接口）
-│   │   ├── auth.go                # 登录鉴权路由
+│   ├── api/                       # 控制层（会话、聊天、技能、开放接口、认证）
+│   │   ├── auth.go                # 登录注册与用户鉴权
 │   │   ├── chat.go                # SSE 流式聊天及中断控制
 │   │   ├── models.go              # 模型列表接口
-│   │   └── sessions.go            # 会话 CRUD 路由
+│   │   ├── sessions.go            # 会话 CRUD 与企业级权限分流
+│   │   ├── skill_runs.go          # 开放异步任务提交与轮询
+│   │   ├── skills.go              # 技能广场与生命周期管理
+│   │   └── uploads.go             # 通用附件上传服务
 │   ├── config/                    # Viper 统一配置解析
 │   │   └── config.go              # 数据库、LLM、沙箱、COS 结构化配置
-│   ├── dal/                       # 数据访问层
-│   │   ├── model/                 # 数据模型实体 (Session, Message, Memory 等)
-│   │   └── query/                 # GORM 强类型查询门面
-│   ├── dao/                       # 业务级数据访问封装
-│   │   ├── message.go             # 消息落库与历史读取
-│   │   └── session.go             # 会话持久化与状态更新
+│   ├── dal/                       # 数据访问层 (GORM Gen 模型与强类型查询门面)
+│   │   ├── model/                 # 实体定义 (User, Session, Message, SkillRun, Company 等)
+│   │   └── query/                 # 强类型查询生成代码
+│   ├── dao/                       # 业务级数据访问封装 (多租户、消息、会话、技能、执行记录)
 │   ├── etc/                       # 配置文件目录
 │   │   └── config.yaml            # 系统核心配置文件
-│   ├── skills/                    # 技能库（阶段五：每个子目录一个 SKILL.md 插件）
+│   ├── skills/                    # 技能库（每个子目录一个 SKILL.md 插件）
 │   ├── pkg/                       # 核心基础设施与底层组件
-│   │   ├── agent/                 # Agent 执行内核、Turn 调度器与 Loop Guard
+│   │   ├── agent/                 # Agent 执行内核、Turn 调度器、多模态与 Loop Guard
 │   │   ├── apiwarp/               # 泛型 Controller 适配器与统一响应
 │   │   ├── db/                    # 数据库初始化、连接池与事务传播
+│   │   ├── dispatcher/            # 异步任务调度器、Worker Pool 与智能错误分类器
 │   │   ├── errors/                # 统一业务错误与调用栈追踪
 │   │   ├── jwt/                   # JWT 鉴权解析中间件
 │   │   ├── log/                   # 结构化日志 (Slog + 日志轮转)
-│   │   ├── mcp/                   # Model Context Protocol (MCP) 客户端
-│   │   ├── memory/                # 长期记忆检索与 Compaction 压缩流水线
-│   │   ├── provider/              # LLM 统一接口与流式适配器 (OpenAI / Claude)
-│   │   ├── sandbox/               # 本地受限执行与 Docker 容器沙箱
+│   │   ├── provider/              # LLM 统一接口与流式适配器 (MiniMax / 豆包 / DeepSeek)
+│   │   ├── sandbox/               # 多驱动执行沙箱 (Local / Docker / E2B)
 │   │   ├── skill/                 # SKILL.md 解析器与动态装载调度
 │   │   └── storage/               # 腾讯云 COS 与本地存储驱动
 │   ├── go.mod                     # Go 依赖版本清单
 │   ├── main.go                    # 服务启动入口
 │   └── router.go                  # 路由组装与中间件装配
+├── frontend/                      # React 18 现代化前端工作台
+│   ├── src/
+│   │   ├── api/                   # API 客户端 (HTTP / SSE 流式订阅器)
+│   │   ├── components/            # UI 组件库 (Composer 输入框、Sidebar、Chat、Skill 广场)
+│   │   ├── App.tsx                # 主应用界面
+│   │   └── types.ts               # 前后端序列化数据契约 (Attachment, Session 等)
+│   ├── package.json               # 前端依赖配置
+│   └── vite.config.ts             # Vite 构建与反向代理配置
 ├── deploy/                        # 部署与运维配置
+│   ├── sql/                       # 数据库全量 DDL 与增量 Migration 脚本
 │   ├── docker-compose.yml         # 本地开发 MySQL / Redis 容器化编排
 │   └── Caddyfile                  # 生产反向代理配置
 ├── .gitignore                     # 统一 Git 忽略规则
@@ -437,15 +515,28 @@ go run main.go
 ```text
 [INFO] 数据库连接就绪，数据表迁移完成
 [INFO] LLM Provider [minimax] 注册成功
+[INFO] 对象存储驱动: local
+[INFO] 执行沙箱驱动: local
 [INFO] 服务启动成功，监听地址: 0.0.0.0:8888
 ```
 
-### 4. 接口验证测试
+### 4. 启动前端工作台 (Web UI)
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+本地浏览器打开 `http://localhost:5173` 即可进入交互界面。
+
+### 5. 接口验证测试
 
 **新建会话**：
 ```bash
 curl -X POST http://127.0.0.1:8888/api/sessions \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -d '{"title": "Go 并发特性探索", "model": "MiniMax-Text-01"}'
 ```
 
@@ -453,6 +544,7 @@ curl -X POST http://127.0.0.1:8888/api/sessions \
 ```bash
 curl -N -X POST http://127.0.0.1:8888/api/sessions/{SESSION_ID}/messages \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer YOUR_JWT_TOKEN" \
   -d '{"content": "请用一段 Go 代码演示如何实现一个安全的 Worker Pool 并做简要说明"}'
 ```
 

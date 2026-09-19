@@ -206,10 +206,21 @@ func TestExportArtifact(t *testing.T) {
 		t.Fatalf("summary should carry link: %s", out.Text)
 	}
 
-	// 不传 filename 时用 path 末段
+	// 不传 filename 时用 path 末段，且保留 Path 相对路径
 	out = ExecuteWithOutput(context.Background(), "sess1", "export_artifact", map[string]any{"path": "report.md"})
-	if IsErrorResult(out.Text) || out.Attachments[0].Filename != "report.md" {
-		t.Fatalf("default filename wrong: %s %+v", out.Text, out.Attachments)
+	if IsErrorResult(out.Text) || out.Attachments[0].Filename != "report.md" || out.Attachments[0].Path != "report.md" {
+		t.Fatalf("default filename/path wrong: %s %+v", out.Text, out.Attachments)
+	}
+
+	// 导出多级子目录文件：Filename 截断为基名，Path 完整保留相对路径
+	writeWsFile(t, root, "src/components/Header.tsx", "header content")
+	outNested := ExecuteWithOutput(context.Background(), "sess1", "export_artifact", map[string]any{"path": "src/components/Header.tsx"})
+	if IsErrorResult(outNested.Text) {
+		t.Fatalf("nested export failed: %s", outNested.Text)
+	}
+	nestedAtt := outNested.Attachments[0]
+	if nestedAtt.Filename != "Header.tsx" || nestedAtt.Path != "src/components/Header.tsx" {
+		t.Fatalf("nested attachment wrong: %+v", nestedAtt)
 	}
 }
 
