@@ -47,7 +47,7 @@ const (
 
 // Event 协议事件（由路由层转成 SSE，字段名以 api 层契约为准）
 type Event struct {
-	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | tool_artifact | skill_loaded | done | error
+	Type      string // user_message_id | delta | tool_call_start | tool_call_result | tool_call_error | round_progress | tool_artifact | skill_loaded | done | error
 	ID        string
 	Content   string // delta 正文增量
 	Reasoning string // delta 思考增量
@@ -753,6 +753,9 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		// 记账本身是旁路，失败只告警不影响对话
 		recordTokenUsage(ctx, session, round, usage, constants.UsagePurposeTurn)
 		turnUsage = sumUsage(turnUsage, usage)
+		if turnUsage != nil {
+			emit(Event{Type: "round_progress", Usage: turnUsage})
+		}
 
 		if streamErr != nil {
 			note := fmt.Sprintf("[对话因异常中止：%v]", streamErr)

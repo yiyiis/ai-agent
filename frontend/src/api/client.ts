@@ -16,6 +16,7 @@ import type {
   SkillRunStats,
   SkillRunSummary,
   SkillVersionDiff,
+  TokenUsage,
   WorkingDiff,
 } from '../types'
 import { readJwtCookie } from '../lib/auth'
@@ -363,6 +364,7 @@ export type StreamEvent =
   | { type: 'tool_call_start'; id: string; name: string; arguments: string }
   | { type: 'tool_call_result'; id: string; output: string }
   | { type: 'tool_call_error'; id: string; error: string }
+  | { type: 'round_progress'; usage: TokenUsage }
   | {
       type: 'memory_written'
       memory_id: string
@@ -377,7 +379,7 @@ export type StreamEvent =
       skill_id: number
       name: string
     }
-  | { type: 'done'; id: string }
+  | { type: 'done'; id: string; usage?: TokenUsage }
   | { type: 'error'; message: string }
 
 interface StreamOptions {

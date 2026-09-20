@@ -281,6 +281,12 @@ func ssePayload(ev agent.Event) gin.H {
 		return gin.H{"type": ev.Type, "id": ev.ID, "output": ev.Output}
 	case "tool_call_error":
 		return gin.H{"type": ev.Type, "id": ev.ID, "error": ev.Error}
+	case "round_progress":
+		payload := gin.H{"type": ev.Type}
+		if ev.Usage != nil {
+			payload["usage"] = ev.Usage
+		}
+		return payload
 	case "tool_artifact":
 		// 产物事件：每次携带一个附件，tool_call_id 供前端挂到对应工具调用卡片
 		payload := gin.H{"type": ev.Type, "tool_call_id": ev.ID}

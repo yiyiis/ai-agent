@@ -274,3 +274,23 @@ export interface Memory {
   created_at: string
   updated_at: string
 }
+
+/** 归一化 Token 用量统计（OpenAI 子集语义） */
+export interface TokenUsage {
+  prompt_tokens: number
+  completion_tokens: number
+  cached_tokens?: number
+  reasoning_tokens?: number
+  context_tokens?: number
+}
+
+/** 一次对话回合（Turn）的瞬态执行指标（仅在前端内存暂存，刷新即焚） */
+export interface TurnMetric {
+  durationSec: string
+  totalTokens: number
+  promptTokens: number
+  completionTokens: number
+  cachedTokens: number
+  reasoningTokens: number
+  cacheHitRate: number // 缓存命中百分比 0 ~ 100
+}

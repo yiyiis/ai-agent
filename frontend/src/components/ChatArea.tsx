@@ -36,7 +36,9 @@ import type {
   Message,
   Model,
   Skill,
+  TokenUsage,
   ToolInvocation,
+  TurnMetric,
 } from '../types'
 import { BrandIcon } from './BrandIcons'
 import { Composer } from './Composer'
@@ -45,6 +47,7 @@ import { MessageBubble } from './MessageBubble'
 import { ModelPicker } from './ModelPicker'
 import { SkillsPanel } from './SkillsPanel'
 import { ToolCallCard } from './ToolCallCard'
+import { CompletedTokenBadge, LiveTokenProgress } from './TokenBadge'
 
 interface Props {
   sessionId: string | null
@@ -464,6 +467,8 @@ function AssistantTurnView({
   streaming,
   onRegenerate,
   onPreview,
+  metric,
+  liveMetric,
 }: {
   processItems: ProcessItem[]
   finalAnswer: string
@@ -471,6 +476,13 @@ function AssistantTurnView({
   streaming?: boolean
   onRegenerate?: () => void
   onPreview?: (a: Attachment) => void
+  metric?: TurnMetric
+  liveMetric?: {
+    elapsedSec: string
+    totalTokens: number
+    cachedTokens?: number
+    promptTokens?: number
+  }
 }) {
   const [copied, setCopied] = useState(false)
 
@@ -586,31 +598,47 @@ function AssistantTurnView({
           </div>
         )}
 
+        {/* 流式生成中的动态累计进度指示（秒表 + Token 计数 + 缓存命中率） */}
+        {streaming && liveMetric && (
+          <div className="pt-1">
+            <LiveTokenProgress
+              elapsedSec={liveMetric.elapsedSec}
+              totalTokens={liveMetric.totalTokens}
+              cachedTokens={liveMetric.cachedTokens}
+              promptTokens={liveMetric.promptTokens}
+            />
+          </div>
+        )}
+
         {/* 5. 底部操作栏：复制（仅复制最终交付正文）与重新生成 */}
         {!streaming && (hasAnswer || processItems.length > 0) && (
-          <div className="flex items-center gap-1 pt-1 opacity-0 group-hover:opacity-100 transition-opacity">
-            {hasAnswer && (
-              <button
-                onClick={copy}
-                className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
-                title="复制回答"
-              >
-                {copied ? (
-                  <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
-                ) : (
-                  <Copy className="w-4 h-4" />
-                )}
-              </button>
-            )}
-            {isLastAssistant && onRegenerate && (
-              <button
-                onClick={onRegenerate}
-                className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
-                title="重新生成"
-              >
-                <RotateCcw className="w-4 h-4" />
-              </button>
-            )}
+          <div className="flex flex-col gap-1 pt-1">
+            <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+              {hasAnswer && (
+                <button
+                  onClick={copy}
+                  className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
+                  title="复制回答"
+                >
+                  {copied ? (
+                    <Check className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+                  ) : (
+                    <Copy className="w-4 h-4" />
+                  )}
+                </button>
+              )}
+              {isLastAssistant && onRegenerate && (
+                <button
+                  onClick={onRegenerate}
+                  className="p-1.5 text-[#747775] dark:text-[#9aa0a6] hover:text-[#1f1f1f] dark:hover:text-[#f1f3f4] hover:bg-[#f0f4f9] dark:hover:bg-[#28292a] rounded-full transition-colors"
+                  title="重新生成"
+                >
+                  <RotateCcw className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+            {/* 方案 B 瞬态平滑指标：当前屏生成完成后展示，刷新或切换会话后自然消失 */}
+            {metric && <CompletedTokenBadge metric={metric} />}
           </div>
         )}
       </div>
@@ -694,6 +722,19 @@ export function ChatArea({
     setComposerKey((k) => k + 1) // 重复恢复同一段内容时也强制重挂载
   }
 
+  // 方案 B 瞬态平滑指标：每条 assistant 消息的执行耗时与 Token 消耗（仅在前端内存暂存，刷新/切换会话即焚）
+  const [turnMetrics, setTurnMetrics] = useState<Record<string, TurnMetric>>({})
+  // 当前正在进行的流式执行指标（秒表计时 + 动态累计 Token 水位）
+  const [streamElapsed, setStreamElapsed] = useState('0.0')
+  const [streamTokens, setStreamTokens] = useState<{ total: number; cached: number; prompt: number }>({
+    total: 0,
+    cached: 0,
+    prompt: 0,
+  })
+  const streamStartTimeRef = useRef<number>(0)
+  const streamTimerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const lastTurnUsageRef = useRef<TokenUsage | null>(null)
+
   // 内部维护当前实际会话 ID（草稿态为 null，首次发送消息后切换为生成的 ID）
   const activeIdRef = useRef<string | null>(sessionId)
   // 记录当前已成功加载就绪的会话 ID，避免草稿态转正或重复切换时重复拉取，同时保证页面初次载入或 F5 刷新时正常请求
@@ -723,6 +764,16 @@ export function ChatArea({
     setComposerAttachments(null)
     setComposerKey((k) => k + 1)
     lastAskRef.current = null
+
+    // 切换会话时重置瞬态指标，保证历史消息绝对纯净
+    setTurnMetrics({})
+    setStreamElapsed('0.0')
+    setStreamTokens({ total: 0, cached: 0, prompt: 0 })
+    lastTurnUsageRef.current = null
+    if (streamTimerRef.current) {
+      clearInterval(streamTimerRef.current)
+      streamTimerRef.current = null
+    }
 
     if (!sessionId) {
       loadedIdRef.current = null
@@ -1226,7 +1277,48 @@ export function ChatArea({
         content: ev.content,
         isUpdate: Boolean(ev.is_update),
       })
+    } else if (ev.type === 'round_progress') {
+      if (ev.usage) {
+        lastTurnUsageRef.current = ev.usage
+        setStreamTokens({
+          total: (ev.usage.prompt_tokens || 0) + (ev.usage.completion_tokens || 0),
+          cached: ev.usage.cached_tokens || 0,
+          prompt: ev.usage.prompt_tokens || 0,
+        })
+      }
     } else if (ev.type === 'done' || ev.type === 'error') {
+      // 流结束：停止秒表计时器并记录方案 B 瞬态指标（仅当前屏保留，刷新/切换即焚）
+      if (streamTimerRef.current) {
+        clearInterval(streamTimerRef.current)
+        streamTimerRef.current = null
+      }
+      const finalDur =
+        streamStartTimeRef.current > 0
+          ? ((Date.now() - streamStartTimeRef.current) / 1000).toFixed(1)
+          : '0.0'
+      const finalUsage = ev.type === 'done' && ev.usage ? ev.usage : lastTurnUsageRef.current
+      if (ev.type === 'done' && ev.id && finalUsage) {
+        const prompt = finalUsage.prompt_tokens || 0
+        const comp = finalUsage.completion_tokens || 0
+        const cached = finalUsage.cached_tokens || 0
+        const reason = finalUsage.reasoning_tokens || 0
+        const total = prompt + comp
+        const hitRate =
+          prompt > 0 && cached > 0 ? Math.min(100, Math.round((cached / prompt) * 100)) : 0
+        setTurnMetrics((prev) => ({
+          ...prev,
+          [ev.id]: {
+            durationSec: finalDur,
+            totalTokens: total,
+            promptTokens: prompt,
+            completionTokens: comp,
+            cachedTokens: cached,
+            reasoningTokens: reason,
+            cacheHitRate: hitRate,
+          },
+        }))
+      }
+
       // 流结束：停泵并吐完剩余缓冲
       stopStreamPump()
       const currentId = activeIdRef.current
@@ -1263,6 +1355,19 @@ export function ChatArea({
     streamFinalTextRef.current = ''
     pendingTextRef.current = ''
     pendingReasoningRef.current = ''
+
+    // 启动流式耗时秒表与重置实时 Token 水位
+    streamStartTimeRef.current = Date.now()
+    setStreamElapsed('0.0')
+    setStreamTokens({ total: 0, cached: 0, prompt: 0 })
+    lastTurnUsageRef.current = null
+    if (streamTimerRef.current) clearInterval(streamTimerRef.current)
+    streamTimerRef.current = setInterval(() => {
+      if (streamStartTimeRef.current > 0) {
+        setStreamElapsed(((Date.now() - streamStartTimeRef.current) / 1000).toFixed(1))
+      }
+    }, 200)
+
     startStreamPump()
     let sawDone = false
     // 包一层 handleEvent，记录是否见过 done/error——后端任何路径若漏 yield done，
@@ -1285,6 +1390,10 @@ export function ChatArea({
       }
     }
     if (!streamed) {
+      if (streamTimerRef.current) {
+        clearInterval(streamTimerRef.current)
+        streamTimerRef.current = null
+      }
       stopStreamPump()
       setStreaming(false)
       setOptimisticUser(null)
@@ -1759,6 +1868,7 @@ export function ChatArea({
                         streaming={false}
                         onRegenerate={regenerate}
                         onPreview={setPreview}
+                        metric={turn.messageId ? turnMetrics[turn.messageId] : undefined}
                       />
                     )
                   }
@@ -1778,6 +1888,12 @@ export function ChatArea({
                     finalAnswer={streamFinalText}
                     streaming={true}
                     onPreview={setPreview}
+                    liveMetric={{
+                      elapsedSec: streamElapsed,
+                      totalTokens: streamTokens.total,
+                      cachedTokens: streamTokens.cached,
+                      promptTokens: streamTokens.prompt,
+                    }}
                   />
                 )}
               </div>
