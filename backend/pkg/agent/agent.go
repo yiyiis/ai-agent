@@ -25,6 +25,7 @@ import (
 	"sync"
 	"time"
 
+	"backend/constants"
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/provider"
@@ -736,16 +737,22 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	// Loop guard：sig(=tool+args 哈希) -> 历次输出哈希
 	guard := map[string][]string{}
 	lastAssistantID := ""
+	turnUsage := (*provider.Usage)(nil) // 整轮各轮 usage 累计，随 done 事件下发
 
 	for round := 0; round < MaxToolRounds; round++ {
 		req := &provider.ChatRequest{
-			Model: session.Model,
+			Model:     session.Model,
 			Messages:  msgs,
 			Tools:     toolSchemas,
 			MaxTokens: 32768, // 与 mirror 对齐；8192 时写文件类工具参数会被截断成半截 JSON
 		}
 		tf := &thinkFilter{}
 		content, reasoning, calls, finish, usage, streamErr := streamOneRound(ctx, deps.Provider, req, tf, emit)
+
+		// 记账先于异常分支：中途报错/截断/取消的轮次同样烧了 token，照常落账；
+		// 记账本身是旁路，失败只告警不影响对话
+		recordTokenUsage(ctx, session, round, usage, constants.UsagePurposeTurn)
+		turnUsage = sumUsage(turnUsage, usage)
 
 		if streamErr != nil {
 			note := fmt.Sprintf("[对话因异常中止：%v]", streamErr)
@@ -778,7 +785,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		msgs = append(msgs, provider.ChatMessage{Role: "assistant", Content: content, ToolCalls: callsOrNil(calls)})
 
 		if len(calls) == 0 || finish != "tool_calls" {
-			emit(Event{Type: "done", ID: assistantID, Usage: usage})
+			emit(Event{Type: "done", ID: assistantID, Usage: turnUsage})
 			return nil
 		}
 

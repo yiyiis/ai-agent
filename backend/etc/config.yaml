@@ -43,6 +43,17 @@ LLM:
         - "GLM-5.1"
         - "GLM-5-Turbo"
         - "GLM-4.7"
+  # 计费单价表（阶段七·模块一）：每百万 token 单价（元）。金额仅在用量统计接口
+  # 查询时现算（cost_estimate 估算值），不落库——调价不回改历史账单；
+  # 未配置的模型金额记 0，token 计数照常统计。CachedInput 缺省按 Input 计。
+  Billing:
+    - Model: "MiniMax-Text-01"
+      Input: 2.0
+      Output: 8.0
+      CachedInput: 0.2
+    - Model: "GLM-5.3"
+      Input: 2.0
+      Output: 8.0
 
 # 对象存储：聊天附件与 export_artifact 产物统一上 COS（可分享的公网链接）。
 # Bucket 留空时附件与产物都落本地 uploads/ 并经 /api/uploads/:name 下载（零依赖部署）。

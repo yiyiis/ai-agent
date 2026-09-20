@@ -87,6 +87,10 @@ func RegisterRouter(engine *gin.Engine) {
 	engine.POST("/api/uploads", Controller(api.UploadFile))
 	engine.GET("/api/uploads/:name", Controller(api.DownloadAttachment))
 
+	// 阶段七·模块一：Token 用量统计与会话级用量明细
+	engine.GET("/api/usage/stats", Controller(api.GetTokenUsageStats))
+	engine.GET("/api/sessions/:id/usage", Controller(api.GetSessionTokenUsage))
+
 	// 兼容中台与管理端接口
 	engine.GET("/api/user/info", TimeOut(time.Second*3), Controller(api.UserInfoDetail))
 	engine.POST("/api/user/password", TimeOut(time.Second*3), Controller(api.UpdatePassword))

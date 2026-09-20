@@ -167,7 +167,7 @@ timeline
 - [x] 企业级三级 RBAC 权限体系：超级管理员 (1)、企业管理员 (2)、普通员工 (3)，实现会话按企业/个人隔离与细粒度读写鉴权
 
 ### 阶段七：上下文预算、长程记忆与压缩 (Context Budget, Compaction & Long-Term Memory)
-- [ ] 归一化 Token 审计：输入、输出、Cache 命中及 Reasoning Token 独立度量
+- [x] 归一化 Token 审计：输入、输出、Cache 命中及 Reasoning Token 独立度量（一次 LLM 调用一行账，查询时按单价表估算成本，详见 `specs/token_usage/`）
 - [ ] 智能压缩流水线 (Compaction Flow)：水位超阈值自动触发历史切分与摘要折叠
 - [ ] 增量长程记忆提取 (Memory Extract)：对话完成后后台静默挖掘用户偏好，并注入全局 Prompt
 
@@ -378,7 +378,7 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 | `tool_artifact`  | `tool_call_id`, `attachment` | 工具（`export_artifact`）导出的产物工件：上传对象存储后的可预览附件 |
 | `skill_loaded`   | `skill_id`, `name`, `tool_call_id` | 模型 `load_skill` 自主装载成功：前端同步启用列表并弹提示条 |
 | `memory_written`  | `key`, `topic`, `content` | 模型自动识别并写入长期记忆库时下发的可视化提醒 |
-| `done`            | `id`, `usage` | 助手完整消息完成落库，返回最终消息 UUID 及 Token 审计信息 |
+| `done`            | `id`, `usage` | 助手完整消息完成落库，返回最终消息 UUID 及 Token 审计信息（`usage` 为整轮各次推理的累计消耗，多轮工具循环亦不漏计） |
 | `error`           | `message` | 执行链路出现无法恢复的系统异常报错 |
 
 ### 6.2 开放接口 (Open API) 规范
@@ -411,6 +411,8 @@ data: {"type": "done", "id": "msg_01h8...", "usage": {"prompt_tokens": 125, "com
 | | `GET` | `/api/v1/skill-runs/:run_id` | 轮询单个任务的运行状态、执行耗时与终态产出 |
 | | `POST` | `/api/v1/skill-runs/:run_id/retry` | 手动重试因外部可恢复原因失败的异步任务 |
 | **系统元数据** | `GET` | `/api/models` | 获取当前系统支持的模型矩阵与默认窗口上限 |
+| **用量统计** | `GET` | `/api/usage/stats` | Token 用量审计统计（总览/按日/按模型/按用途聚合，携带查询时估算成本 `cost_estimate`；员工本人、企管 `scope=all` 本企业、超管全平台） |
+| | `GET` | `/api/sessions/:id/usage` | 指定会话的用量明细（一行一次 LLM 调用，含轮次与用途，会话级读权限校验） |
 
 ---
 

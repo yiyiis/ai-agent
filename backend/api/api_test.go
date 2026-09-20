@@ -96,6 +96,10 @@ func setupTestServer() {
 	engine.GET("/api/skills/:id/runs/:run_id", Controller(api.GetSkillRunDetail))
 	engine.POST("/api/skills/:id/runs/:run_id/retry", Controller(api.RetrySkillRun))
 
+	// 阶段七·模块一：Token 用量统计与会话级用量明细
+	engine.GET("/api/usage/stats", Controller(api.GetTokenUsageStats))
+	engine.GET("/api/sessions/:id/usage", Controller(api.GetSessionTokenUsage))
+
 	// 阶段六：开放 API 网关（API Key 独立鉴权与多租户隔离）
 	openApiGroup := engine.Group("/api/v1")
 	openApiGroup.Use(api.ApiKeyAuthMiddleware())
