@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
@@ -270,6 +272,100 @@ func TestSkillMountDirWriteGuard(t *testing.T) {
 		map[string]any{"path": "./skills/x/y.txt", "content": "x"})
 	if !IsErrorResult(out) {
 		t.Fatalf("skills/ 前缀变体未拦截: %s", out)
+	}
+}
+
+// TestCapReadLineWindow read_file 行级有界化：超行数截断 + 翻页提示 + 单行超长截断
+func TestCapReadLineWindow(t *testing.T) {
+	lines := make([]string, 2100)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("l%d", i+1)
+	}
+	text := strings.Join(lines, "\n")
+
+	got := capRead(text, "a.txt", false)
+	if !strings.Contains(got, "l2000") || strings.Contains(got, "l2001") {
+		t.Fatalf("line window wrong: should show first 2000 lines only")
+	}
+	if !strings.Contains(got, "共 2100 行") || !strings.Contains(got, "已显示前 2000 行") {
+		t.Fatalf("truncation note missing: %q", got)
+	}
+	if !strings.Contains(got, "edit_file") {
+		t.Fatalf("un-paged hint should steer to edit/paging: %q", got)
+	}
+
+	got = capRead(text, "a.txt", true)
+	if !strings.Contains(got, "继续用更大的 offset") {
+		t.Fatalf("paged hint wrong: %q", got)
+	}
+
+	got = capRead(strings.Repeat("甲", 5000), "a.txt", false)
+	if !strings.Contains(got, "单行超长已截断") {
+		t.Fatalf("long line should be truncated: %q", got[:100])
+	}
+
+	if got := capRead("a\nb", "a.txt", false); got != "a\nb" {
+		t.Fatalf("small file should pass through unchanged: %q", got)
+	}
+}
+
+// TestCapProcOverflow 进程输出超限：完整输出落盘 .tool-outputs/，上下文只留头尾预览+路径
+func TestCapProcOverflow(t *testing.T) {
+	root := setupWorkspace(t)
+	ctx := context.Background()
+
+	big := strings.Repeat("汉x", 20000) // 40000 字符 > maxProcChars
+	out := capProc(ctx, "sess1", "bash", big)
+	if IsErrorResult(out.Text) {
+		t.Fatalf("overflow is not an error: %s", out.Text)
+	}
+	if out.BlobRef == "" || !strings.HasPrefix(out.BlobRef, ".tool-outputs/bash-") {
+		t.Fatalf("blob ref missing: %+v", out)
+	}
+	if !strings.Contains(out.Text, "中间省略") || !strings.Contains(out.Text, out.BlobRef) {
+		t.Fatalf("preview should carry omitted count and blob path")
+	}
+	if n := utf8.RuneCountInString(out.Text); n > maxProcChars+200 {
+		t.Fatalf("preview too big: %d runes", n)
+	}
+	if !strings.HasPrefix(out.Text, "汉x汉x") {
+		t.Fatalf("head should be preserved")
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sess1", filepath.FromSlash(out.BlobRef)))
+	if err != nil || string(data) != big {
+		t.Fatalf("blob should hold full output: %v", err)
+	}
+
+	// 未超限原样直通，无 blob
+	out = capProc(ctx, "sess1", "bash", "short output")
+	if out.Text != "short output" || out.BlobRef != "" {
+		t.Fatalf("small output should pass through: %+v", out)
+	}
+
+	// 错误前缀结果不走截断/落盘（错误是证据，保留全文）
+	out = capProc(ctx, "sess1", "bash", "[超时] x"+strings.Repeat("y", 40000))
+	if out.BlobRef != "" || out.Text != "[超时] x"+strings.Repeat("y", 40000) {
+		t.Fatalf("error result should bypass capping: %+v", out)
+	}
+}
+
+// TestBashOverflowWritesBlob bash 端到端：超大输出 → 预览 + blob 落盘（bash 不可用则跳过）
+func TestBashOverflowWritesBlob(t *testing.T) {
+	root := setupWorkspace(t)
+	out := ExecuteWithOutput(context.Background(), "sess1", "bash",
+		map[string]any{"command": "awk 'BEGIN{for(i=0;i<8000;i++) print \"line-\" i}'"})
+	if IsErrorResult(out.Text) {
+		t.Skipf("bash not available in this environment: %s", out.Text)
+	}
+	if out.BlobRef == "" || !strings.Contains(out.Text, "中间省略") {
+		t.Fatalf("overflow should spill to blob: %s ref=%q", out.Text, out.BlobRef)
+	}
+	if n := utf8.RuneCountInString(out.Text); n > maxProcChars+200 {
+		t.Fatalf("preview too big: %d runes", n)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sess1", filepath.FromSlash(out.BlobRef)))
+	if err != nil || !strings.Contains(string(data), "line-7999") {
+		t.Fatalf("blob should hold full output: %v", err)
 	}
 }
 

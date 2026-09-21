@@ -9,6 +9,9 @@ type Config struct {
 	// Billing 计费单价表（每百万 token，元）：金额仅在查询时估算，不落库，
 	// 未配置的模型金额记 0、token 计数照常统计
 	Billing []ModelPrice `yaml:"Billing" mapstructure:"Billing"`
+	// ContextWindows 模型上下文窗口表（token）：上下文组装分区的预算基准，
+	// 未配置的模型走 DefaultContextWindow
+	ContextWindows []ContextWindowEntry `yaml:"ContextWindows" mapstructure:"ContextWindows"`
 }
 
 // ProviderConfig 单个模型服务接入点
@@ -30,6 +33,7 @@ type ModelPrice struct {
 // InitProviders 按配置批量注册 Provider 与模型路由（main 启动时调用一次）
 func InitProviders(conf Config) {
 	SetModelPrices(conf.Billing)
+	SetContextWindows(conf.ContextWindows)
 	for _, p := range conf.Providers {
 		RegisterProvider(p.Name, NewOpenAICompatProvider(p.BaseURL, p.APIKey))
 		for _, m := range p.Models {

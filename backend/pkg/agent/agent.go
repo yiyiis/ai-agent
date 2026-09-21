@@ -28,6 +28,7 @@ import (
 	"backend/constants"
 	"backend/dal/model"
 	"backend/dao"
+	"backend/pkg/ctxpolicy"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
@@ -114,7 +115,8 @@ type Attachment = tools.Attachment
 // saveMessage 落库一条消息（含工具调用结构），返回 message_id。
 // 落库不随 Turn 取消而中断——中止/断连时已生成的部分内容仍要持久化，
 // 故剥离 ctx 的取消信号（保留注入的值，如 DB 连接）。
-func saveMessage(ctx context.Context, sessionID, role, content, reasoning string, calls []savedCall, toolCallID, name string, attachments []Attachment) (string, error) {
+func saveMessage(ctx context.Context, sessionID, role, content, reasoning string,
+	calls []savedCall, toolCallID, name string, attachments []Attachment, ex *msgExtras) (string, error) {
 	ctx = context.WithoutCancel(ctx)
 	msg := &model.Message{
 		MessageID:  uuid.New().String(),
@@ -138,6 +140,28 @@ func saveMessage(ctx context.Context, sessionID, role, content, reasoning string
 			msg.Attachments = strPtr(string(b))
 		}
 	}
+	if ex != nil {
+		msg.TokensFull = ex.tokensFull
+		msg.StubTokens = ex.stubTokens
+		if ex.stubContent != "" {
+			msg.StubContent = strPtr(ex.stubContent)
+		}
+		if ex.stubToolCalls != "" {
+			msg.StubToolCalls = strPtr(ex.stubToolCalls)
+		}
+		if ex.blobRef != "" {
+			msg.BlobRef = strPtr(ex.blobRef)
+		}
+		if ex.forceStub {
+			msg.CtxMode = "stub"
+		}
+		if ex.toolTarget != "" {
+			msg.ToolTarget = strPtr(ex.toolTarget)
+		}
+		if ex.toolOp != "" {
+			msg.ToolOp = strPtr(ex.toolOp)
+		}
+	}
 	if err := dao.CreateMessage(ctx, msg); err != nil {
 		return "", err
 	}
@@ -151,7 +175,18 @@ func strPtr(s string) *string {
 	return &s
 }
 
-// buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史人设污染，支持多模态视觉历史回放）
+// ctxRow 组装行：消息 + 冷区覆盖值（分区后按 zoneItem 决定用哪一侧）
+type ctxRow struct {
+	msg         provider.ChatMessage
+	coldCalls   any    // 冷区 assistant 行的 stub 版 tool_calls（nil=不换）
+	coldContent string // 冷区 tool 行的 stub 内容（""=content 即口径：错误与小结果）
+}
+
+// buildContext 装配 system 提示与历史消息（注入当前模型说明与工具规范，对冲历史
+// 人设污染，支持多模态视觉历史回放），并做热/冷分区：payload 行（工具调用参数与
+// 结果）在热区保留原文（content/tool_calls 列），冷区换 stub 口径（stub 列，旧数据
+// 现场按同一套规则生成）；叙事行（user / 纯文本 assistant / system）永远原文。
+// 历史图片仅保留最近 ImageKeepLast 张真实图，其余换文本占位（不做 URL/base64 解析）。
 func buildContext(ctx context.Context, session *model.Session, history []model.Message) []provider.ChatMessage {
 	if ctx == nil {
 		ctx = context.Background()
@@ -170,12 +205,37 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 		systemPrompt += "\n\n" + modelNote + "\n\n" + toolNote
 	}
 
-	msgs := []provider.ChatMessage{{Role: "system", Content: systemPrompt}}
+	// 历史图片两遍扫描：预收集全部图片附件位置 → 仅最近 ImageKeepLast 张进保留集。
+	// 被裁图片在拼装时换成文本占位且【不】做磁盘读取与 base64 编码。
+	type imgSlot struct{ rowIdx, attIdx int }
+	var imgOrder []imgSlot
+	for hi := range history {
+		if history[hi].Role != "user" || history[hi].Attachments == nil || *history[hi].Attachments == "" {
+			continue
+		}
+		var atts []Attachment
+		if json.Unmarshal([]byte(*history[hi].Attachments), &atts) != nil {
+			continue
+		}
+		for j, a := range atts {
+			if isImageAttachment(a) {
+				imgOrder = append(imgOrder, imgSlot{hi, j})
+			}
+		}
+	}
+	keepImg := make(map[imgSlot]bool, ctxpolicy.Current().ImageKeepLast)
+	for k := len(imgOrder) - 1; k >= 0 && len(keepImg) < ctxpolicy.Current().ImageKeepLast; k-- {
+		keepImg[imgOrder[k]] = true
+	}
+
+	rows := []ctxRow{{msg: provider.ChatMessage{Role: "system", Content: systemPrompt}}}
+	items := []zoneItem{{}} // 与 system 行对齐（叙事，不参与分区）
 
 	// 协议要求 assistant 发出 tool_calls 后，每个调用必须紧随一条 tool 结果。
 	// 中途被打断的轮次（页面刷新/断连/重启）会在库里留下没有 tool 行的 tool_calls，
 	// 原样回放会被上游以 400 拒绝（tool call result does not follow tool call）。
 	// 这里在轮次边界合成占位结果修复悬挂调用；来历不明的孤儿 tool 行无法在协议中表达，直接丢弃。
+	// 合成行内容极小，按叙事处理（不参与分区）。
 	var pendingIDs []string
 	done := map[string]bool{}
 	flushDangling := func() {
@@ -183,16 +243,21 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 			if done[id] {
 				continue
 			}
-			msgs = append(msgs, provider.ChatMessage{
+			rows = append(rows, ctxRow{msg: provider.ChatMessage{
 				Role:       "tool",
 				ToolCallID: id,
 				Content:    "[未执行] 该轮对话中断，此调用没有结果。不要假设它已成功，请基于当前实际情况继续。",
-			})
+			}})
+			items = append(items, zoneItem{})
 		}
 		pendingIDs, done = nil, map[string]bool{}
 	}
 
-	for _, m := range history {
+	// curCalls 当前批次的 callID → 原调用（tool 行旧数据现场生成 stub 时取配对参数）
+	curCalls := map[string]savedCall{}
+
+	for hi := range history {
+		m := &history[hi]
 		switch m.Role {
 		case "tool":
 			toolCallID := ""
@@ -203,44 +268,101 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 				continue
 			}
 			done[toolCallID] = true
-			msgs = append(msgs, provider.ChatMessage{
-				Role:       "tool",
-				Content:    m.Content,
-				ToolCallID: toolCallID,
+			// 冷区口径三来源：stub 列 / 旧数据（治理列缺失）现场生成 / content 即口径
+			coldContent := ""
+			toolName := ""
+			if m.Name != nil {
+				toolName = *m.Name
+			}
+			if m.StubContent != nil && *m.StubContent != "" {
+				coldContent = *m.StubContent
+			} else if m.TokensFull == 0 && m.Content != "" {
+				if c, ok := curCalls[toolCallID]; ok {
+					coldContent = stubForToolResult(toolName, c.Function.Arguments, m.Content)
+				}
+			}
+			rows = append(rows, ctxRow{
+				msg:         provider.ChatMessage{Role: "tool", Content: m.Content, ToolCallID: toolCallID},
+				coldContent: coldContent,
+			})
+			items = append(items, zoneItem{
+				role:       "tool",
+				isPayload:  true,
+				toolName:   toolName,
+				tokensFull: tokensOr(m.TokensFull, estimateTokens(m.Content)),
 			})
 		case "assistant":
 			flushDangling()
+			curCalls = map[string]savedCall{}
 			cm := provider.ChatMessage{Role: "assistant", Content: m.Content}
+			var calls []savedCall
+			hasCalls := false
 			if m.ToolCalls != nil && *m.ToolCalls != "" {
-				var calls []savedCall
 				if err := json.Unmarshal([]byte(*m.ToolCalls), &calls); err == nil && len(calls) > 0 {
 					cm.ToolCalls = calls
+					hasCalls = true
 					for _, c := range calls {
 						pendingIDs = append(pendingIDs, c.ID)
+						curCalls[c.ID] = c
 					}
 				}
 			}
-			msgs = append(msgs, cm)
+			row := ctxRow{msg: cm}
+			if hasCalls {
+				// 冷区 stub 版：stub 列优先，缺失（旧数据/序列化失败）现场生成（同一规则，逐字节一致）
+				var cold []savedCall
+				if m.StubToolCalls != nil && *m.StubToolCalls != "" {
+					_ = json.Unmarshal([]byte(*m.StubToolCalls), &cold)
+				}
+				if len(cold) == 0 {
+					cold = stubForToolCalls(calls)
+				}
+				row.coldCalls = cold
+			}
+			rows = append(rows, row)
+			if hasCalls {
+				items = append(items, zoneItem{
+					role:       "assistant",
+					isPayload:  true,
+					calls:      calls,
+					forceStub:  m.CtxMode == "stub",
+					tokensFull: tokensOr(m.TokensFull, estimateTokens(m.Content)+callsTokens(calls)),
+				})
+			} else {
+				items = append(items, zoneItem{}) // 纯文本：叙事
+			}
 		default: // user / system
 			flushDangling()
+			curCalls = map[string]savedCall{}
 			if m.Role == "user" && m.Attachments != nil && *m.Attachments != "" {
 				var atts []Attachment
 				if json.Unmarshal([]byte(*m.Attachments), &atts) == nil && len(atts) > 0 {
-					var imageParts []provider.ContentPart
-					for _, a := range atts {
-						if isImageAttachment(a) {
+					var attachParts []provider.ContentPart
+					hasImage := false
+					for j, a := range atts {
+						if !isImageAttachment(a) {
+							continue
+						}
+						hasImage = true
+						if keepImg[imgSlot{hi, j}] {
 							imgURL, err := resolveAttachmentImageURL(ctx, a)
 							if err == nil && imgURL != "" {
-								imageParts = append(imageParts, provider.ContentPart{
+								attachParts = append(attachParts, provider.ContentPart{
 									Type: string(provider.ContentPartTypeImageURL),
 									ImageURL: &provider.ImageURL{
 										URL: imgURL,
 									},
 								})
+								continue
 							}
 						}
+						// 被裁图片：文本占位（文件仍在工作区，模型可按需感知其存在）
+						attachParts = append(attachParts, provider.ContentPart{
+							Type: string(provider.ContentPartTypeText),
+							Text: "[图片已省略: " + a.Filename + "]",
+						})
 					}
-					if len(imageParts) > 0 {
+					if hasImage {
 						var parts []provider.ContentPart
 						if m.Content != "" {
 							parts = append(parts, provider.ContentPart{
@@ -248,21 +370,51 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 								Text: m.Content,
 							})
 						}
-						parts = append(parts, imageParts...)
-						msgs = append(msgs, provider.ChatMessage{
+						parts = append(parts, attachParts...)
+						rows = append(rows, ctxRow{msg: provider.ChatMessage{
 							Role:         "user",
 							Content:      m.Content,
 							ContentParts: parts,
-						})
+						}})
+						items = append(items, zoneItem{})
 						continue
 					}
 				}
 			}
-			msgs = append(msgs, provider.ChatMessage{Role: m.Role, Content: m.Content})
+			rows = append(rows, ctxRow{msg: provider.ChatMessage{Role: m.Role, Content: m.Content}})
+			items = append(items, zoneItem{})
 		}
 	}
 	flushDangling()
+
+	// 分区：applyCold 就地把冷区行切到 stub 口径，然后统一渲染
+	for i := range rows {
+		switch {
+		case items[i].role == "assistant" && rows[i].coldCalls != nil:
+			cold := rows[i].coldCalls
+			target := &rows[i].msg
+			items[i].applyCold = func() { target.ToolCalls = cold }
+		case items[i].role == "tool" && rows[i].coldContent != "":
+			cold := rows[i].coldContent
+			target := &rows[i].msg
+			items[i].applyCold = func() { target.Content = cold }
+		}
+	}
+	zoneBackward(items, session.Model)
+
+	msgs := make([]provider.ChatMessage, 0, len(rows))
+	for i := range rows {
+		msgs = append(msgs, rows[i].msg)
+	}
 	return msgs
+}
+
+// tokensOr 治理列估算优先，旧数据（0）回退现场估算
+func tokensOr(v, fallback int32) int32 {
+	if v > 0 {
+		return v
+	}
+	return fallback
 }
 
 func containsStr(list []string, s string) bool {
@@ -706,7 +858,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			autoTitle = string(r[:20]) + "..."
 		}
 	}
-	userMsgID, err := saveMessage(ctx, sessionID, "user", userContent, "", nil, "", "", attachments)
+	userMsgID, err := saveMessage(ctx, sessionID, "user", userContent, "", nil, "", "", attachments, nil)
 	if err != nil {
 		return err
 	}
@@ -739,7 +891,16 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	lastAssistantID := ""
 	turnUsage := (*provider.Usage)(nil) // 整轮各轮 usage 累计，随 done 事件下发
 
+	// lastPrompt 上一轮实测 prompt tokens（rezone 预算判断，天然滞后一轮）
+	lastPrompt := 0
 	for round := 0; round < MaxToolRounds; round++ {
+		// 轮内预算兜底：上一轮实测 prompt_tokens 超窗口×RezoneRatio 时，用与
+		// 组装器同一套 stub 规则对内存 msgs 整体分区替换一次（in-flight 最新 step
+		// 与叙事行不动）。批量一次、之后前缀只增不变；首轮不触发，
+		// 由 buildContext 的分区兜底。
+		if lastPrompt > 0 && int64(lastPrompt) > int64(float64(provider.ContextWindow(session.Model))*ctxpolicy.Current().RezoneRatio) {
+			rezoneMsgs(msgs)
+		}
 		req := &provider.ChatRequest{
 			Model:     session.Model,
 			Messages:  msgs,
@@ -748,6 +909,9 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 		tf := &thinkFilter{}
 		content, reasoning, calls, finish, usage, streamErr := streamOneRound(ctx, deps.Provider, req, tf, emit)
+		if usage != nil {
+			lastPrompt = usage.PromptTokens
+		}
 
 		// 记账先于异常分支：中途报错/截断/取消的轮次同样烧了 token，照常落账；
 		// 记账本身是旁路，失败只告警不影响对话
@@ -757,6 +921,10 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			emit(Event{Type: "round_progress", Usage: turnUsage})
 		}
 
+		// 超限参数 / 截断半截 JSON 的调用换 stub 版落库与进上下文（原文落 blob），
+		// 执行仍用原始 calls 产生可自纠正的错误提示；逐调用判定，不牵连同批次正常调用
+		persistCalls, rejected := prepareAssistantCalls(calls, streamErr != nil, finish == "length")
+
 		if streamErr != nil {
 			note := fmt.Sprintf("[对话因异常中止：%v]", streamErr)
 			var text string
@@ -765,27 +933,31 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			} else {
 				text = note
 			}
-			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
+			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, persistCalls, "", "", nil,
+				assistantExtras(ctx, sessionID, text, persistCalls, calls, rejected))
 			emit(Event{Type: "error", Error: streamErr.Error()})
 			emit(Event{Type: "done", ID: errID})
 			return nil
 		}
 
-		// finish=length 时 tool_calls 是被截断的半截 JSON，不能执行
+		// finish=length 时 tool_calls 是被截断的半截 JSON，不能执行；已换 stub 版
+		// 落库，下轮回放不再携带非法 JSON
 		if finish == "length" {
 			text := content + "\n\n[模型输出被 token 上限截断]"
-			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil)
+			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, persistCalls, "", "", nil,
+				assistantExtras(ctx, sessionID, text, persistCalls, calls, rejected))
 			emit(Event{Type: "error", Error: "回答被 token 上限截断，可重试或拆小任务"})
 			emit(Event{Type: "done", ID: id})
 			return nil
 		}
 
-		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", "", nil)
+		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, persistCalls, "", "", nil,
+			assistantExtras(ctx, sessionID, content, persistCalls, calls, rejected))
 		if err != nil {
 			return err
 		}
 		lastAssistantID = assistantID
-		msgs = append(msgs, provider.ChatMessage{Role: "assistant", Content: content, ToolCalls: callsOrNil(calls)})
+		msgs = append(msgs, provider.ChatMessage{Role: "assistant", Content: content, ToolCalls: callsOrNil(persistCalls)})
 
 		if len(calls) == 0 || finish != "tool_calls" {
 			emit(Event{Type: "done", ID: assistantID, Usage: turnUsage})
@@ -863,7 +1035,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				emit(Event{Type: "tool_artifact", ID: tc.ID, Attachments: []Attachment{att}})
 			}
 
-			if _, err := saveMessage(ctx, sessionID, "tool", out.Text, "", nil, tc.ID, tc.Function.Name, out.Attachments); err != nil {
+			if _, err := saveMessage(ctx, sessionID, "tool", out.Text, "", nil, tc.ID, tc.Function.Name, out.Attachments, toolExtras(tc, out)); err != nil {
 				return err
 			}
 			msgs = append(msgs, provider.ChatMessage{Role: "tool", Content: out.Text, ToolCallID: tc.ID})
@@ -871,7 +1043,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 		if killed {
 			killID, _ := saveMessage(ctx, sessionID, "assistant",
-				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", "", nil)
+				"[已停止：相同的工具调用反复返回相同结果，判定为无进展死循环]", "", nil, "", "", nil, nil)
 			emit(Event{Type: "error", Error: "已停止：检测到工具死循环（相同调用返回相同结果）"})
 			emit(Event{Type: "done", ID: killID})
 			return nil

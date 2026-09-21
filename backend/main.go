@@ -7,6 +7,7 @@ import (
 
 	"backend/api"
 	"backend/config"
+	"backend/pkg/ctxpolicy"
 	"backend/pkg/db"
 	"backend/pkg/dispatcher"
 	"backend/pkg/jwt"
@@ -34,8 +35,10 @@ func main() {
 	log.InitSlog(conf.Log)
 	validate.InitGinValidate()
 
-	// 3. 注册 LLM Provider 及模型路由
+	// 3. 注册 LLM Provider 及模型路由（含上下文窗口表装载）
 	provider.InitProviders(conf.LLM)
+	// 上下文组装分区策略（热区阈值/预算/图片保留数；零值保持默认）
+	ctxpolicy.Init(conf.AgentPolicy)
 
 	// 4. 初始化对象存储与执行沙箱（附件上传与工具执行的分发底座）
 	storage.Init(conf.COS)

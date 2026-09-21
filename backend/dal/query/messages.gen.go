@@ -37,6 +37,14 @@ func newMessage(db *gorm.DB, opts ...gen.DOOption) message {
 	_message.ToolCallID = field.NewString(tableName, "tool_call_id")
 	_message.Name = field.NewString(tableName, "name")
 	_message.Attachments = field.NewString(tableName, "attachments")
+	_message.StubContent = field.NewString(tableName, "stub_content")
+	_message.StubToolCalls = field.NewString(tableName, "stub_tool_calls")
+	_message.TokensFull = field.NewInt32(tableName, "tokens_full")
+	_message.StubTokens = field.NewInt32(tableName, "stub_tokens")
+	_message.BlobRef = field.NewString(tableName, "blob_ref")
+	_message.CtxMode = field.NewString(tableName, "ctx_mode")
+	_message.ToolTarget = field.NewString(tableName, "tool_target")
+	_message.ToolOp = field.NewString(tableName, "tool_op")
 	_message.CreatedAt = field.NewTime(tableName, "created_at")
 
 	_message.fillFieldMap()
@@ -47,18 +55,26 @@ func newMessage(db *gorm.DB, opts ...gen.DOOption) message {
 type message struct {
 	messageDo messageDo
 
-	ALL         field.Asterisk
-	ID          field.Int64
-	MessageID   field.String
-	SessionID   field.String
-	Role        field.String
-	Content     field.String
-	Reasoning   field.String // 模型思考过程
-	ToolCalls   field.String
-	ToolCallID  field.String
-	Name        field.String
-	Attachments field.String
-	CreatedAt   field.Time
+	ALL           field.Asterisk
+	ID            field.Int64
+	MessageID     field.String
+	SessionID     field.String
+	Role          field.String
+	Content       field.String
+	Reasoning     field.String // 模型思考过程
+	ToolCalls     field.String
+	ToolCallID    field.String
+	Name          field.String
+	Attachments   field.String
+	StubContent   field.String // tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）
+	StubToolCalls field.String
+	TokensFull    field.Int32
+	StubTokens    field.Int32
+	BlobRef       field.String
+	CtxMode       field.String
+	ToolTarget    field.String
+	ToolOp        field.String
+	CreatedAt     field.Time
 
 	fieldMap map[string]field.Expr
 }
@@ -85,6 +101,14 @@ func (m *message) updateTableName(table string) *message {
 	m.ToolCallID = field.NewString(table, "tool_call_id")
 	m.Name = field.NewString(table, "name")
 	m.Attachments = field.NewString(table, "attachments")
+	m.StubContent = field.NewString(table, "stub_content")
+	m.StubToolCalls = field.NewString(table, "stub_tool_calls")
+	m.TokensFull = field.NewInt32(table, "tokens_full")
+	m.StubTokens = field.NewInt32(table, "stub_tokens")
+	m.BlobRef = field.NewString(table, "blob_ref")
+	m.CtxMode = field.NewString(table, "ctx_mode")
+	m.ToolTarget = field.NewString(table, "tool_target")
+	m.ToolOp = field.NewString(table, "tool_op")
 	m.CreatedAt = field.NewTime(table, "created_at")
 
 	m.fillFieldMap()
@@ -110,7 +134,7 @@ func (m *message) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (m *message) fillFieldMap() {
-	m.fieldMap = make(map[string]field.Expr, 11)
+	m.fieldMap = make(map[string]field.Expr, 19)
 	m.fieldMap["id"] = m.ID
 	m.fieldMap["message_id"] = m.MessageID
 	m.fieldMap["session_id"] = m.SessionID
@@ -121,6 +145,14 @@ func (m *message) fillFieldMap() {
 	m.fieldMap["tool_call_id"] = m.ToolCallID
 	m.fieldMap["name"] = m.Name
 	m.fieldMap["attachments"] = m.Attachments
+	m.fieldMap["stub_content"] = m.StubContent
+	m.fieldMap["stub_tool_calls"] = m.StubToolCalls
+	m.fieldMap["tokens_full"] = m.TokensFull
+	m.fieldMap["stub_tokens"] = m.StubTokens
+	m.fieldMap["blob_ref"] = m.BlobRef
+	m.fieldMap["ctx_mode"] = m.CtxMode
+	m.fieldMap["tool_target"] = m.ToolTarget
+	m.fieldMap["tool_op"] = m.ToolOp
 	m.fieldMap["created_at"] = m.CreatedAt
 }
 

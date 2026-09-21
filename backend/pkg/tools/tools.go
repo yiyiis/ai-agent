@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"backend/pkg/errors"
 	"backend/pkg/sandbox"
@@ -29,9 +30,13 @@ import (
 )
 
 const (
-	maxOutput    = 256 * 1024 // 工具输出上限
-	maxReadChars = 100 * 1024 // 单次读文件上限
-	bashTimeoutMax = 300      // bash 工具自身允许的最大超时（秒）
+	maxOutput     = 256 * 1024 // 工具输出最终保险上限（sanitize 兜底）
+	maxReadLines  = 2000       // read_file 单次最多返回行数
+	maxLineChars  = 2000       // read_file 单行超长截断阈值（字符）
+	maxProcChars  = 30000      // bash/python 喂给 LLM 的输出上限（字符）
+	procHeadChars = 8000       // 进程输出超限时保留的头部字符数
+	procTailChars = 4000       // 进程输出超限时保留的尾部字符数
+	bashTimeoutMax = 300       // bash 工具自身允许的最大超时（秒）
 
 	// SkillMountPrefix 工作区内 skill 挂载目录前缀（阶段五：pkg/skill.MountDir），
 	// 挂载文件是只读引用，写入类工具在此拦截
@@ -62,7 +67,7 @@ func Schemas() []any {
 			"type": "function",
 			"function": map[string]any{
 				"name": "read_file",
-				"description": "读取工作区内某个文件的文本内容。\n" +
+				"description": "读取工作区内某个文件的文本内容，单次最多返回前 2000 行。\n" +
 					"大文件请用 offset / limit 分段读，不要一次性拉全文——那会白白吃掉上下文。" +
 					"只是想改其中几行的话，用 `edit_file`，根本不需要先读全文。",
 				"parameters": map[string]any{
@@ -277,7 +282,8 @@ func SortedEnv(m map[string]string) []string {
 
 // Output 单次工具执行的完整产物
 type Output struct {
-	Text        string       // 喂回 LLM 的执行结果文本
+	Text        string       // 喂回 LLM 的执行结果文本（进场有界口径，落库同款）
+	BlobRef     string       // 完整输出的工作区文件引用（.tool-outputs/…），超限落盘时非空
 	Attachments []Attachment // export_artifact 等导出的工件
 }
 
@@ -297,6 +303,9 @@ func IsErrorResult(s string) bool {
 // maxArgumentsBytes 单次 tool_call 参数上限：拦截模型试图一次性写入超大文件等行为，
 // 避免撑爆上下文与模型输出上限（提示模型分段写）
 const maxArgumentsBytes = 40 << 10
+
+// ArgsOverLimit 参数原文是否超过单次上限（agent 层在落库/进上下文前置换 stub 用）
+func ArgsOverLimit(raw string) bool { return len(raw) > maxArgumentsBytes }
 
 // ParseArguments 解析模型生成的 tool_call 参数 JSON；失败时返回可自我纠正的错误提示
 func ParseArguments(raw string) (map[string]any, string) {
@@ -372,14 +381,69 @@ func sanitize(s string) string {
 }
 
 func capRead(text, path string, paged bool) string {
-	if len(text) <= maxReadChars {
+	if text == "" {
 		return text
 	}
-	hint := "继续用更大的 offset 往后读"
-	if !paged {
-		hint = "改用 offset / limit 分段读；只是想改几行的话直接用 edit_file，不必读全文"
+	lines := strings.Split(text, "\n")
+	total := len(lines)
+	truncLines := false
+	if total > maxReadLines {
+		lines = lines[:maxReadLines]
+		truncLines = true
 	}
-	return text[:maxReadChars] + fmt.Sprintf("\n\n…（%s 还有 %d 字符未显示。%s。）", path, len(text)-maxReadChars, hint)
+	longLine := false
+	for i, ln := range lines {
+		if len(ln) <= maxLineChars {
+			continue // 字节数不超限，字符数必然不超
+		}
+		r := []rune(ln)
+		if len(r) <= maxLineChars {
+			continue // 中文场景：字节超但字符未超，保留
+		}
+		lines[i] = string(r[:maxLineChars]) + "…[单行超长已截断]"
+		longLine = true
+	}
+	out := strings.Join(lines, "\n")
+	var notes []string
+	if truncLines {
+		hint := "继续用更大的 offset 往后读"
+		if !paged {
+			hint = "改用 offset / limit 分段读；只是想改几行的话直接用 edit_file，不必读全文"
+		}
+		notes = append(notes, fmt.Sprintf("…（%s 共 %d 行，已显示前 %d 行。%s。）", path, total, maxReadLines, hint))
+	}
+	if longLine {
+		notes = append(notes, "…（存在超长单行，已按 2000 字符截断显示。）")
+	}
+	if len(notes) == 0 {
+		return out
+	}
+	return out + "\n\n" + strings.Join(notes, "\n")
+}
+
+// capProc 进程类工具（bash/python）输出有界化：基础设施失败（错误前缀）原样返回；
+// 超过 maxProcChars 时完整输出写入工作区 .tool-outputs/，返回头尾预览 + 文件路径
+// （可逆压缩：载荷落盘、引用进上下文）。落盘失败退化为纯头尾截断并提示重跑。
+func capProc(ctx context.Context, sessionID, tool, text string) Output {
+	if IsErrorResult(text) || utf8.RuneCountInString(text) <= maxProcChars {
+		return Output{Text: text}
+	}
+	ref := ""
+	name := fmt.Sprintf(".tool-outputs/%s-%s-%s.log", tool, time.Now().Format("0102-150405"), randHex(6))
+	if err := sandbox.WriteFile(ctx, sessionID, name, []byte(text)); err != nil {
+		slog.Warn("工具输出落盘失败，退化为头尾截断", "session", sessionID, "tool", tool, "err", err)
+	} else {
+		ref = name
+	}
+	r := []rune(text)
+	head, tail := string(r[:procHeadChars]), string(r[len(r)-procTailChars:])
+	out := head + fmt.Sprintf("\n…[中间省略 %d 字符]…\n", len(r)-procHeadChars-procTailChars) + tail
+	if ref != "" {
+		out += fmt.Sprintf("\n[输出超长，完整结果已写入工作区 %s，可 read_file 配合 offset 分段查看]", ref)
+	} else {
+		out += "\n[输出超长已截断；如需完整输出请缩小命令输出范围后重跑]"
+	}
+	return Output{Text: out, BlobRef: ref}
 }
 
 func argString(args map[string]any, key string) string {
@@ -562,7 +626,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 			inner = bashTimeoutMax
 		}
 		res := sandbox.RunBash(ctx, sessionID, argString(args, "command"), EnvFrom(ctx), inner)
-		return Output{Text: formatSandboxResult(res)}
+		return capProc(ctx, sessionID, "bash", formatSandboxResult(res))
 
 	case "python_exec":
 		// 脚本经驱动写进沙箱工作区，执行后清理
@@ -573,7 +637,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 		defer sandbox.RemoveFile(sessionID, script)
 
 		res := sandbox.RunPython(ctx, sessionID, script, EnvFrom(ctx), toolTimeouts["python_exec"])
-		return Output{Text: formatSandboxResult(res)}
+		return capProc(ctx, sessionID, "python", formatSandboxResult(res))
 
 	case LoadSkillTool:
 		// 正常路径由 agent 层拦截执行（改写挂载列表与 secrets）；落到这里

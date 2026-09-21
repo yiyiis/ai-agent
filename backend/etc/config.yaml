@@ -54,6 +54,30 @@ LLM:
     - Model: "GLM-5.3"
       Input: 2.0
       Output: 8.0
+  # 模型上下文窗口表（token）：上下文组装热区预算与轮内 rezone 的基准。
+  # 未配置的模型走默认 131072；glm-5.3-x 等变体按前缀吃这里的配置。
+  ContextWindows:
+    - Model: "GLM-5.3"
+      Window: 131072
+    - Model: "MiniMax-Text-01"
+      Window: 1000384
+
+# 上下文组装分区策略（热/冷分区 + 图片保留）。零值/缺段保持默认。
+#   HotSteps: 按工具的热区 step 阈值（step=一次上游调用）；DefaultHotSteps 兜底
+#   HotBudgetRatio: 热区 token 预算（窗口占比），任一条件触顶后更旧条目进冷区（stub）
+#   RezoneRatio: ReAct 轮内实测 prompt_tokens 超窗口×此比例时整体分区替换一次
+#   ImageKeepLast: 历史图片保留张数（其余换文本占位）
+AgentPolicy:
+  HotSteps:
+    - {Tool: "read_file", Steps: 2}
+    - {Tool: "write_file", Steps: 1}
+    - {Tool: "edit_file", Steps: 1}
+    - {Tool: "bash", Steps: 3}
+    - {Tool: "python_exec", Steps: 3}
+  DefaultHotSteps: 8
+  HotBudgetRatio: 0.25
+  RezoneRatio: 0.65
+  ImageKeepLast: 2
 
 # 对象存储：聊天附件与 export_artifact 产物统一上 COS（可分享的公网链接）。
 # Bucket 留空时附件与产物都落本地 uploads/ 并经 /api/uploads/:name 下载（零依赖部署）。

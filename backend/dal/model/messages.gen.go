@@ -12,17 +12,25 @@ const TableNameMessage = "messages"
 
 // Message mapped from table <messages>
 type Message struct {
-	ID          int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
-	MessageID   string    `gorm:"column:message_id;type:varchar(36);not null;uniqueIndex:idx_messages_message_id,priority:1" json:"message_id"`
-	SessionID   string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_id,priority:1" json:"session_id"`
-	Role        string    `gorm:"column:role;type:varchar(32);not null" json:"role"`
-	Content     string    `gorm:"column:content;type:longtext;not null" json:"content"`
-	Reasoning   *string   `gorm:"column:reasoning;type:longtext;comment:模型思考过程" json:"reasoning"` // 模型思考过程
-	ToolCalls   *string   `gorm:"column:tool_calls;type:json" json:"tool_calls"`
-	ToolCallID  *string   `gorm:"column:tool_call_id;type:varchar(64)" json:"tool_call_id"`
-	Name        *string   `gorm:"column:name;type:varchar(128)" json:"name"`
-	Attachments *string   `gorm:"column:attachments;type:json" json:"attachments"`
-	CreatedAt   time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3)" json:"created_at"`
+	ID             int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
+	MessageID      string    `gorm:"column:message_id;type:varchar(36);not null;uniqueIndex:idx_messages_message_id,priority:1" json:"message_id"`
+	SessionID      string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_id,priority:1" json:"session_id"`
+	Role           string    `gorm:"column:role;type:varchar(32);not null" json:"role"`
+	Content        string    `gorm:"column:content;type:longtext;not null" json:"content"`
+	Reasoning      *string   `gorm:"column:reasoning;type:longtext;comment:模型思考过程" json:"reasoning"` // 模型思考过程
+	ToolCalls      *string   `gorm:"column:tool_calls;type:json" json:"tool_calls"`
+	ToolCallID     *string   `gorm:"column:tool_call_id;type:varchar(64)" json:"tool_call_id"`
+	Name           *string   `gorm:"column:name;type:varchar(128)" json:"name"`
+	Attachments    *string   `gorm:"column:attachments;type:json" json:"attachments"`
+	StubContent    *string   `gorm:"column:stub_content;type:longtext;comment:tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）" json:"stub_content"` // tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）
+	StubToolCalls  *string   `gorm:"column:stub_tool_calls;type:json" json:"stub_tool_calls"`
+	TokensFull     int32     `gorm:"column:tokens_full;type:int;not null;default:0" json:"tokens_full"`
+	StubTokens     int32     `gorm:"column:stub_tokens;type:int;not null;default:0" json:"stub_tokens"`
+	BlobRef        *string   `gorm:"column:blob_ref;type:varchar(512)" json:"blob_ref"`
+	CtxMode        string    `gorm:"column:ctx_mode;type:varchar(16);not null" json:"ctx_mode"`
+	ToolTarget     *string   `gorm:"column:tool_target;type:varchar(255)" json:"tool_target"`
+	ToolOp         *string   `gorm:"column:tool_op;type:varchar(16)" json:"tool_op"`
+	CreatedAt      time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3)" json:"created_at"`
 }
 
 // TableName Message's table name
