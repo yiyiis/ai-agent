@@ -309,9 +309,14 @@ func TestCapReadLineWindow(t *testing.T) {
 	}
 }
 
-// TestCapProcOverflow 进程输出超限：完整输出落盘 .tool-outputs/，上下文只留头尾预览+路径
+// TestCapProcOverflow 进程输出超限：完整输出双写（沙箱 .tool-outputs/ + 对象存储归档），
+// 上下文只留头尾预览+路径
 func TestCapProcOverflow(t *testing.T) {
 	root := setupWorkspace(t)
+	uploads := t.TempDir()
+	oldRoot := storage.LocalRoot
+	storage.LocalRoot = uploads
+	t.Cleanup(func() { storage.LocalRoot = oldRoot })
 	ctx := context.Background()
 
 	big := strings.Repeat("汉x", 20000) // 40000 字符 > maxProcChars
@@ -333,18 +338,26 @@ func TestCapProcOverflow(t *testing.T) {
 	}
 	data, err := os.ReadFile(filepath.Join(root, "sess1", filepath.FromSlash(out.BlobRef)))
 	if err != nil || string(data) != big {
-		t.Fatalf("blob should hold full output: %v", err)
+		t.Fatalf("sandbox blob should hold full output: %v", err)
+	}
+	// 归档：本地驱动落 uploads/，URL 可回捞（沙箱回收后重物化的凭据）
+	if !strings.HasPrefix(out.ArchiveURL, "/api/uploads/") {
+		t.Fatalf("archive url wrong: %q", out.ArchiveURL)
+	}
+	arch, err := os.ReadFile(filepath.Join(uploads, filepath.Base(out.ArchiveURL)))
+	if err != nil || string(arch) != big {
+		t.Fatalf("archive should hold full output: %v", err)
 	}
 
-	// 未超限原样直通，无 blob
+	// 未超限原样直通，无 blob 无归档
 	out = capProc(ctx, "sess1", "bash", "short output")
-	if out.Text != "short output" || out.BlobRef != "" {
+	if out.Text != "short output" || out.BlobRef != "" || out.ArchiveURL != "" {
 		t.Fatalf("small output should pass through: %+v", out)
 	}
 
-	// 错误前缀结果不走截断/落盘（错误是证据，保留全文）
+	// 错误前缀结果不走截断/落盘/归档（错误是证据，保留全文）
 	out = capProc(ctx, "sess1", "bash", "[超时] x"+strings.Repeat("y", 40000))
-	if out.BlobRef != "" || out.Text != "[超时] x"+strings.Repeat("y", 40000) {
+	if out.BlobRef != "" || out.ArchiveURL != "" || out.Text != "[超时] x"+strings.Repeat("y", 40000) {
 		t.Fatalf("error result should bypass capping: %+v", out)
 	}
 }

@@ -4,9 +4,14 @@ package agent
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"backend/dal/model"
+	"backend/pkg/sandbox"
+	"backend/pkg/storage"
 	"backend/pkg/tools"
 )
 
@@ -131,6 +136,31 @@ func TestStubForToolResult(t *testing.T) {
 	}
 }
 
+// TestStubForToolResultProcPreview 超限进程输出的预览版（自带"中间省略"字样）必须
+// 仍能生成紧凑 stub，且尾 3 行把 blob 路径带进 stub——v1.0.0 幂等守卫误拦缺陷的回归用例
+func TestStubForToolResultProcPreview(t *testing.T) {
+	preview := "[stdout]\n" + strings.Repeat("line\n", 40) +
+		"…[中间省略 480000 字符]…\n" + strings.Repeat("tail\n", 4) +
+		"[输出超长，完整结果已写入工作区 .tool-outputs/bash-0921-x.log，可 read_file 配合 offset 分段查看]"
+
+	stub := stubForToolResult("bash", `{"command":"cat big.log"}`, preview)
+	if stub == preview {
+		t.Fatalf("preview carrying 省略 note must still collapse to compact stub")
+	}
+	if !strings.HasPrefix(stub, "[bash] cat big.log") {
+		t.Fatalf("stub should carry command: %q", stub)
+	}
+	if !strings.Contains(stub, ".tool-outputs/bash-0921-x.log") {
+		t.Fatalf("stub tail must keep blob path (cold-zone retrievability): %q", stub)
+	}
+	if n := len(stub); n > 2000 {
+		t.Fatalf("stub should be compact: %d chars", n)
+	}
+	if again := stubForToolResult("bash", `{"command":"cat big.log"}`, stub); again != stub {
+		t.Fatalf("stub must be idempotent")
+	}
+}
+
 func TestCallTarget(t *testing.T) {
 	tgt, op := callTarget([]savedCall{mkCall("write_file", `{"path":"a.py","content":"x"}`)})
 	if tgt != "a.py" || op != "write" {
@@ -162,9 +192,9 @@ func TestToolExtras(t *testing.T) {
 	if ex.stubContent != "" || ex.blobRef != "" {
 		t.Fatalf("error extras should be minimal: %+v", ex)
 	}
-	// bash 超限落盘引用透传
+	// bash 超限落盘引用透传（JSON 编码：path + 归档 URL）
 	ex = toolExtras(mkCall("bash", `{"command":"x"}`), tools.Output{Text: "ok", BlobRef: ".tool-outputs/bash-1.log"})
-	if ex.blobRef != ".tool-outputs/bash-1.log" {
+	if p, u := decodeBlobRef(ex.blobRef); p != ".tool-outputs/bash-1.log" || u != "" {
 		t.Fatalf("blob ref must pass through: %+v", ex)
 	}
 }
@@ -184,6 +214,79 @@ func TestAssistantExtras(t *testing.T) {
 	if ex.tokensFull <= 0 || ex.stubTokens <= 0 {
 		t.Fatalf("token estimates missing: %+v", ex)
 	}
+}
+
+// setupBlobEnv 本地沙箱 + 本地对象存储（uploads 指到临时目录），持久化用例共用
+func setupBlobEnv(t *testing.T) (wsRoot, uploads string) {
+	t.Helper()
+	wsRoot = t.TempDir()
+	sandbox.Init(sandbox.Config{Driver: "local", LocalRoot: wsRoot})
+	t.Cleanup(func() { sandbox.Init(sandbox.Config{Driver: "local"}) })
+	uploads = t.TempDir()
+	oldRoot := storage.LocalRoot
+	storage.LocalRoot = uploads
+	t.Cleanup(func() { storage.LocalRoot = oldRoot })
+	return wsRoot, uploads
+}
+
+// TestWriteRejectedBlobArchive 被拒原文双写：沙箱 + 对象存储归档；blob_ref 编解码往返与裸路径兼容
+func TestWriteRejectedBlobArchive(t *testing.T) {
+	wsRoot, uploads := setupBlobEnv(t)
+
+	path, url := writeRejectedBlob(context.Background(), "sess1", `{"calls":[{"id":"c1"}]}`)
+	if !strings.HasPrefix(path, ".tool-outputs/rejected-") {
+		t.Fatalf("sandbox path wrong: %q", path)
+	}
+	if !strings.HasPrefix(url, "/api/uploads/") {
+		t.Fatalf("archive url wrong: %q", url)
+	}
+	if _, err := os.Stat(filepath.Join(wsRoot, "sess1", filepath.FromSlash(path))); err != nil {
+		t.Fatalf("sandbox blob missing: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(uploads, filepath.Base(url)))
+	if err != nil || !strings.Contains(string(data), "c1") {
+		t.Fatalf("archive wrong: %v", err)
+	}
+
+	// 编解码往返 & v1.0.0 裸路径兼容
+	p2, u2 := decodeBlobRef(encodeBlobRef(path, url))
+	if p2 != path || u2 != url {
+		t.Fatalf("blobRef roundtrip broken: %q %q", p2, u2)
+	}
+	if p3, u3 := decodeBlobRef(".tool-outputs/bash-x.log"); p3 != ".tool-outputs/bash-x.log" || u3 != "" {
+		t.Fatalf("bare path compat broken: %q %q", p3, u3)
+	}
+}
+
+// TestMaterializeBlobs 沙箱回收重建后凭归档 URL 恢复；文件还在则不覆盖；裸路径行跳过
+func TestMaterializeBlobs(t *testing.T) {
+	wsRoot, _ := setupBlobEnv(t)
+	path, url := writeRejectedBlob(context.Background(), "sess1", "ORIG-DATA")
+	_ = wsRoot
+
+	// 模拟沙箱回收：切到全新空沙箱根
+	root2 := t.TempDir()
+	sandbox.Init(sandbox.Config{Driver: "local", LocalRoot: root2})
+
+	history := []model.Message{{Role: "tool", Content: "x", BlobRef: sp(encodeBlobRef(path, url))}}
+	materializeBlobs(context.Background(), "sess1", history)
+	data, err := os.ReadFile(filepath.Join(root2, "sess1", filepath.FromSlash(path)))
+	if err != nil || string(data) != "ORIG-DATA" {
+		t.Fatalf("rematerialize failed: %v %q", err, data)
+	}
+
+	// 已存在则跳过（沙箱存活时零流量，本地内容不被归档覆盖）
+	if err := os.WriteFile(filepath.Join(root2, "sess1", filepath.FromSlash(path)), []byte("LOCAL"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	materializeBlobs(context.Background(), "sess1", history)
+	data, _ = os.ReadFile(filepath.Join(root2, "sess1", filepath.FromSlash(path)))
+	if string(data) != "LOCAL" {
+		t.Fatalf("existing blob must not be overwritten: %q", data)
+	}
+
+	// 裸路径（无归档 URL）静默跳过，不报错
+	materializeBlobs(context.Background(), "sess1", []model.Message{{Role: "tool", Content: "x", BlobRef: sp(".tool-outputs/old.log")}})
 }
 
 func TestEstimateTokens(t *testing.T) {

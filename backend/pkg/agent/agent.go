@@ -637,6 +637,46 @@ func downloadAttachment(ctx context.Context, rawURL string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, storage.MaxBytes+1))
 }
 
+// materializeBlobs blob 重物化：沙箱回收重建后，把历史消息引用的 .tool-outputs
+// 归档恢复回工作区（与 materializeAttachments 同款生命周期兜底）。文件还在则
+// 跳过——沙箱存活时不产生任何下载流量；无归档 URL 的裸路径行（v1.0.0 旧行）
+// 无从恢复，静默跳过。失败只跳过该条，绝不阻塞对话。
+func materializeBlobs(ctx context.Context, sessionID string, history []model.Message) {
+	for i := range history {
+		m := &history[i]
+		if m.BlobRef == nil || *m.BlobRef == "" {
+			continue
+		}
+		blobPath, archiveURL := decodeBlobRef(*m.BlobRef)
+		if blobPath == "" || archiveURL == "" {
+			continue
+		}
+		if _, err := sandbox.ReadFile(ctx, sessionID, blobPath); err == nil {
+			continue // 沙箱里还在，无需重物化
+		}
+		data, err := fetchArchive(ctx, archiveURL)
+		if err != nil {
+			slog.Warn("blob 重物化取回归档失败", "session", sessionID, "path", blobPath, "err", err)
+			continue
+		}
+		if err := sandbox.WriteFile(ctx, sessionID, blobPath, data); err != nil {
+			slog.Warn("blob 重物化写回沙箱失败", "session", sessionID, "path", blobPath, "err", err)
+		}
+	}
+}
+
+// fetchArchive 按归档 URL 取回数据：本地驱动（/api/uploads/）直读 uploads 目录，
+// 对象存储走 HTTP 下载（与附件回捞同款通路）
+func fetchArchive(ctx context.Context, archiveURL string) ([]byte, error) {
+	if name := strings.TrimPrefix(archiveURL, "/api/uploads/"); name != "" && name != archiveURL {
+		return os.ReadFile(filepath.Join(storage.LocalRoot, filepath.Base(name)))
+	}
+	if strings.HasPrefix(archiveURL, "https://") || strings.HasPrefix(archiveURL, "http://") {
+		return downloadAttachment(ctx, archiveURL)
+	}
+	return nil, fmt.Errorf("不可识别的归档 URL: %s", archiveURL)
+}
+
 // workspaceRelPath 把相对路径（如 src/components/Header.tsx）清洗为安全的工作区相对路径：
 // 规范化斜杠、剥离 /workspace/ 前缀、拒绝越界（../ 与绝对路径）、对各路径段清洗非法字符；
 // 保留合法的多级子目录。无效时返回空串。
@@ -878,6 +918,9 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	// 附件落入会话工作区（沙箱），同时构造包含视觉图片的多模态用户消息
 	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
 	userTurn := buildMultimodalUserMessage(ctx, userContent, attachments, placed)
+	// blob 重物化：沙箱回收重建后，把历史消息引用的 .tool-outputs 归档恢复回
+	// 工作区（文件还在则零流量跳过），恢复模型 read_file 取回完整输出的能力
+	materializeBlobs(ctx, sessionID, history)
 	msgs = append(msgs, userTurn)
 	toolSchemas := tools.Schemas()
 	if ts.hasCatalog() {

@@ -15,7 +15,7 @@
 | `stub_tool_calls` | json NULL | assistant 批次精简版（结构同 `tool_calls`，仅替换 write/edit 的 arguments；id/type/name 原样） | assistant 行落库（`assistantExtras`） |
 | `tokens_full` | int NOT NULL DEFAULT 0 | content+tool_calls 粗估 token（`len/2` 字节估，偏保守）。**兼作旧数据判定**：`=0 且 content 非空` 视为治理列缺失的存量行，组装时现场生成 stub | 所有 assistant/tool 行 |
 | `stub_tokens` | int NOT NULL DEFAULT 0 | stub 版粗估 token | 同上 |
-| `blob_ref` | varchar(512) NULL | 完整输出的工作区文件引用（`.tool-outputs/…`）。归属：tool 行=进程超限输出；assistant 行=被拒参数原文 | 超限/被拒时 |
+| `blob_ref` | varchar(512) NULL | 完整输出的持久化定位符，JSON：`{"path":".tool-outputs/…","url":"归档URL"}`。path=沙箱工作区路径（模型侧身份）；url=对象存储归档（`storage.PutArchive`，Bucket 空落本地 uploads/），沙箱回收后凭此重物化。v1.0.0 裸路径行兼容读取但无从恢复。归属：tool 行=进程超限输出；assistant 行=被拒参数原文 | 超限/被拒时（双写：沙箱+归档） |
 | `ctx_mode` | varchar(16) NOT NULL DEFAULT '' | 上下文口径：空=按热/冷分区；`stub`=恒用精简版。**仅 assistant 行**会设置（批次含被拒调用时） | 拦截路径 |
 | `tool_target` | varchar(255) NULL | 冷区折叠键：文件类=path / search=query / bash=NULL。同批次目标不一致 → NULL（保守不折叠） | 写时提取（`callTarget`） |
 | `tool_op` | varchar(16) NULL | 操作类型：write/append/edit/read/search/exec（冷区折叠用，**列先行、折叠逻辑后续阶段实现**） | 同上 |

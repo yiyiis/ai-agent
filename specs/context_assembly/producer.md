@@ -29,10 +29,12 @@
 | `procHeadChars` / `procTailChars` | 8000 / 4000 | 超限时保留的头/尾 |
 
 行为：
-- `IsErrorResult(text)` 命中（错误前缀）→ **原样返回，不截断不落盘**（失败是证据）；
+- `IsErrorResult(text)` 命中（错误前缀）→ **原样返回，不截断不落盘不归档**（失败是证据）；
 - ≤3 万字符 → 原样直通；
-- 超限 → ①完整输出经 `sandbox.WriteFile` 落 `.tool-outputs/<tool>-<时间戳>-<randHex(6)>.log`（cleanRel 对点目录放行，目录自动创建，三种沙箱驱动一致）；②`Text` = 头 8000 + `\n…[中间省略 %d 字符]…\n` + 尾 4000 + 路径提示行；③`BlobRef` 记录路径。
-- 落盘失败 → 降级为纯头尾截断（提示改为"缩小命令输出范围后重跑"），slog 告警，不阻塞。
+- 超限 → 完整输出**双写**：①`sandbox.WriteFile` 落 `.tool-outputs/<tool>-<时间戳>-<randHex(6)>.log`（模型当场可 read_file；cleanRel 对点目录放行，目录自动创建，三种沙箱驱动一致）；②`storage.PutArchive` 归档对象存储（Bucket 空自动落本地 uploads/，`ArchiveURL` 携带回捞 URL）。③`Text` = 头 8000 + `\n…[中间省略 %d 字符]…\n` + 尾 4000 + 路径提示行。
+- 沙箱落盘 / 对象归档**各自失败均降级继续**（warn 不阻塞对话）；两者都失败时提示换为"缩小命令输出范围后重跑"。
+
+**持久化闭环（v1.0.1）**：`blob_ref` 列存 `{"path":".tool-outputs/…","url":"归档URL"}` JSON——path 是模型侧身份（content/stub 里的路径文本），url 是沙箱回收后的重物化凭据（`materializeBlobs` 每轮检查，文件缺失才按 URL 取回写回沙箱，与 `materializeAttachments` 同款生命周期兜底；v1.0.0 裸路径行兼容读取但无从恢复）。**模型永远只感知工作区路径，归档 URL 不进任何请求。**
 
 **链路顺序**：`sanitize`（控制字符清洗 + `maxOutput=256KB` 兜底）在 `formatResult` 内、`capProc` 之前执行——**blob 存的是清洗版（≤256KB），不是进程原始字节**。
 
@@ -69,8 +71,8 @@
 | 其它工具 >512 字符 | `[%s 结果已省略（约 %dKB），需要时重新调用]` |
 | 其它工具 ≤512 字符 | 原文（NULL） |
 
-`headTailLines(s, n)`：总行数 ≤ 2n 原样；否则头 n 行 + `\n…（中间省略 %d 行）…\n` + 尾 n 行。  
-幂等守卫：内容含"已省略"→ 原样返回。
+`headTailLines(s, n)`：总行数 ≤ 2n 原样；否则头 n 行 + `\n…（中间省略 %d 行）…\n` + 尾 n 行。进程超限结果的 stub 尾 3 行必然携带预览版末行的 blob 路径提示——**冷区模型仍可 read_file 取回**。  
+幂等守卫（`isResultStub`）：按 stub 固定前缀精确判定（`[read_file ` / `[bash] ` / `[python_exec] ` / 含"结果已省略"），**不可用"已省略"模糊匹配**——工具层预览自带的"…[中间省略 N 字符]…"含同样字样，会把超限结果的 stub 生成误拦（v1.0.0 修复的缺陷，有回归用例钉住）。
 
 ### 2.3 拦截置换 —— `prepareAssistantCalls(calls, streamInterrupted, finishLength)`
 
@@ -96,10 +98,11 @@ streamOneRound → prepareAssistantCalls → persistCalls(stub 版) + rejected
 
 ### 2.4 blob_ref / ctx_mode 归属
 
-| 字段 | 行 | 条件 | 指向 |
+| 字段 | 行 | 条件 | 值 |
 |---|---|---|---|
-| blob_ref | tool 行 | bash/python 结果超限 | `.tool-outputs/<tool>-*.log` |
-| blob_ref | assistant 行 | 批次含被拒调用 | `.tool-outputs/rejected-<ts>-<sigHash>.json` |
+| blob_ref | tool 行 | bash/python 结果超限 | `{"path":".tool-outputs/<tool>-*.log","url":…}` |
+| blob_ref | assistant 行 | 批次含被拒调用 | `{"path":".tool-outputs/rejected-*.json","url":…}`（`writeRejectedBlob` 双写） |
+| blob_ref | read_file 结果 | **永远没有** | 文件本体在沙箱，无需另存 |
 | ctx_mode='stub' | **仅 assistant 行** | 批次含被拒调用 | tool/user 行永不设置 |
 
 被拒 write 的 assistant 行 `tool_calls` 与 `stub_tool_calls` 内容相同（均为 stub）——**有意冗余**：tool_calls 列被每轮 SELECT * 与前端历史接口读取，存原文会把大垃圾放回扫描路径。

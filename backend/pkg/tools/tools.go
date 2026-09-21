@@ -284,6 +284,7 @@ func SortedEnv(m map[string]string) []string {
 type Output struct {
 	Text        string       // 喂回 LLM 的执行结果文本（进场有界口径，落库同款）
 	BlobRef     string       // 完整输出的工作区文件引用（.tool-outputs/…），超限落盘时非空
+	ArchiveURL  string       // 完整输出的对象存储归档 URL（storage.PutArchive 成功时非空；沙箱回收后凭此重物化）
 	Attachments []Attachment // export_artifact 等导出的工件
 }
 
@@ -422,18 +423,25 @@ func capRead(text, path string, paged bool) string {
 }
 
 // capProc 进程类工具（bash/python）输出有界化：基础设施失败（错误前缀）原样返回；
-// 超过 maxProcChars 时完整输出写入工作区 .tool-outputs/，返回头尾预览 + 文件路径
-// （可逆压缩：载荷落盘、引用进上下文）。落盘失败退化为纯头尾截断并提示重跑。
+// 超过 maxProcChars 时完整输出双写——工作区 .tool-outputs/（模型当场可 read_file）
+// 与对象存储归档（沙箱回收后重物化的凭据）——返回头尾预览 + 文件路径。
+// 两种持久化各自失败均降级继续（warn 不阻塞对话）。
 func capProc(ctx context.Context, sessionID, tool, text string) Output {
 	if IsErrorResult(text) || utf8.RuneCountInString(text) <= maxProcChars {
 		return Output{Text: text}
 	}
 	ref := ""
+	archiveURL := ""
 	name := fmt.Sprintf(".tool-outputs/%s-%s-%s.log", tool, time.Now().Format("0102-150405"), randHex(6))
 	if err := sandbox.WriteFile(ctx, sessionID, name, []byte(text)); err != nil {
 		slog.Warn("工具输出落盘失败，退化为头尾截断", "session", sessionID, "tool", tool, "err", err)
 	} else {
 		ref = name
+	}
+	if obj, err := storage.PutArchive(ctx, []byte(text), filepath.Base(name), "text/plain"); err != nil {
+		slog.Warn("工具输出归档失败（沙箱回收后该输出不可恢复）", "session", sessionID, "tool", tool, "err", err)
+	} else {
+		archiveURL = obj.URL
 	}
 	r := []rune(text)
 	head, tail := string(r[:procHeadChars]), string(r[len(r)-procTailChars:])
@@ -443,7 +451,7 @@ func capProc(ctx context.Context, sessionID, tool, text string) Output {
 	} else {
 		out += "\n[输出超长已截断；如需完整输出请缩小命令输出范围后重跑]"
 	}
-	return Output{Text: out, BlobRef: ref}
+	return Output{Text: out, BlobRef: ref, ArchiveURL: archiveURL}
 }
 
 func argString(args map[string]any, key string) string {

@@ -123,9 +123,11 @@ flowchart TD
 2. Loop Guard 提示前缀拼进 `out.Text` 后，`IsErrorResult` 可能识别不出被盖住前缀的错误（后果保守：错误走默认 stub 分支，不丢信息）。
 3. 被拒调用的 tool 行折叠键为 NULL（参数原文不可解析，保守不折叠）。
 4. blob 文件为 sanitize 后的清洗版（≤256KB），非进程原始字节。
+5. ~~blob 生命周期跟随沙箱~~（v1.0.1 已解决）：超限输出与被拒参数原文现在**双写**——沙箱 `.tool-outputs/`（模型当场可读）+ 对象存储归档（`storage.PutArchive`，Bucket 空自动落本地 uploads/），`blob_ref` 列存 `{"path","url"}` JSON。沙箱回收后 `materializeBlobs` 每轮按需重物化（文件还在则零流量跳过，与 `materializeAttachments` 同款生命周期兜底）。v1.0.0 的裸路径行兼容读取但无从恢复。残余限制：重物化的存在性检查在 docker/e2b 驱动下是一次远程读（本地驱动是廉价 os 调用）；归档为 sanitize 后的清洗版。
 
 ## 8. 后续阶段（数据列已就绪）
 
 - **冷区折叠**：连续同 `(tool_target, tool_op)` 的冷区记录合并为一条文本消息（如 `a.py：append ×10，共 800 行，全部成功`），失败保留次数与最后一条错误；批量折叠保缓存。
 - **LLM Compaction（阶段七·模块二）**：`session_digests` 表已建、`token_usages.purpose='compact'` 已预留，对最老段做摘要。
 - **view_image 工具**：历史图片按需回看（占位符 + 沙箱路径已具备）。
+- **前端"查看完整输出"**：工具卡片按 `blob_ref` 的归档 URL 直链完整输出（存储归档已就绪，纯前端工作）。

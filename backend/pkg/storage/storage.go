@@ -7,6 +7,7 @@
 package storage
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -116,4 +117,15 @@ func Init(cfg Config) {
 // Default 全局默认存储驱动
 func Default() Storage {
 	return defaultStorage
+}
+
+// PutArchive 归档一份服务端生成的数据（工具超限输出、被拒参数原文等 blob）：
+// 与附件上传共用驱动（Bucket 空落本地 uploads/，配置后直传 COS），随机名防猜测。
+// 返回的 Object.URL 是回捞与前端查看的唯一凭据——调用方必须持久化它
+//（messages.blob_ref 存 {"path","url"}），沙箱回收后凭 URL 重物化回工作区。
+func PutArchive(ctx context.Context, data []byte, suggestedName, contentType string) (Object, error) {
+	if err := CheckSize(int64(len(data))); err != nil {
+		return Object{}, err
+	}
+	return Default().Put(ctx, suggestedName, bytes.NewReader(data), int64(len(data)), contentType)
 }

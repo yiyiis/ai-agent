@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"backend/pkg/sandbox"
+	"backend/pkg/storage"
 	"backend/pkg/tools"
 )
 
@@ -130,13 +131,23 @@ func prepareAssistantCalls(calls []savedCall, streamInterrupted, finishLength bo
 	return stubbed, true
 }
 
+// isResultStub 内容是否已是结果 stub——幂等守卫用精确的固定前缀/标记判定，
+// 不能用"已省略"模糊匹配：工具层预览自带的"…[中间省略 N 字符]…"也含这四个字，
+// 会把超限 bash 的 stub 生成误拦成"已是 stub"（v1.0.0 已修复的缺陷）。
+func isResultStub(s string) bool {
+	return strings.HasPrefix(s, "[read_file ") ||
+		strings.HasPrefix(s, "[bash] ") ||
+		strings.HasPrefix(s, "[python_exec] ") ||
+		strings.Contains(s, "结果已省略")
+}
+
 // stubForToolResult tool 结果的精简版（按工具类型）。错误结果与天然短小的
 // 返回原文——调用方据此写 NULL，组装时直接用 content。
 func stubForToolResult(callName, callArgs, content string) string {
 	if tools.IsErrorResult(content) {
 		return content // 失败是证据，保留全文
 	}
-	if strings.Contains(content, "已省略") {
+	if isResultStub(content) {
 		return content // 幂等：已是 stub
 	}
 	args, _ := tools.ParseArguments(callArgs)
@@ -268,18 +279,51 @@ func hasOversizedArgs(calls []savedCall) bool {
 	return false
 }
 
-// writeRejectedBlob 超限/截断原文落工作区 blob（审计取证，配合 logArgAnomaly），
-// 失败仅告警不阻塞对话
-func writeRejectedBlob(ctx context.Context, sessionID, data string) string {
-	if data == "" {
-		return ""
+// blobRef 持久化定位符：沙箱路径（模型侧身份）+ 对象存储归档 URL
+//（沙箱回收后重物化与前端查看全文的凭据）。
+type blobRef struct {
+	Path string `json:"path"`
+	URL  string `json:"url,omitempty"`
+}
+
+func encodeBlobRef(path, url string) string {
+	b, err := json.Marshal(blobRef{Path: path, URL: url})
+	if err != nil {
+		return path
 	}
-	name := fmt.Sprintf(".tool-outputs/rejected-%s-%s.json", time.Now().Format("0102-150405"), sigHash(data))
+	return string(b)
+}
+
+// decodeBlobRef 兼容 v1.0.0 的裸路径行（无 URL：沙箱回收后无从恢复，只能用现状）
+func decodeBlobRef(s string) (path, url string) {
+	var r blobRef
+	if json.Unmarshal([]byte(s), &r) == nil && r.Path != "" {
+		return r.Path, r.URL
+	}
+	return s, ""
+}
+
+// writeRejectedBlob 超限/截断原文双写：工作区 .tool-outputs/（当场可查）
+// + 对象存储归档（沙箱回收后凭 URL 恢复），两种失败均降级（warn 不阻塞对话）
+func writeRejectedBlob(ctx context.Context, sessionID, data string) (string, string) {
+	if data == "" {
+		return "", ""
+	}
+	base := fmt.Sprintf("rejected-%s-%s.json", time.Now().Format("0102-150405"), sigHash(data))
+	ref := ""
+	name := ".tool-outputs/" + base
 	if err := sandbox.WriteFile(ctx, sessionID, name, []byte(data)); err != nil {
 		slog.Warn("超限参数原文落盘失败", "session", sessionID, "err", err)
-		return ""
+	} else {
+		ref = name
 	}
-	return name
+	archiveURL := ""
+	if obj, err := storage.PutArchive(ctx, []byte(data), base, "application/json"); err != nil {
+		slog.Warn("超限参数原文归档失败", "session", sessionID, "err", err)
+	} else {
+		archiveURL = obj.URL
+	}
+	return ref, archiveURL
 }
 
 // assistantExtras assistant 行的治理列装配（stub 版工具调用、token 估算、折叠键）
@@ -303,7 +347,10 @@ func assistantExtras(ctx context.Context, sessionID, content string, persistCall
 	if rejected {
 		ex.forceStub = true
 		if b, err := json.Marshal(origCalls); err == nil {
-			ex.blobRef = writeRejectedBlob(ctx, sessionID, string(b))
+			path, url := writeRejectedBlob(ctx, sessionID, string(b))
+			if path != "" || url != "" {
+				ex.blobRef = encodeBlobRef(path, url)
+			}
 		}
 	}
 	return ex
@@ -314,7 +361,9 @@ func toolExtras(tc savedCall, out tools.Output) *msgExtras {
 	stub := stubForToolResult(tc.Function.Name, tc.Function.Arguments, out.Text)
 	ex := &msgExtras{
 		tokensFull: estimateTokens(out.Text),
-		blobRef:    out.BlobRef,
+	}
+	if out.BlobRef != "" || out.ArchiveURL != "" {
+		ex.blobRef = encodeBlobRef(out.BlobRef, out.ArchiveURL)
 	}
 	if stub != out.Text {
 		ex.stubContent = stub
