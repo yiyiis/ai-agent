@@ -127,7 +127,7 @@ flowchart TD
 
 ## 8. 后续阶段（数据列已就绪）
 
-- **冷区折叠**：连续同 `(tool_target, tool_op)` 的冷区记录合并为一条文本消息（如 `a.py：append ×10，共 800 行，全部成功`），失败保留次数与最后一条错误；批量折叠保缓存。
-- **LLM Compaction（阶段七·模块二）**：`session_digests` 表已建、`token_usages.purpose='compact'` 已预留，对最老段做摘要。
+- **LLM Compaction（阶段七·模块二）**：**已规划，完整设计见 [compaction.md](compaction.md)**——水位超 `窗口×0.70` 时 turn 前同步触发历史切分与滚动摘要（`session_digests` 表已建、`token_usages.purpose='compact'` 已预留、`sessions.last_context_tokens` 死列待激活），非破坏（messages 行永不删除）。实现按 compaction.md §14 的 C1/C2/C3 拆分执行。
+- **冷区折叠**：连续同 `(tool_target, tool_op)` 的冷区记录合并为一条文本消息（如 `a.py：append ×10，共 800 行，全部成功`），失败保留次数与最后一条错误；批量折叠保缓存。折叠落地后 compaction 的输入升级为折叠口径（见 compaction.md §11）。
 - **view_image 工具**：历史图片按需回看（占位符 + 沙箱路径已具备）。
 - **前端"查看完整输出"**：工具卡片按 `blob_ref` 的归档 URL 直链完整输出（存储归档已就绪，纯前端工作）。
