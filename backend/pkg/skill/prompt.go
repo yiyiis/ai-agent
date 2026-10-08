@@ -39,6 +39,7 @@ func BuildSkillsPrompt(entries []Entry) string {
 		"",
 		"以下技能已完成沙箱工作区挂载并在当前会话直接可用：",
 		"每个技能在工作区中的完整路径为 `" + MountDir + "/<目录名>/`。若需要查阅完整使用说明，请使用 `read_file` 读取其入口文件 `" + MountDir + "/<目录名>/SKILL.md`，随后按指引用 bash 或 python_exec 调用其中的脚本。",
+		"运行技能脚本的标准形式：`cd " + MountDir + "/<目录名> && python3 scripts/xxx.py`——bash 的当前目录始终是工作区根、不是脚本所在目录，脚本依赖同目录文件时必须先 cd 进技能目录再执行。",
 		"技能配置的机密密钥已直接注入当前进程环境变量（可直接从 os.environ 读取）。",
 		"",
 	}

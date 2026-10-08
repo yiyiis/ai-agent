@@ -226,8 +226,10 @@ func (ts *turnSkills) runLoadSkill(ctx context.Context, sessionID string, tc sav
 	}
 	slog.Info("技能自动装载成功", "session", sessionID, "skill", rawName, "dir", item.DirName, "md_len", len(body))
 	return tools.Output{Text: fmt.Sprintf(
-		"已加载技能 `%s`，文件在工作区 %s/%s/ 下（只读）。它配置的机密密钥已注入进程环境变量。以下是 SKILL.md：\n\n%s",
-		rawName, skill.MountDir, item.DirName, body)}, &Event{Type: "skill_loaded", ID: tc.ID, Name: rawName, SkillID: item.ID}
+		"已加载技能 `%s`，文件在工作区 %s/%s/ 下（只读）。它配置的机密密钥已注入进程环境变量。\n"+
+			"运行其脚本的标准形式：`cd %s/%s && python3 scripts/xxx.py`——bash 的当前目录是工作区根而非脚本所在目录，脚本依赖同目录文件时必须先 cd；若脚本报\"文件不存在\"，多半是没 cd，补上重跑即可。\n\n"+
+			"以下是 SKILL.md：\n\n%s",
+		rawName, skill.MountDir, item.DirName, skill.MountDir, item.DirName, body)}, &Event{Type: "skill_loaded", ID: tc.ID, Name: rawName, SkillID: item.ID}
 }
 
 func (ts *turnSkills) catalogNames() []string {
