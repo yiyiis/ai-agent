@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -33,7 +34,19 @@ func newLocalDriver(cfg Config) *localDriver {
 
 func (*localDriver) Name() string { return "local" }
 
-func (*localDriver) EnvNote() string { return localEnvNote() }
+// EnvNote 本地驱动的环境契约：宿主即执行环境，按构建平台给模型真实预期
+func (*localDriver) EnvNote() string {
+	if runtime.GOOS == "windows" {
+		return "- 宿主是 **Windows + Git Bash**，不是 Linux/macOS；\n" +
+			"- 启动目录就是会话工作区，用户上传与工具产出的文件都在这里；不要 cd 到 /tmp 等系统目录找文件（重定向到 /dev/null 可用）；\n" +
+			"- Python 解释器命令是 `python`；`python3` 是无效的商店占位符，会报 \"Python was not found\"；要跑 Python 优先用 python_exec 工具；\n" +
+			"- 没有 systemd、apt、brew 等，系统依赖不可安装。"
+	}
+	return "- 宿主是 Linux/macOS，命令直接跑在宿主 shell 上；\n" +
+		"- 启动目录就是会话工作区，用户上传与工具产出的文件都在这里；\n" +
+		"- Python 解释器命令通常是 `python3`；跑 Python 优先用 python_exec 工具；\n" +
+		"- 系统依赖不可随意安装，注意权限约束。"
+}
 
 // dir 会话工作区目录（按需创建；进程执行的 cwd 与文件操作的根）
 func (d *localDriver) dir(sessionID string) (string, error) {
