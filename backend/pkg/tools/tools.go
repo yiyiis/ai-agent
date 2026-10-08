@@ -121,6 +121,7 @@ func Schemas() []any {
 			"function": map[string]any{
 				"name": "bash",
 				"description": "在工作区内执行一条 bash 命令，返回 stdout / stderr / exit_code。" +
+					"每次调用是独立的 shell 进程——cd 与环境变量不跨调用保留，需要换目录执行请写成 `cd xxx && cmd` 一条命令。" +
 					"运行环境契约（违反会直接失败，别凭惯例猜测）：\n" + sandbox.EnvNote(),
 				"parameters": map[string]any{
 					"type": "object",
