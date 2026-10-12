@@ -12,25 +12,25 @@ const TableNameMessage = "messages"
 
 // Message mapped from table <messages>
 type Message struct {
-	ID             int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
-	MessageID      string    `gorm:"column:message_id;type:varchar(36);not null;uniqueIndex:idx_messages_message_id,priority:1" json:"message_id"`
-	SessionID      string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_id,priority:1" json:"session_id"`
-	Role           string    `gorm:"column:role;type:varchar(32);not null" json:"role"`
-	Content        string    `gorm:"column:content;type:longtext;not null" json:"content"`
-	Reasoning      *string   `gorm:"column:reasoning;type:longtext;comment:模型思考过程" json:"reasoning"` // 模型思考过程
-	ToolCalls      *string   `gorm:"column:tool_calls;type:json" json:"tool_calls"`
-	ToolCallID     *string   `gorm:"column:tool_call_id;type:varchar(64)" json:"tool_call_id"`
-	Name           *string   `gorm:"column:name;type:varchar(128)" json:"name"`
-	Attachments    *string   `gorm:"column:attachments;type:json" json:"attachments"`
-	StubContent    *string   `gorm:"column:stub_content;type:longtext;comment:tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）" json:"stub_content"` // tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）
-	StubToolCalls  *string   `gorm:"column:stub_tool_calls;type:json" json:"stub_tool_calls"`
-	TokensFull     int32     `gorm:"column:tokens_full;type:int;not null;default:0" json:"tokens_full"`
-	StubTokens     int32     `gorm:"column:stub_tokens;type:int;not null;default:0" json:"stub_tokens"`
-	BlobRef        *string   `gorm:"column:blob_ref;type:varchar(512)" json:"blob_ref"`
-	CtxMode        string    `gorm:"column:ctx_mode;type:varchar(16);not null" json:"ctx_mode"`
-	ToolTarget     *string   `gorm:"column:tool_target;type:varchar(255)" json:"tool_target"`
-	ToolOp         *string   `gorm:"column:tool_op;type:varchar(16)" json:"tool_op"`
-	CreatedAt      time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3)" json:"created_at"`
+	ID            int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
+	MessageID     string    `gorm:"column:message_id;type:varchar(36);not null;uniqueIndex:idx_messages_message_id,priority:1" json:"message_id"`
+	SessionID     string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_id,priority:1" json:"session_id"`
+	Role          string    `gorm:"column:role;type:varchar(32);not null" json:"role"`
+	Content       string    `gorm:"column:content;type:longtext;not null" json:"content"`
+	Reasoning     *string   `gorm:"column:reasoning;type:longtext;comment:模型思考过程" json:"reasoning"` // 模型思考过程
+	ToolCalls     *string   `gorm:"column:tool_calls;type:json" json:"tool_calls"`
+	ToolCallID    *string   `gorm:"column:tool_call_id;type:varchar(64)" json:"tool_call_id"`
+	Name          *string   `gorm:"column:name;type:varchar(128)" json:"name"`
+	Attachments   *string   `gorm:"column:attachments;type:json" json:"attachments"`
+	StubContent   *string   `gorm:"column:stub_content;type:longtext;comment:tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）" json:"stub_content"`              // tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）
+	StubToolCalls *string   `gorm:"column:stub_tool_calls;type:json;comment:assistant 批次精简版（结构同 tool_calls，仅替换 arguments）" json:"stub_tool_calls"` // assistant 批次精简版（结构同 tool_calls，仅替换 arguments）
+	TokensFull    int32     `gorm:"column:tokens_full;type:int;not null;comment:content+tool_calls 粗估 token（字符数/2，写时估算）" json:"tokens_full"`       // content+tool_calls 粗估 token（字符数/2，写时估算）
+	StubTokens    int32     `gorm:"column:stub_tokens;type:int;not null;comment:stub 版粗估 token" json:"stub_tokens"`                                // stub 版粗估 token
+	BlobRef       *string   `gorm:"column:blob_ref;type:varchar(512);comment:完整输出的工作区文件引用（.tool-outputs/…）" json:"blob_ref"`                       // 完整输出的工作区文件引用（.tool-outputs/…）
+	CtxMode       string    `gorm:"column:ctx_mode;type:varchar(16);not null;comment:上下文口径：空=按热/冷分区；stub=恒用精简版（超限被拦截标记）" json:"ctx_mode"`          // 上下文口径：空=按热/冷分区；stub=恒用精简版（超限被拦截标记）
+	ToolTarget    *string   `gorm:"column:tool_target;type:varchar(255);comment:冷区折叠键：文件类=path / search=query / bash=NULL" json:"tool_target"`     // 冷区折叠键：文件类=path / search=query / bash=NULL
+	ToolOp        *string   `gorm:"column:tool_op;type:varchar(16);comment:操作类型：write/append/edit/read/search/exec（冷区折叠用）" json:"tool_op"`         // 操作类型：write/append/edit/read/search/exec（冷区折叠用）
+	CreatedAt     time.Time `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3)" json:"created_at"`
 }
 
 // TableName Message's table name

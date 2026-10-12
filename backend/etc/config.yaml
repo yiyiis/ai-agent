@@ -118,3 +118,21 @@ Sandbox:
   E2BKey: "YOUR_E2B_API_KEY" # Driver: e2b 时必填
   E2BTemplate: "base"        # E2B 沙箱模板 ID
   E2BTimeoutSec: 1800        # E2B 沙箱 TTL（秒），超时未使用会被云端回收
+
+# MCP 广场种子（阶段八）：启动时按 Name 投影进 mcp_servers 表（system=1，
+# 广场置顶、网页不可删改）；用户在广场自行添加的 http 型 server 存 DB，
+# 与种子共存。stdio 型**仅此处允许**——任意用户可配子进程命令等于开放
+# 后端主机任意执行，广场 API 只接受 http。
+MCP:
+  Servers: []
+  #  - Name: "weather"                 # 短名 [a-z0-9-]，生成工具名前缀 mcp_<name>_<tool>
+  #    Description: "官方天气查询 MCP Server"
+  #    Transport: "http"               # http | stdio
+  #    URL: "https://mcp.example.com/mcp"
+  #    Headers:                        # 静态鉴权头（日志脱敏，出参打码）
+  #      Authorization: "Bearer YOUR_TOKEN"
+  #    Command: []                     # stdio 型完整命令行，如 ["npx","-y","@some/mcp-server"]
+  #    Args: []                        # stdio 型追加参数
+  #    Env: {}                         # stdio 型子进程环境变量
+  #    ToolAllow: []                   # 工具白名单（空=全部）
+  #    CallTimeoutSec: 60              # tools/call 超时（秒，默认 60）

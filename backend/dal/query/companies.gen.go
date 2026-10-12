@@ -39,6 +39,7 @@ func newCompany(db *gorm.DB, opts ...gen.DOOption) company {
 	return _company
 }
 
+// company 企业与租户表
 type company struct {
 	companyDo companyDo
 

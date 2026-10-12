@@ -9,6 +9,7 @@ import {
 } from 'react-router-dom'
 import { ChatArea } from './components/ChatArea'
 import { LoginGate } from './components/LoginGate'
+import { McpsPlaza } from './components/McpsPlaza'
 import { Sidebar } from './components/Sidebar'
 import { MemoriesPanel } from './components/MemoriesPanel'
 import { SkillsPlaza } from './components/SkillsPlaza'
@@ -56,12 +57,14 @@ function AppInner({
   const activeId = location.pathname.startsWith('/c/')
     ? location.pathname.slice(3)
     : null
-  const view: 'chat' | 'plaza' | 'memories' =
+  const view: 'chat' | 'plaza' | 'mcps' | 'memories' =
     location.pathname === '/plaza'
       ? 'plaza'
-      : location.pathname === '/memories'
-        ? 'memories'
-        : 'chat'
+      : location.pathname === '/mcp-plaza'
+        ? 'mcps'
+        : location.pathname === '/memories'
+          ? 'memories'
+          : 'chat'
 
   const refresh = async (targetScope: 'mine' | 'all' = sessionScope) => {
     try {
@@ -130,6 +133,7 @@ function AppInner({
         onDelete={handleDelete}
         onRename={handleRename}
         onOpenPlaza={() => navigate('/plaza')}
+        onOpenMcps={() => navigate('/mcp-plaza')}
         onOpenMemories={() => navigate('/memories')}
         userName={userName}
         userId={userId}
@@ -141,6 +145,7 @@ function AppInner({
       <main className="flex-1 flex flex-col overflow-hidden bg-white dark:bg-[#131314] relative">
         <Routes>
           <Route path="/plaza" element={<SkillsPlaza />} />
+          <Route path="/mcp-plaza" element={<McpsPlaza />} />
           <Route path="/memories" element={<MemoriesPanel />} />
           <Route
             path="/c/:sessionId"

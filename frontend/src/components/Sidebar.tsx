@@ -4,6 +4,7 @@ import {
   LayoutGrid,
   MoreHorizontal,
   Pencil,
+  Plug,
   Settings,
   SquarePen,
   Trash2,
@@ -17,12 +18,13 @@ interface Props {
   sessions: Session[]
   activeId: string | null
   /** 主区域当前显示的 view —— 用来高亮侧栏底部的入口按钮 */
-  view: 'chat' | 'plaza' | 'memories'
+  view: 'chat' | 'plaza' | 'mcps' | 'memories'
   onSelect: (id: string) => void
   onCreate: () => void
   onDelete: (id: string) => void
   onRename: (id: string, title: string) => void
   onOpenPlaza: () => void
+  onOpenMcps: () => void
   onOpenMemories: () => void
   userName?: string
   userId?: number
@@ -41,6 +43,7 @@ export function Sidebar({
   onDelete,
   onRename,
   onOpenPlaza,
+  onOpenMcps,
   onOpenMemories,
   userName,
   userId,
@@ -134,6 +137,18 @@ export function Sidebar({
                 <LayoutGrid className="w-4 h-4" />
               </button>
               <button
+                onClick={onOpenMcps}
+                className={cn(
+                  'w-10 h-10 rounded-full flex items-center justify-center text-xs font-medium transition-colors',
+                  view === 'mcps'
+                    ? 'bg-[#d3e3fd] text-[#041e49] dark:bg-[#004a77] dark:text-[#c2e7ff]'
+                    : 'text-[#444746] dark:text-[#c4c7c5] hover:bg-[#e1e7f0] dark:hover:bg-[#28292a]',
+                )}
+                title="MCP 广场"
+              >
+                <Plug className="w-4 h-4" />
+              </button>
+              <button
                 onClick={onOpenMemories}
                 className={cn(
                   'w-10 h-10 rounded-full flex items-center justify-center text-xs font-medium transition-colors',
@@ -159,6 +174,18 @@ export function Sidebar({
               >
                 <LayoutGrid className="w-4 h-4 shrink-0" />
                 <span>Skills 广场</span>
+              </button>
+              <button
+                onClick={onOpenMcps}
+                className={cn(
+                  'w-full flex items-center gap-3 px-3.5 py-2 rounded-full text-xs font-medium transition-colors',
+                  view === 'mcps'
+                    ? 'bg-[#d3e3fd] text-[#041e49] dark:bg-[#004a77] dark:text-[#c2e7ff] font-semibold'
+                    : 'text-[#444746] dark:text-[#c4c7c5] hover:bg-[#e1e7f0] dark:hover:bg-[#28292a]',
+                )}
+              >
+                <Plug className="w-4 h-4 shrink-0" />
+                <span>MCP 广场</span>
               </button>
               <button
                 onClick={onOpenMemories}

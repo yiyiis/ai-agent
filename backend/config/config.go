@@ -5,13 +5,14 @@ import (
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"backend/pkg/log"
+	"backend/pkg/mcp"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/skill"
 	"backend/pkg/storage"
 	"fmt"
-	"os"
 	"github.com/spf13/viper"
+	"os"
 )
 
 type Server struct {
@@ -22,14 +23,15 @@ type Server struct {
 // Config 全量配置。各段配置由所属包自持（LLM/COS/Sandbox 同 DBConf/Auth/Log），
 // 本包只负责装配与解析，业务初始化统一走各包的 Init（见 main.go）。
 type Config struct {
-	DbConf      db.Config       `yaml:"DBConf" mapstructure:"DBConf"`
-	Server      Server          `yaml:"Server" mapstructure:"Server"`
-	Auth        jwt.Config      `yaml:"Auth" mapstructure:"Auth"`
-	Log         log.Config      `yaml:"Log" mapstructure:"Log"`
-	LLM         provider.Config `yaml:"LLM" mapstructure:"LLM"`
-	COS         storage.Config  `yaml:"COS" mapstructure:"COS"`
-	Sandbox     sandbox.Config  `yaml:"Sandbox" mapstructure:"Sandbox"`
-	Skill       skill.Config    `yaml:"Skill" mapstructure:"Skill"`
+	DbConf      db.Config               `yaml:"DBConf" mapstructure:"DBConf"`
+	Server      Server                  `yaml:"Server" mapstructure:"Server"`
+	Auth        jwt.Config              `yaml:"Auth" mapstructure:"Auth"`
+	Log         log.Config              `yaml:"Log" mapstructure:"Log"`
+	LLM         provider.Config         `yaml:"LLM" mapstructure:"LLM"`
+	COS         storage.Config          `yaml:"COS" mapstructure:"COS"`
+	Sandbox     sandbox.Config          `yaml:"Sandbox" mapstructure:"Sandbox"`
+	Skill       skill.Config            `yaml:"Skill" mapstructure:"Skill"`
+	MCP         mcp.Config              `yaml:"MCP" mapstructure:"MCP"`
 	AgentPolicy ctxpolicy.ContextPolicy `yaml:"AgentPolicy" mapstructure:"AgentPolicy"`
 }
 

@@ -45,6 +45,8 @@ var tables = []struct {
 	{"token_usages", "TokenUsage", nil},
 	{"memories", "Memory", nil},
 	{"session_digests", "SessionDigest", nil},
+	{"mcp_servers", "McpServer", nil},
+	{"session_mcp_servers", "SessionMcpServer", nil},
 }
 
 // jsonColumns DB 中为 JSON 类型的列，业务代码按 JSON 文本（*string）读写，
@@ -52,6 +54,7 @@ var tables = []struct {
 var jsonColumns = []string{
 	"tool_calls", "attachments", "tags", "allowed_skills",
 	"params", "result", "artifacts", "progress", "exec_context", "attempts",
+	"headers", "command", "env", "tool_allow",
 }
 
 // resolveDSN 连接串来源优先级：-dsn 参数 > 环境变量 DB_DSN > 配置文件 DBConf

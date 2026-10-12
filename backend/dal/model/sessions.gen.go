@@ -16,7 +16,7 @@ type Session struct {
 	SessionID                    string    `gorm:"column:session_id;type:varchar(36);not null;uniqueIndex:idx_sessions_session_id,priority:1" json:"session_id"`
 	CompanyID                    int64     `gorm:"column:company_id;type:bigint;not null;index:idx_sessions_company_id,priority:1" json:"company_id"`
 	UserID                       int64     `gorm:"column:user_id;type:bigint;not null;index:idx_sessions_user_id,priority:1" json:"user_id"`
-	Title                        string    `gorm:"column:title;type:varchar(255);not null;default:新会话" json:"title"`
+	Title                        string    `gorm:"column:title;type:varchar(255);not null;default:æ–°ä¼šè¯" json:"title"`
 	Model                        string    `gorm:"column:model;type:varchar(128);not null" json:"model"`
 	SystemPrompt                 string    `gorm:"column:system_prompt;type:longtext;not null" json:"system_prompt"`
 	AutoSkill                    bool      `gorm:"column:auto_skill;type:tinyint(1);not null;default:1" json:"auto_skill"`

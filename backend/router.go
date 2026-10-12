@@ -73,6 +73,16 @@ func RegisterRouter(engine *gin.Engine) {
 	engine.GET("/api/skills/:id/runs/:run_id", Controller(api.GetSkillRunDetail))
 	engine.POST("/api/skills/:id/runs/:run_id/retry", Controller(api.RetrySkillRun))
 
+	// 阶段八：MCP 广场（共享生态：浏览 / 添加(http) / 测试 / 会话启用；
+	// stdio 型种子经 config.yaml 投影，网页只读）
+	engine.GET("/api/mcps", Controller(api.ListMcps))
+	engine.POST("/api/mcps", Controller(api.CreateMcp))
+	engine.PATCH("/api/mcps/:id", Controller(api.UpdateMcp))
+	engine.DELETE("/api/mcps/:id", Controller(api.DeleteMcp))
+	engine.POST("/api/mcps/:id/test", Controller(api.TestMcp))
+	engine.GET("/api/mcps/:id/tools", Controller(api.GetMcpTools))
+	sessionGroup.PUT("/:id/mcps", Controller(api.SetEnabledMcps))
+
 	// 阶段六：开放 API 网关（API Key 独立鉴权与多租户隔离）
 	openApiGroup := engine.Group("/api/v1")
 	openApiGroup.Use(api.ApiKeyAuthMiddleware())

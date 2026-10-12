@@ -14,17 +14,17 @@ const TableNameUserInfo = "user_info"
 
 // UserInfo mapped from table <user_info>
 type UserInfo struct {
-	UserID    int32          `gorm:"column:user_id;type:int;primaryKey;autoIncrement:true;comment:用户id" json:"user_id"`                                                                                       // 用户id
-	Username  string         `gorm:"column:username;type:varchar(64);not null;uniqueIndex:idx_company_username,priority:2;comment:用户名" json:"username"`                                                       // 用户名
-	Nickname  string         `gorm:"column:nickname;type:varchar(64);not null;comment:昵称" json:"nickname"`                                                                                                    // 昵称
-	Password  string         `gorm:"column:password;type:varchar(255);not null;comment:密码" json:"password"`                                                                                                   // 密码
-	Phone     string         `gorm:"column:phone;type:varchar(32);not null;comment:手机号码" json:"phone"`                                                                                                        // 手机号码
-	UserType  int32          `gorm:"column:user_type;type:int;not null;default:3;comment:用户类型：1：超级管理员，2：管理员，3：普通用户" json:"user_type"`                                                                         // 用户类型：1：超级管理员，2：管理员，3：普通用户
-	HeadImage string         `gorm:"column:head_image;type:varchar(512);not null;comment:用户头像" json:"head_image"`                                                                                             // 用户头像
-	CreatedAt time.Time      `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);comment:创建时间" json:"created_at"`                                                                 // 创建时间
-	UpdatedAt time.Time      `gorm:"column:updated_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);comment:更新时间" json:"updated_at"`                                                                 // 更新时间
-	DeletedAt gorm.DeletedAt `gorm:"column:deleted_at;type:datetime(3);comment:删除时间;softDelete" json:"deleted_at"`                                                                                            // 删除时间
-	CompanyID int64          `gorm:"column:company_id;type:bigint;not null;uniqueIndex:idx_company_username,priority:1;index:idx_user_info_company_id,priority:1;default:1;comment:所属企业id" json:"company_id"` // 所属企业id
+	UserID    int32          `gorm:"column:user_id;type:int;primaryKey;autoIncrement:true;comment:用户id" json:"user_id"`                                                                                        // 用户id
+	CompanyID int64          `gorm:"column:company_id;type:bigint;not null;uniqueIndex:idx_company_username,priority:1;index:idx_user_info_company_id,priority:1;default:1;comment:所属企业 ID" json:"company_id"` // 所属企业 ID
+	Username  string         `gorm:"column:username;type:varchar(64);not null;uniqueIndex:idx_company_username,priority:2;comment:用户名" json:"username"`                                                        // 用户名
+	Nickname  string         `gorm:"column:nickname;type:varchar(64);not null;comment:昵称" json:"nickname"`                                                                                                     // 昵称
+	Password  string         `gorm:"column:password;type:varchar(255);not null;comment:密码" json:"password"`                                                                                                    // 密码
+	Phone     string         `gorm:"column:phone;type:varchar(32);not null;comment:手机号码" json:"phone"`                                                                                                         // 手机号码
+	UserType  int32          `gorm:"column:user_type;type:int;not null;default:3;comment:用户类型：1：超级管理员，2：管理员，3：普通用户" json:"user_type"`                                                                          // 用户类型：1：超级管理员，2：管理员，3：普通用户
+	HeadImage string         `gorm:"column:head_image;type:varchar(512);not null;comment:用户头像" json:"head_image"`                                                                                              // 用户头像
+	CreatedAt time.Time      `gorm:"column:created_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);comment:创建时间" json:"created_at"`                                                                  // 创建时间
+	UpdatedAt time.Time      `gorm:"column:updated_at;type:datetime(3);not null;default:CURRENT_TIMESTAMP(3);comment:更新时间" json:"updated_at"`                                                                  // 更新时间
+	DeletedAt gorm.DeletedAt `gorm:"column:deleted_at;type:datetime(3);comment:删除时间;softDelete" json:"deleted_at"`                                                                                             // 删除时间
 }
 
 // TableName UserInfo's table name

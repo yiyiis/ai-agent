@@ -12,6 +12,7 @@ import {
   FileText,
   Lightbulb,
   Loader2,
+  Plug,
   RotateCcw,
   Wrench,
   X,
@@ -43,6 +44,7 @@ import type {
 import { BrandIcon } from './BrandIcons'
 import { Composer } from './Composer'
 import { FilePreviewModal } from './FilePreviewModal'
+import { McpPanel } from './McpPanel'
 import { MessageBubble } from './MessageBubble'
 import { ModelPicker } from './ModelPicker'
 import { SkillsPanel } from './SkillsPanel'
@@ -687,6 +689,9 @@ export function ChatArea({
   // 上一轮对话实际使用的模型：用于在模型真正变化的那一轮展示切换分隔条
   const lastRoundModelRef = useRef<string>('')
   const [skillsOpen, setSkillsOpen] = useState(false)
+  // 阶段八：会话启用的 MCP Server（ID 集合，启用即注入其全部工具）
+  const [mcpsOpen, setMcpsOpen] = useState(false)
+  const [enabledMcpIds, setEnabledMcpIds] = useState<number[]>([])
   const [autoSkill, setAutoSkill] = useState(true)
   // 斜杠选中的技能在 submit → send 同一事件内到达：setState 是异步的，send 的
   // 闭包读不到刚并入的 enabledEntries——经 ref 桥接，send 的草稿建会话分支合并它
@@ -788,6 +793,7 @@ export function ChatArea({
       setStreaming(false)
       setEditingId(null)
       setEnabledEntries([])
+      setEnabledMcpIds([])
       setAutoSkill(true)
       lastRoundModelRef.current = ''
       return
@@ -813,6 +819,7 @@ export function ChatArea({
               pinned_version_number: null,
             })),
         )
+        setEnabledMcpIds(s.enabled_mcp_ids ?? [])
         setCurrentModel(s.model)
         const lastModel = getLastAssistantModel(s.messages)
         lastRoundModelRef.current = lastModel || s.model
@@ -1512,6 +1519,10 @@ export function ChatArea({
         if (entriesForCreate.length > 0) {
           await api.setEnabledSkills(newSession.id, entriesForCreate)
         }
+        // 草稿期启用的 MCP Server 同样随建会话一并落库
+        if (enabledMcpIds.length > 0) {
+          await api.setEnabledMcps(newSession.id, enabledMcpIds)
+        }
         if (!autoSkill) {
           await api.updateSession(newSession.id, { auto_skill: false })
         }
@@ -1712,6 +1723,19 @@ export function ChatArea({
             </span>
           )}
         </button>
+        <button
+          onClick={() => setMcpsOpen(true)}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-[#1f1f1f] dark:text-[#e3e3e3] bg-white dark:bg-[#28292a] hover:bg-[#f0f4f9] dark:hover:bg-[#333537] border border-[#e3e3e3] dark:border-[#3c4043] rounded-full shadow-sm hover:border-[#c4c7c5] transition-all"
+          title="MCP 工具服务：启用广场里的远端 MCP Server"
+        >
+          <Plug className="w-3.5 h-3.5" />
+          <span>MCP</span>
+          {enabledMcpIds.length > 0 && (
+            <span className="ml-0.5 px-1.5 py-0.5 bg-emerald-100 text-emerald-800 dark:bg-emerald-900/50 dark:text-emerald-300 rounded-full text-[10px] font-semibold leading-none">
+              {enabledMcpIds.length}
+            </span>
+          )}
+        </button>
       </header>
 
       <SkillsPanel
@@ -1725,6 +1749,24 @@ export function ChatArea({
               await api.setEnabledSkills(activeIdRef.current, entries)
             } catch (e) {
               setErrorBanner(`保存技能配置失败: ${String(e)}`)
+            }
+          }
+        }}
+      />
+
+      <McpPanel
+        open={mcpsOpen}
+        onClose={() => setMcpsOpen(false)}
+        enabledIds={enabledMcpIds}
+        onEnabledChange={async (ids) => {
+          setEnabledMcpIds(ids)
+          if (activeIdRef.current) {
+            try {
+              await api.setEnabledMcps(activeIdRef.current, ids)
+            } catch (e) {
+              setErrorBanner(`保存 MCP 配置失败: ${String(e)}`)
+              if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
+              errorTimerRef.current = setTimeout(() => setErrorBanner(null), 6000)
             }
           }
         }}

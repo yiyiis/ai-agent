@@ -46,11 +46,21 @@ type EnabledSkillOut struct {
 	Source              string `json:"source"`
 }
 
+// EnabledMcpOut 会话启用的 MCP Server 概况（工具数供前端抽屉展示）
+type EnabledMcpOut struct {
+	McpServerID int64  `json:"mcp_server_id"`
+	Name        string `json:"name"`
+	ToolCount   int    `json:"tool_count"`
+}
+
 type SessionDetailOut struct {
 	SessionOut
 	Messages        []MessageOut      `json:"messages"`
 	EnabledSkillIDs []int64           `json:"enabled_skill_ids"`
 	EnabledSkills   []EnabledSkillOut `json:"enabled_skills"`
+	// 阶段八：会话启用的 MCP Server（回显给 McpPanel 抽屉）
+	EnabledMcpIDs []int64         `json:"enabled_mcp_ids"`
+	EnabledMcps   []EnabledMcpOut `json:"enabled_mcps"`
 	// 读取时回滚掉的悬空提问（服务中断/中止留下的无回答轮次），
 	// 前端应把它还原到输入框让用户重发
 	PendingQuestion *PendingQuestionOut `json:"pending_question,omitempty"`
@@ -268,6 +278,25 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		})
 	}
 
+	// 阶段八：会话启用的 MCP Server 回显
+	mcpRows, err := dao.ListSessionMcps(ctx, req.ID)
+	if err != nil {
+		return nil, err
+	}
+	mcpIDs := make([]int64, 0, len(mcpRows))
+	enabledMcps := make([]EnabledMcpOut, 0, len(mcpRows))
+	for _, mr := range mcpRows {
+		if !mr.Server.Enabled {
+			continue // 停用的 server 不回显（关联保留，重新启用后自然恢复）
+		}
+		mcpIDs = append(mcpIDs, mr.Server.ID)
+		enabledMcps = append(enabledMcps, EnabledMcpOut{
+			McpServerID: mr.Server.ID,
+			Name:        mr.Server.Name,
+			ToolCount:   int(mr.Server.ToolCount),
+		})
+	}
+
 	msgOuts := make([]MessageOut, 0, len(messages))
 	for _, m := range messages {
 		msgItem := MessageOut{
@@ -293,6 +322,8 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		Messages:        msgOuts,
 		EnabledSkillIDs: enabledIDs,
 		EnabledSkills:   enabledSkills,
+		EnabledMcpIDs:   mcpIDs,
+		EnabledMcps:     enabledMcps,
 		PendingQuestion: pending,
 	}, nil
 }
@@ -375,7 +406,7 @@ func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, e
 }
 
 type SetEnabledSkillsReq struct {
-	ID string `uri:"id"`
+	ID     string `uri:"id"`
 	Skills []struct {
 		SkillID             int64  `json:"skill_id"`
 		PinnedVersionNumber *int64 `json:"pinned_version_number"`

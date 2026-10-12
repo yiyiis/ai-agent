@@ -2,6 +2,9 @@ import type {
   Attachment,
   LoginResult,
   LoginUser,
+  McpServer,
+  McpTestResult,
+  McpToolInfo,
   Memory,
   Model,
   Session,
@@ -128,6 +131,53 @@ export const api = {
     http<void>(`/sessions/${sessionId}/skills`, {
       method: 'PUT',
       body: JSON.stringify({ skills }),
+    }),
+
+  // ---------- MCP 广场（阶段八） ----------
+
+  listMcps: () => http<McpServer[]>('/mcps'),
+
+  createMcp: (data: {
+    name: string
+    description?: string
+    url: string
+    headers?: Record<string, string>
+    tool_allow?: string[]
+    call_timeout_sec?: number
+  }) =>
+    http<McpServer>('/mcps', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
+
+  /** PATCH 局部更新；headers/tool_allow 传值即全量替换，null 不改 */
+  updateMcp: (
+    id: number,
+    data: {
+      description?: string
+      url?: string
+      headers?: Record<string, string>
+      tool_allow?: string[]
+      call_timeout_sec?: number
+      enabled?: boolean
+    },
+  ) =>
+    http<McpServer>(`/mcps/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    }),
+
+  deleteMcp: (id: number) => http<void>(`/mcps/${id}`, { method: 'DELETE' }),
+
+  testMcp: (id: number) => http<McpTestResult>(`/mcps/${id}/test`, { method: 'POST' }),
+
+  getMcpTools: (id: number) => http<McpToolInfo[]>(`/mcps/${id}/tools`),
+
+  /** 替换会话启用的 MCP Server 集合（PUT 语义） */
+  setEnabledMcps: (sessionId: string, mcpServerIds: number[]) =>
+    http<void>(`/sessions/${sessionId}/mcps`, {
+      method: 'PUT',
+      body: JSON.stringify({ mcp_server_ids: mcpServerIds }),
     }),
 
   login: (account: string, password: string) =>

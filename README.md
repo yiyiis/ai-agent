@@ -91,10 +91,11 @@ AI Agent 是一个基于 **Go (Golang)** 构建的高性能、高并发、生产
         v                     v                     v                     v                     v
 +---------------+     +---------------+     +---------------+     +---------------+     +---------------+
 | 模型服务网关   |     | Skill 插件引擎|     | MCP 协议客户端|     | 隔离执行沙箱   |     | 记忆与数据存储 |
-| - MiniMax     |     | - SKILL.md    |     | - SSE Client  |     | - Local Host  |     | - GORM/GEN    |
-| - 火山方舟豆包|     | - 动态装载    |     | - Stdio Host  |     | - Docker 容器 |     | - MySQL 8.0   |
-| - DeepSeek    |     | - 密钥隔离注入|     | - 工具动态映射|     | - E2B Cloud   |     | - Redis 缓存  |
-| - Claude 3.5  |     | - 广场与版本  |     | - Resources   |     | - 产物持久化  |     | - 腾讯云 COS  |
+| - MiniMax     |     | - SKILL.md    |     | - Streamable  |     | - Local Host  |     | - GORM/GEN    |
+| - 火山方舟豆包|     | - 动态装载    |     |   HTTP Client |     | - Docker 容器 |     | - MySQL 8.0   |
+| - DeepSeek    |     | - 密钥隔离注入|     | - Stdio Host  |     | - E2B Cloud   |     | - Redis 缓存  |
+| - Claude 3.5  |     | - 广场与版本  |     | - 双模握手    |     | - 产物持久化  |     | - 腾讯云 COS  |
+|               |     |               |     | - 工具动态映射|     |               |     |               |
 +---------------+     +---------------+     +---------------+     +---------------+     +---------------+
 ```
 
@@ -110,7 +111,7 @@ AI Agent 是一个基于 **Go (Golang)** 构建的高性能、高并发、生产
 | **辅助存储** | Redis 7.0 + 腾讯云 COS | 高性能会话缓存、分布式锁以及附件/工件文件对象存储 |
 | **模型协议** | 自研归一化流式 Provider 网关 | 原生兼容 OpenAI 规范与 Anthropic Claude Messages 规范 |
 | **沙箱隔离** | Docker Engine SDK / E2B | 容器化代码运行沙箱，网络隔离、只读挂载与超时自动销毁 |
-| **外部生态** | Model Context Protocol (MCP) | 支持标准化 SSE 传输通道，动态挂载跨系统能力 |
+| **外部生态** | Model Context Protocol (MCP) | 手写双模协议客户端（2026-07-28 无状态规范 + 存量 initialize 兼容），Streamable HTTP / stdio 双传输，MCP 广场动态挂载跨系统能力 |
 
 ---
 
@@ -172,7 +173,7 @@ timeline
 - [ ] 增量长程记忆提取 (Memory Extract)：对话完成后后台静默挖掘用户偏好，并注入全局 Prompt
 
 ### 阶段八：MCP 协议集成与多模态交互 (MCP Integration & Multimodal Modalities)
-- [ ] Model Context Protocol (MCP) 客户端：基于 SSE Transport 接入外部标准化工具与资源
+- [x] Model Context Protocol (MCP) 客户端与 MCP 广场：手写双模协议客户端（`server/discover` 探测 2026-07-28 无状态规范，回退存量 `initialize` 握手），Streamable HTTP / stdio 双传输，Tools Discovery 自动转 Function Calling 参与 ReAct 调度；共享广场支持用户添加（http 型）、测试连接、会话级启用，`config.yaml` 官方种子可导入 stdio 型（详见 `specs/mcp/`）
 - [ ] Anthropic Claude 原生协议适配器：Messages 协议与流式双向映射
 - [x] 视觉多模态输入接入 (Vision Multimodal)：图片附件自动解析为 Base64 Data URL 或公网直链，无缝注入模型 ContentParts
 - [ ] 人机协同中断确认：`request_input` 挂起机制实现人机交互确认与工具继续执行
@@ -254,12 +255,25 @@ parameters:
 - **Catalog 模式**：未被显式激活的技能仅提取 `name` 和 `description` 摘要构建轻量索引进入 System Prompt；
 - **自主装载**：当用户提出对应需求（如“帮我读一下这个网页”），模型自动决策调用内置 `load_skill(name="fetch-url")`，引擎实时将该技能完整的 Schema、入参规范及沙箱执行指令挂载进当前会话工具集。
 
-### 5.4 模型上下文协议 (MCP) 接入规范
+### 5.4 模型上下文协议 (MCP) 客户端引擎与广场
 
-系统原生兼容开放标准 **Model Context Protocol (MCP)**：
-- 支持通过 SSE 与第三方独立部署的 MCP Server 握手建立连接；
-- 协议层自动发现并同步远端工具列表（Tools Discovery）；
-- 将远端 MCP 工具自动平滑转换为 Agent 内置的 Function Calling 规格，无缝参与 ReAct 调度。
+系统原生兼容开放标准 **Model Context Protocol (MCP)**，纯手写协议客户端（零 SDK 依赖，
+与 provider 层自研风格一致），协议基线为最新 `2026-07-28` 无状态规范并向下兼容
+`2025-06-18` / `2025-11-25` 存量服务器：
+
+- **双模握手**：先发 `server/discover` 探测新版无状态服务器（每请求 `_meta` 携带协议版本）；
+  方法不存在则回退旧版 `initialize` 握手，HTTP 场景自动记录并回带 `Mcp-Session-Id` 会话头；
+- **双传输**：Streamable HTTP（单 JSON / SSE 流双响应形态）与 stdio（子进程换行分隔
+  JSON-RPC，崩溃退避重启）；旧 HTTP+SSE 传输已废弃不支持；
+- **Tools Discovery → Function Calling**：`tools/list` 分页聚合（尊重 `ttlMs` 缓存提示、
+  `list_changed` 通知标脏刷新），以 `mcp_<server>_<tool>` 消歧命名平滑转成内置工具规格，
+  无缝参与 ReAct 调度——Loop Guard、SSE 事件、落库与 token 记账全部复用；
+- **错误双轨**：`isError=true` 的工具执行错误原文回喂模型自纠正；JSON-RPC 协议错误返回
+  "[MCP 调用失败]" 前缀提示勿原样重试；MRTR `input_required` 返回占位文案（人机交互留待
+  `request_input` 机制）；
+- **MCP 广场**（共享生态，对标技能广场）：所有用户可浏览、添加（http 型）、测试连接、
+  在会话抽屉中按需启用；`config.yaml` 种子可导入官方/内置 Server（唯一允许 stdio 的入口，
+  广场 API 强制 http——任意用户可配子进程命令等于开放后端主机任意执行）。
 
 ### 5.5 长期记忆网络与智能压缩 (Memory & Compaction)
 

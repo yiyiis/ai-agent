@@ -28,6 +28,7 @@ func newUserInfo(db *gorm.DB, opts ...gen.DOOption) userInfo {
 	tableName := _userInfo.userInfoDo.TableName()
 	_userInfo.ALL = field.NewAsterisk(tableName)
 	_userInfo.UserID = field.NewInt32(tableName, "user_id")
+	_userInfo.CompanyID = field.NewInt64(tableName, "company_id")
 	_userInfo.Username = field.NewString(tableName, "username")
 	_userInfo.Nickname = field.NewString(tableName, "nickname")
 	_userInfo.Password = field.NewString(tableName, "password")
@@ -37,7 +38,6 @@ func newUserInfo(db *gorm.DB, opts ...gen.DOOption) userInfo {
 	_userInfo.CreatedAt = field.NewTime(tableName, "created_at")
 	_userInfo.UpdatedAt = field.NewTime(tableName, "updated_at")
 	_userInfo.DeletedAt = field.NewField(tableName, "deleted_at")
-	_userInfo.CompanyID = field.NewInt64(tableName, "company_id")
 
 	_userInfo.fillFieldMap()
 
@@ -49,6 +49,7 @@ type userInfo struct {
 
 	ALL       field.Asterisk
 	UserID    field.Int32  // 用户id
+	CompanyID field.Int64  // 所属企业 ID
 	Username  field.String // 用户名
 	Nickname  field.String // 昵称
 	Password  field.String // 密码
@@ -58,7 +59,6 @@ type userInfo struct {
 	CreatedAt field.Time   // 创建时间
 	UpdatedAt field.Time   // 更新时间
 	DeletedAt field.Field  // 删除时间
-	CompanyID field.Int64  // 所属企业id
 
 	fieldMap map[string]field.Expr
 }
@@ -76,6 +76,7 @@ func (u userInfo) As(alias string) *userInfo {
 func (u *userInfo) updateTableName(table string) *userInfo {
 	u.ALL = field.NewAsterisk(table)
 	u.UserID = field.NewInt32(table, "user_id")
+	u.CompanyID = field.NewInt64(table, "company_id")
 	u.Username = field.NewString(table, "username")
 	u.Nickname = field.NewString(table, "nickname")
 	u.Password = field.NewString(table, "password")
@@ -85,7 +86,6 @@ func (u *userInfo) updateTableName(table string) *userInfo {
 	u.CreatedAt = field.NewTime(table, "created_at")
 	u.UpdatedAt = field.NewTime(table, "updated_at")
 	u.DeletedAt = field.NewField(table, "deleted_at")
-	u.CompanyID = field.NewInt64(table, "company_id")
 
 	u.fillFieldMap()
 
@@ -112,6 +112,7 @@ func (u *userInfo) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 func (u *userInfo) fillFieldMap() {
 	u.fieldMap = make(map[string]field.Expr, 11)
 	u.fieldMap["user_id"] = u.UserID
+	u.fieldMap["company_id"] = u.CompanyID
 	u.fieldMap["username"] = u.Username
 	u.fieldMap["nickname"] = u.Nickname
 	u.fieldMap["password"] = u.Password
@@ -121,7 +122,6 @@ func (u *userInfo) fillFieldMap() {
 	u.fieldMap["created_at"] = u.CreatedAt
 	u.fieldMap["updated_at"] = u.UpdatedAt
 	u.fieldMap["deleted_at"] = u.DeletedAt
-	u.fieldMap["company_id"] = u.CompanyID
 }
 
 func (u userInfo) clone(db *gorm.DB) userInfo {

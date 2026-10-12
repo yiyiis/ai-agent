@@ -67,13 +67,13 @@ type message struct {
 	Name          field.String
 	Attachments   field.String
 	StubContent   field.String // tool 结果精简版（冷区组装用；错误行=原文；天然短小=NULL）
-	StubToolCalls field.String
-	TokensFull    field.Int32
-	StubTokens    field.Int32
-	BlobRef       field.String
-	CtxMode       field.String
-	ToolTarget    field.String
-	ToolOp        field.String
+	StubToolCalls field.String // assistant 批次精简版（结构同 tool_calls，仅替换 arguments）
+	TokensFull    field.Int32  // content+tool_calls 粗估 token（字符数/2，写时估算）
+	StubTokens    field.Int32  // stub 版粗估 token
+	BlobRef       field.String // 完整输出的工作区文件引用（.tool-outputs/…）
+	CtxMode       field.String // 上下文口径：空=按热/冷分区；stub=恒用精简版（超限被拦截标记）
+	ToolTarget    field.String // 冷区折叠键：文件类=path / search=query / bash=NULL
+	ToolOp        field.String // 操作类型：write/append/edit/read/search/exec（冷区折叠用）
 	CreatedAt     field.Time
 
 	fieldMap map[string]field.Expr

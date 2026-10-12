@@ -52,6 +52,9 @@ export interface SessionDetail extends Session {
   messages: Message[]
   enabled_skill_ids: number[]
   enabled_skills?: EnabledSkillEntry[]
+  /** 阶段八：会话启用的 MCP Server */
+  enabled_mcp_ids?: number[]
+  enabled_mcps?: EnabledMcpEntry[]
   /** 读取时回滚掉的悬空提问（中断/中止留下的无回答轮次），应还原到输入框 */
   pending_question?: {
     content: string
@@ -293,4 +296,56 @@ export interface TurnMetric {
   cachedTokens: number
   reasoningTokens: number
   cacheHitRate: number // 缓存命中百分比 0 ~ 100
+}
+
+// ---------- MCP 广场（阶段八） ----------
+
+/** MCP 广场的 Server 条目（GET /api/mcps） */
+export interface McpServer {
+  id: number
+  name: string
+  description: string
+  transport: 'http' | 'stdio' | string
+  url?: string
+  /** 鉴权头只回键名，值打码为 *** */
+  headers_masked?: Record<string, string>
+  tool_allow?: string[]
+  call_timeout_sec?: number
+  enabled: boolean
+  /** 系统种子（config 投影）：广场置顶、网页不可删改 */
+  system?: boolean
+  owner_id?: number
+  owner_name?: string
+  is_owner?: boolean
+  /** 最近一次发现到的工具数（缓存；未测试过为 0） */
+  tool_count?: number
+  /** 最近一次连接/发现错误（非空即卡片红点） */
+  last_error?: string | null
+  last_synced_at?: string | null
+  created_at: string
+}
+
+/** MCP 工具概况（测试连接 / 工具清单接口） */
+export interface McpToolInfo {
+  name: string
+  description: string
+  /** 消歧后的 function 名（mcp_<server>_<tool>） */
+  qualified: string
+}
+
+/** 测试连接结果（POST /api/mcps/:id/test） */
+export interface McpTestResult {
+  ok: boolean
+  protocol_version?: string
+  server_name?: string
+  tool_count: number
+  tools: McpToolInfo[]
+  error?: string
+}
+
+/** 会话启用的 MCP Server（SessionDetail 回显） */
+export interface EnabledMcpEntry {
+  mcp_server_id: number
+  name: string
+  tool_count: number
 }

@@ -16,29 +16,33 @@ import (
 )
 
 var (
-	Q             = new(Query)
-	ApiKey        *apiKey
-	Company       *company
-	Memory        *memory
-	Message       *message
-	Session       *session
-	SessionDigest *sessionDigest
-	SessionSkill  *sessionSkill
-	Skill         *skill
-	SkillRun      *skillRun
-	SkillVersion  *skillVersion
-	TokenUsage    *tokenUsage
-	UserInfo      *userInfo
+	Q                = new(Query)
+	ApiKey           *apiKey
+	Company          *company
+	McpServer        *mcpServer
+	Memory           *memory
+	Message          *message
+	Session          *session
+	SessionDigest    *sessionDigest
+	SessionMcpServer *sessionMcpServer
+	SessionSkill     *sessionSkill
+	Skill            *skill
+	SkillRun         *skillRun
+	SkillVersion     *skillVersion
+	TokenUsage       *tokenUsage
+	UserInfo         *userInfo
 )
 
 func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 	*Q = *Use(db, opts...)
 	ApiKey = &Q.ApiKey
 	Company = &Q.Company
+	McpServer = &Q.McpServer
 	Memory = &Q.Memory
 	Message = &Q.Message
 	Session = &Q.Session
 	SessionDigest = &Q.SessionDigest
+	SessionMcpServer = &Q.SessionMcpServer
 	SessionSkill = &Q.SessionSkill
 	Skill = &Q.Skill
 	SkillRun = &Q.SkillRun
@@ -49,56 +53,62 @@ func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
-		db:            db,
-		ApiKey:        newApiKey(db, opts...),
-		Company:       newCompany(db, opts...),
-		Memory:        newMemory(db, opts...),
-		Message:       newMessage(db, opts...),
-		Session:       newSession(db, opts...),
-		SessionDigest: newSessionDigest(db, opts...),
-		SessionSkill:  newSessionSkill(db, opts...),
-		Skill:         newSkill(db, opts...),
-		SkillRun:      newSkillRun(db, opts...),
-		SkillVersion:  newSkillVersion(db, opts...),
-		TokenUsage:    newTokenUsage(db, opts...),
-		UserInfo:      newUserInfo(db, opts...),
+		db:               db,
+		ApiKey:           newApiKey(db, opts...),
+		Company:          newCompany(db, opts...),
+		McpServer:        newMcpServer(db, opts...),
+		Memory:           newMemory(db, opts...),
+		Message:          newMessage(db, opts...),
+		Session:          newSession(db, opts...),
+		SessionDigest:    newSessionDigest(db, opts...),
+		SessionMcpServer: newSessionMcpServer(db, opts...),
+		SessionSkill:     newSessionSkill(db, opts...),
+		Skill:            newSkill(db, opts...),
+		SkillRun:         newSkillRun(db, opts...),
+		SkillVersion:     newSkillVersion(db, opts...),
+		TokenUsage:       newTokenUsage(db, opts...),
+		UserInfo:         newUserInfo(db, opts...),
 	}
 }
 
 type Query struct {
 	db *gorm.DB
 
-	ApiKey        apiKey
-	Company       company
-	Memory        memory
-	Message       message
-	Session       session
-	SessionDigest sessionDigest
-	SessionSkill  sessionSkill
-	Skill         skill
-	SkillRun      skillRun
-	SkillVersion  skillVersion
-	TokenUsage    tokenUsage
-	UserInfo      userInfo
+	ApiKey           apiKey
+	Company          company
+	McpServer        mcpServer
+	Memory           memory
+	Message          message
+	Session          session
+	SessionDigest    sessionDigest
+	SessionMcpServer sessionMcpServer
+	SessionSkill     sessionSkill
+	Skill            skill
+	SkillRun         skillRun
+	SkillVersion     skillVersion
+	TokenUsage       tokenUsage
+	UserInfo         userInfo
 }
 
 func (q *Query) Available() bool { return q.db != nil }
 
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
-		db:            db,
-		ApiKey:        q.ApiKey.clone(db),
-		Company:       q.Company.clone(db),
-		Memory:        q.Memory.clone(db),
-		Message:       q.Message.clone(db),
-		Session:       q.Session.clone(db),
-		SessionDigest: q.SessionDigest.clone(db),
-		SessionSkill:  q.SessionSkill.clone(db),
-		Skill:         q.Skill.clone(db),
-		SkillRun:      q.SkillRun.clone(db),
-		SkillVersion:  q.SkillVersion.clone(db),
-		TokenUsage:    q.TokenUsage.clone(db),
-		UserInfo:      q.UserInfo.clone(db),
+		db:               db,
+		ApiKey:           q.ApiKey.clone(db),
+		Company:          q.Company.clone(db),
+		McpServer:        q.McpServer.clone(db),
+		Memory:           q.Memory.clone(db),
+		Message:          q.Message.clone(db),
+		Session:          q.Session.clone(db),
+		SessionDigest:    q.SessionDigest.clone(db),
+		SessionMcpServer: q.SessionMcpServer.clone(db),
+		SessionSkill:     q.SessionSkill.clone(db),
+		Skill:            q.Skill.clone(db),
+		SkillRun:         q.SkillRun.clone(db),
+		SkillVersion:     q.SkillVersion.clone(db),
+		TokenUsage:       q.TokenUsage.clone(db),
+		UserInfo:         q.UserInfo.clone(db),
 	}
 }
 
@@ -112,51 +122,57 @@ func (q *Query) WriteDB() *Query {
 
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
-		db:            db,
-		ApiKey:        q.ApiKey.replaceDB(db),
-		Company:       q.Company.replaceDB(db),
-		Memory:        q.Memory.replaceDB(db),
-		Message:       q.Message.replaceDB(db),
-		Session:       q.Session.replaceDB(db),
-		SessionDigest: q.SessionDigest.replaceDB(db),
-		SessionSkill:  q.SessionSkill.replaceDB(db),
-		Skill:         q.Skill.replaceDB(db),
-		SkillRun:      q.SkillRun.replaceDB(db),
-		SkillVersion:  q.SkillVersion.replaceDB(db),
-		TokenUsage:    q.TokenUsage.replaceDB(db),
-		UserInfo:      q.UserInfo.replaceDB(db),
+		db:               db,
+		ApiKey:           q.ApiKey.replaceDB(db),
+		Company:          q.Company.replaceDB(db),
+		McpServer:        q.McpServer.replaceDB(db),
+		Memory:           q.Memory.replaceDB(db),
+		Message:          q.Message.replaceDB(db),
+		Session:          q.Session.replaceDB(db),
+		SessionDigest:    q.SessionDigest.replaceDB(db),
+		SessionMcpServer: q.SessionMcpServer.replaceDB(db),
+		SessionSkill:     q.SessionSkill.replaceDB(db),
+		Skill:            q.Skill.replaceDB(db),
+		SkillRun:         q.SkillRun.replaceDB(db),
+		SkillVersion:     q.SkillVersion.replaceDB(db),
+		TokenUsage:       q.TokenUsage.replaceDB(db),
+		UserInfo:         q.UserInfo.replaceDB(db),
 	}
 }
 
 type queryCtx struct {
-	ApiKey        IApiKeyDo
-	Company       ICompanyDo
-	Memory        IMemoryDo
-	Message       IMessageDo
-	Session       ISessionDo
-	SessionDigest ISessionDigestDo
-	SessionSkill  ISessionSkillDo
-	Skill         ISkillDo
-	SkillRun      ISkillRunDo
-	SkillVersion  ISkillVersionDo
-	TokenUsage    ITokenUsageDo
-	UserInfo      IUserInfoDo
+	ApiKey           IApiKeyDo
+	Company          ICompanyDo
+	McpServer        IMcpServerDo
+	Memory           IMemoryDo
+	Message          IMessageDo
+	Session          ISessionDo
+	SessionDigest    ISessionDigestDo
+	SessionMcpServer ISessionMcpServerDo
+	SessionSkill     ISessionSkillDo
+	Skill            ISkillDo
+	SkillRun         ISkillRunDo
+	SkillVersion     ISkillVersionDo
+	TokenUsage       ITokenUsageDo
+	UserInfo         IUserInfoDo
 }
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
-		ApiKey:        q.ApiKey.WithContext(ctx),
-		Company:       q.Company.WithContext(ctx),
-		Memory:        q.Memory.WithContext(ctx),
-		Message:       q.Message.WithContext(ctx),
-		Session:       q.Session.WithContext(ctx),
-		SessionDigest: q.SessionDigest.WithContext(ctx),
-		SessionSkill:  q.SessionSkill.WithContext(ctx),
-		Skill:         q.Skill.WithContext(ctx),
-		SkillRun:      q.SkillRun.WithContext(ctx),
-		SkillVersion:  q.SkillVersion.WithContext(ctx),
-		TokenUsage:    q.TokenUsage.WithContext(ctx),
-		UserInfo:      q.UserInfo.WithContext(ctx),
+		ApiKey:           q.ApiKey.WithContext(ctx),
+		Company:          q.Company.WithContext(ctx),
+		McpServer:        q.McpServer.WithContext(ctx),
+		Memory:           q.Memory.WithContext(ctx),
+		Message:          q.Message.WithContext(ctx),
+		Session:          q.Session.WithContext(ctx),
+		SessionDigest:    q.SessionDigest.WithContext(ctx),
+		SessionMcpServer: q.SessionMcpServer.WithContext(ctx),
+		SessionSkill:     q.SessionSkill.WithContext(ctx),
+		Skill:            q.Skill.WithContext(ctx),
+		SkillRun:         q.SkillRun.WithContext(ctx),
+		SkillVersion:     q.SkillVersion.WithContext(ctx),
+		TokenUsage:       q.TokenUsage.WithContext(ctx),
+		UserInfo:         q.UserInfo.WithContext(ctx),
 	}
 }
 

@@ -29,6 +29,7 @@ import (
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/ctxpolicy"
+	"backend/pkg/mcp"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
@@ -562,7 +563,7 @@ func collectAttachments(history []model.Message, current []Attachment) []Attachm
 // materializeAttachments 把用户上传的附件落进当前会话工作区（沙箱），
 // 使工作区工具（read_file/edit_file/bash 等）可以直接操作它们。
 // 本地存储驱动（/api/uploads/ URL）直接从 uploads/ 目录读字节；对象存储驱动
-//（COS 公网 URL）下载回填。返回成功落入工作区的附件（Filename 已替换为实际
+// （COS 公网 URL）下载回填。返回成功落入工作区的附件（Filename 已替换为实际
 // 落盘名）；失败静默降级为"仅引用"。
 func materializeAttachments(ctx context.Context, sessionID string, attachments []Attachment) []Attachment {
 	var placed []Attachment
@@ -928,6 +929,12 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		// 永远只能返回"没有这个技能"的工具，白白浪费 token 和调用轮次
 		toolSchemas = append(toolSchemas, tools.LoadSkillSchema())
 	}
+	// 阶段八：会话启用的 MCP Server 工具注入（惰性拨号，未就绪的跳过本轮；
+	// 与内置工具同一 schema 协议，模型无感知差别）
+	mcpDefs := loadTurnMcps(ctx, sessionID)
+	if len(mcpDefs) > 0 {
+		toolSchemas = append(toolSchemas, mcp.SchemasFor(mcpDefs)...)
+	}
 
 	// Loop guard：sig(=tool+args 哈希) -> 历次输出哈希
 	guard := map[string][]string{}
@@ -1041,6 +1048,13 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				if parseErr != "" {
 					logArgAnomaly(sessionID, session.Model, tc, "参数解析失败")
 					outputs[i] = tools.Output{Text: parseErr}
+					return
+				}
+				// 阶段八：MCP 消歧名（mcp_<server>_<tool>）路由到 MCP 引擎执行，
+				// 不经沙箱（远端 HTTP 天然在外；stdio 种子由管理员负责）。
+				// Loop Guard、事件广播与结果落库复用下方公共路径
+				if mcp.IsTool(tc.Function.Name) {
+					outputs[i] = tools.Output{Text: mcp.ExecuteTool(execCtx, tc.Function.Name, args).Text}
 					return
 				}
 				if tools.CheckArgs(tc.Function.Name, args) != "" {

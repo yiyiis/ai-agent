@@ -12,6 +12,7 @@ import (
 	"backend/pkg/dispatcher"
 	"backend/pkg/jwt"
 	"backend/pkg/log"
+	"backend/pkg/mcp"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/skill"
@@ -47,6 +48,10 @@ func main() {
 	// 5. 初始化技能库并同步注册表（阶段五：SKILL.md 目录 → skills 表投影）
 	skill.Init(conf.Skill)
 	api.InitSkillRegistry()
+
+	// 阶段八：MCP 客户端引擎 + 广场种子投影（config → mcp_servers，system=1）
+	mcp.Init(conf.MCP)
+	api.InitMcpSeeds()
 
 	// 阶段六：初始化并启动后台异步任务调度器 (Dispatcher)
 	disp := dispatcher.Init(10)

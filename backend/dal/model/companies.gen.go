@@ -10,7 +10,7 @@ import (
 
 const TableNameCompany = "companies"
 
-// Company mapped from table <companies>
+// Company 企业与租户表
 type Company struct {
 	ID        int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true;comment:企业主键 ID" json:"id"`                                       // 企业主键 ID
 	Name      string    `gorm:"column:name;type:varchar(128);not null;comment:企业/租户名称" json:"name"`                                                  // 企业/租户名称
