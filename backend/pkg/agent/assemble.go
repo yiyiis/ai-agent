@@ -12,7 +12,7 @@
 //   - 从最新向最旧走：in-flight（最新 step）恒原文；热区双条件——按工具的
 //     step 阈值 + 热区 token 预算（窗口 × HotBudgetRatio）——任一触顶后，
 //     更旧条目全部进冷区；
-//   - ctx_mode='stub' 条目无视分区恒冷（超限被拦截，原文永不进请求）；
+//   - ctx_mode='stub' 条目无视分区恒冷（大参数/非法参数的原文永不进请求）；
 //   - 叙事行（user / 纯文本 assistant / system / 悬空合成行）永远原文、不占预算。
 package agent
 
@@ -23,10 +23,10 @@ import (
 
 // zoneItem 分区判定的统一条目（跨轮组装与轮内 rezone 的公共形状）
 type zoneItem struct {
-	role   string // assistant | tool | other
-	step   int    // 所属 step 序号（前向编号）；非 payload 为 -1
-	calls  []savedCall // assistant 批次（阈值取各工具 max）
-	toolName string    // tool 行的工具名（阈值查表）
+	role       string      // assistant | tool | other
+	step       int         // 所属 step 序号（前向编号）；非 payload 为 -1
+	calls      []savedCall // assistant 批次（阈值取各工具 max）
+	toolName   string      // tool 行的工具名（阈值查表）
 	tokensFull int32
 	forceStub  bool
 	isPayload  bool
@@ -36,7 +36,7 @@ type zoneItem struct {
 }
 
 // hotThreshold 该条目的热区 step 阈值：assistant 批次取各调用工具的 max
-//（同批含 read 与 write 时以 read 的宽阈值为准——stub 版里小参数本来原样，
+// （同批含 read 与 write 时以 read 的宽阈值为准——stub 版里小参数本来原样，
 // 宽阈值只影响 write 大载荷多保留一步，预算会兜底）；tool 行按自身工具。
 func (it *zoneItem) hotThreshold() int {
 	if it.role == "assistant" {
@@ -113,7 +113,7 @@ func zoneBackward(items []zoneItem, model string) int64 {
 // rezoneMsgs 轮内预算超线时对内存 msgs 整体分区替换（ReAct 循环 round 边界调用）。
 // in-flight 最新 step 与叙事行不动；冷区用与落库同一套 stub 规则现场生成（幂等，
 // 已是 stub 的内容原样保留）。批量一次、之后前缀只增不变（迟滞保缓存）。
-func rezoneMsgs(msgs []provider.ChatMessage) {
+func rezoneMsgs(msgs []provider.ChatMessage, model string) {
 	// callID → 配对调用（tool 行冷区生成 stub 需要原参数）
 	callByID := map[string]savedCall{}
 	for i := range msgs {
@@ -136,7 +136,11 @@ func rezoneMsgs(msgs []provider.ChatMessage) {
 			if !ok || len(calls) == 0 {
 				continue // 纯文本 assistant：叙事
 			}
+			if callsNeedStub(calls) {
+				m.CtxMode = "stub"
+			}
 			it.role, it.isPayload, it.calls = "assistant", true, calls
+			it.forceStub = m.CtxMode == "stub"
 			it.tokensFull = estimateTokens(m.Content) + callsTokens(calls)
 			idx := i
 			stubbed := stubForToolCalls(calls)
@@ -147,6 +151,7 @@ func rezoneMsgs(msgs []provider.ChatMessage) {
 				continue // 悬空/合成行：按叙事处理
 			}
 			it.role, it.isPayload, it.toolName = "tool", true, call.Function.Name
+			it.forceStub = m.CtxMode == "stub"
 			it.tokensFull = estimateTokens(m.Content)
 			idx := i
 			name, args := call.Function.Name, call.Function.Arguments
@@ -156,7 +161,17 @@ func rezoneMsgs(msgs []provider.ChatMessage) {
 			}
 		}
 	}
-	zoneBackward(items, "")
+	zoneBackward(items, model)
+}
+
+// assistantContextMessage 构造内存回放副本；calls 与落库原文保持不变。
+func assistantContextMessage(content string, calls []savedCall, extras *msgExtras) provider.ChatMessage {
+	msg := provider.ChatMessage{Role: "assistant", Content: content, ToolCalls: callsOrNil(calls)}
+	if extras != nil && extras.forceStub {
+		msg.CtxMode = "stub"
+		msg.ToolCalls = callsOrNil(stubForToolCalls(calls))
+	}
+	return msg
 }
 
 // callsTokens 批次参数体积估算

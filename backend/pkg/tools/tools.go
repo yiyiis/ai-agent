@@ -302,26 +302,22 @@ func IsErrorResult(s string) bool {
 	return false
 }
 
-// maxArgumentsBytes 单次 tool_call 参数上限：拦截模型试图一次性写入超大文件等行为，
-// 避免撑爆上下文与模型输出上限（提示模型分段写）
-const maxArgumentsBytes = 40 << 10
+// maxContextArgumentsBytes 参数回放阈值。超过时强制使用 stub，不限制存储或执行。
+const maxContextArgumentsBytes = 40 << 10
 
-// ArgsOverLimit 参数原文是否超过单次上限（agent 层在落库/进上下文前置换 stub 用）
-func ArgsOverLimit(raw string) bool { return len(raw) > maxArgumentsBytes }
+// ArgsNeedStub 参数是否需要强制精简回放（按原始 JSON 字符串的字节数计算）。
+func ArgsNeedStub(raw string) bool { return len(raw) > maxContextArgumentsBytes }
 
 // ParseArguments 解析模型生成的 tool_call 参数 JSON；失败时返回可自我纠正的错误提示
 func ParseArguments(raw string) (map[string]any, string) {
-	if len(raw) > maxArgumentsBytes {
-		return nil, fmt.Sprintf(
-			"[参数超限] arguments 长度 %d 超过 %dKB 上限。请把大文件拆成多次 edit_file 追加写入（每次一小段），或只写入关键部分。",
-			len(raw), maxArgumentsBytes>>10)
-	}
-	if strings.TrimSpace(raw) == "" {
-		raw = "{}"
-	}
 	var parsed map[string]any
-	if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber() // MCP 的整数 ID 等参数不能在 float64 转换中丢失精度。
+	if err := decoder.Decode(&parsed); err != nil {
 		return nil, fmt.Sprintf("[参数解析失败] arguments 不是合法 JSON（常因输出被 token 上限截断）：%v。请重新调用并输出完整 JSON；内容过长时拆分为多次小段写入。", err)
+	}
+	if strings.TrimSpace(raw[decoder.InputOffset():]) != "" {
+		return nil, "[参数解析失败] arguments 必须是单个完整 JSON 对象，不能包含额外内容。请重新调用。"
 	}
 	if parsed == nil {
 		return nil, "[参数解析失败] arguments 必须是 JSON 对象。请重新调用。"
@@ -477,6 +473,13 @@ func argInt(args map[string]any, key string, def int) int {
 		return def
 	}
 	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return int(i)
+		}
+		if f, err := n.Float64(); err == nil {
+			return int(f)
+		}
 	case float64:
 		return int(n)
 	case float32:

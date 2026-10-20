@@ -61,6 +61,7 @@ type ChatMessage struct {
 	ToolCalls    interface{}   `json:"tool_calls,omitempty"`
 	ToolCallID   string        `json:"tool_call_id,omitempty"`
 	Name         string        `json:"name,omitempty"`
+	CtxMode      string        `json:"-"` // 本地上下文策略；不发送给模型，轮内与历史回放共用
 }
 
 func (m ChatMessage) MarshalJSON() ([]byte, error) {

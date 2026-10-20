@@ -5,18 +5,19 @@
 //  2. 组装时对 stub 列为 NULL 的旧数据现场回退生成（assemble.go）；
 //  3. ReAct 循环 rezone 时对内存 msgs 整体替换（agent.go 循环边界）。
 //
-// 规则要点：按工具类型生成、不按大小（write/edit 换骨架参数，read/bash 生成
-// 摘要行）；错误结果与天然短小的内容 stub=原文（落库时写 NULL，组装直接用
-// content）；所有函数幂等——对已是 stub 的输入原样返回。
+// 规则要点：write/edit 换骨架参数，其余工具的大参数用通用摘要；非法参数只在
+// 回放副本中标记为 _rejected，原文始终落库。错误结果与天然短小的结果不重复
+// 存 stub；所有函数幂等，对已是 stub 的输入原样返回。
 package agent
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
-	"time"
 
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
@@ -26,7 +27,7 @@ import (
 // stubNote 精简版参数的统一说明（模型可据此自行取回原文）
 const stubNote = "内容已省略，可用 read_file 查看"
 
-// estimateTokens 粗估 token：字符数/2。中文 token 密度高时偏高估，
+// estimateTokens 粗估 token：字节数/2。中文 token 密度高时偏高估，
 // 组装预算宁可早裁——不追求精确，只求确定性可比。
 func estimateTokens(parts ...string) int32 {
 	n := 0
@@ -36,64 +37,128 @@ func estimateTokens(parts ...string) int32 {
 	return int32(n / 2)
 }
 
-// stubForToolCalls assistant 批次的精简版：结构不变（id/type/name 原样），
-// 仅替换承载大载荷工具（write/edit）的 arguments；小参数工具原样保留。
+// stubForToolCalls 仅构造回放副本；落库和执行始终使用原始 calls。
+// id/type/name 不变，write/edit 精简载荷，其他工具（含 MCP）的大参数走通用摘要。
 func stubForToolCalls(calls []savedCall) []savedCall {
 	out := make([]savedCall, len(calls))
 	copy(out, calls)
+	source := ""
+	if callsNeedStub(calls) {
+		if data, err := json.Marshal(calls); err == nil {
+			source = callBlobPath(string(data))
+		}
+	}
 	for i := range out {
-		out[i].Function.Arguments = stubArguments(out[i].Function.Name, out[i].Function.Arguments)
+		raw := out[i].Function.Arguments
+		stub := stubArguments(out[i].Function.Name, raw)
+		if source != "" && stub != raw {
+			var args map[string]any
+			if json.Unmarshal([]byte(stub), &args) == nil {
+				args["_source"] = source
+				stub = marshalStub(args)
+			}
+		}
+		out[i].Function.Arguments = stub
 	}
 	return out
 }
 
-// stubArguments 单个调用的参数精简（幂等：带 _pruned/_rejected 标记的跳过）
+// stubArguments 单个调用的参数精简；非法 JSON 只在回放副本中标记为 _rejected。
 func stubArguments(name, raw string) string {
 	args, errMsg := tools.ParseArguments(raw)
 	if errMsg != "" {
-		return raw // 解析失败（含半截 JSON）原样返回，超限场景由 stubRejectedCalls 处理
+		return rejectStubArgs(raw)
 	}
-	if _, rejected := args["_rejected"]; rejected {
-		return raw
+	// 原始 MCP 参数也可能有同名字段；大参数不能凭这些字段绕过精简。
+	if !tools.ArgsNeedStub(raw) {
+		if pruned, _ := args["_pruned"].(bool); pruned {
+			return raw
+		}
+		if rejected, _ := args["_rejected"].(bool); rejected {
+			return raw
+		}
 	}
 	switch name {
 	case "write_file":
-		if _, pruned := args["_pruned"]; pruned {
-			return raw
-		}
 		content, _ := args["content"].(string)
 		return marshalStub(map[string]any{
-			"path":    argString(args, "path"),
+			"path":    argumentPath(args),
 			"bytes":   len(content),
 			"lines":   strings.Count(content, "\n") + 1,
 			"_pruned": true,
 			"note":    stubNote,
 		})
 	case "edit_file":
-		if _, pruned := args["_pruned"]; pruned {
-			return raw
-		}
 		return marshalStub(map[string]any{
-			"path":    argString(args, "path"),
+			"path":    argumentPath(args),
 			"_pruned": true,
 			"note":    "改参已省略",
 		})
 	}
-	return raw // read/bash 等：参数本来就小
+	if tools.ArgsNeedStub(raw) {
+		return genericArgumentStub(args, len(raw))
+	}
+	return raw
 }
 
-// rejectStubArgs 超限被拒 / 截断半截 JSON 的单个调用：arguments 换成 stub 版。
-// 原文由调用方整体落 blob；执行仍用原文，让 ParseArguments 产生带出路的自纠正提示。
+func argumentPath(args map[string]any) string {
+	runes := []rune(argString(args, "path"))
+	if len(runes) > 1024 {
+		return string(runes[:1024]) + "…"
+	}
+	return string(runes)
+}
+
+// genericArgumentStub 不猜测 MCP/未知工具的参数契约，只记录有界的字段名、类型和体积。
+// 同时限制字段数量与名称长度，避免大型数组/嵌套对象/大量字段把 stub 再次撑大。
+func genericArgumentStub(args map[string]any, size int) string {
+	keys := make([]string, 0, len(args))
+	for key := range args {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	fields := make([]map[string]any, 0, min(len(keys), 16))
+	for _, key := range keys[:min(len(keys), 16)] {
+		name := []rune(key)
+		if len(name) > 64 {
+			name = append(name[:64], '…')
+		}
+		field := map[string]any{"name": string(name)}
+		switch value := args[key].(type) {
+		case string:
+			field["type"], field["bytes"] = "string", len(value)
+		case []any:
+			field["type"], field["items"] = "array", len(value)
+		case map[string]any:
+			field["type"], field["fields"] = "object", len(value)
+		case json.Number, float64:
+			field["type"] = "number"
+		case bool:
+			field["type"] = "boolean"
+		default:
+			field["type"] = "null"
+		}
+		fields = append(fields, field)
+	}
+	return marshalStub(map[string]any{
+		"_pruned":     true,
+		"bytes":       size,
+		"field_count": len(keys),
+		"fields":      fields,
+		"note":        "历史调用参数已省略，完整原文保存在会话记录，可用 read_file 查看 _source 参数归档；此摘要仅用于回放，不能作为执行参数",
+	})
+}
+
+// rejectStubArgs 仅用于非法/不完整参数的回放。原文仍保存在 tool_calls，执行时按原文校验。
 func rejectStubArgs(raw string) string {
 	stub := map[string]any{
 		"_rejected": true,
-		"note":      fmt.Sprintf("原始参数 %d 字节，超限未执行；请拆成多次小段写入（每次一小段）", len(raw)),
+		"note":      fmt.Sprintf("原始参数 %d 字节，JSON 非法或不完整，未执行；原文已保留，请重新输出完整 JSON 对象", len(raw)),
 	}
-	// 直接 Unmarshal 探测 path：超限参数过不了 ParseArguments 的长度闸门，
-	// 但合法超限 JSON 的 path 仍应保留（模型与折叠键都靠它定位目标）
+	// JSON 类型不符合参数契约时，仍尽可能保留有界的 path 定位信息。
 	var probe map[string]any
 	if err := json.Unmarshal([]byte(raw), &probe); err == nil {
-		if p, _ := probe["path"].(string); p != "" {
+		if p := argumentPath(probe); p != "" {
 			stub["path"] = p
 		}
 	}
@@ -106,29 +171,14 @@ func validCallArgs(raw string) bool {
 	return errMsg == ""
 }
 
-// prepareAssistantCalls 决定 assistant 批次落库/进上下文的版本：流中断、
-// finish=length 或参数超限（>40KB）时，半截 JSON / 超限的调用换 _rejected stub
-// ——原文自此不进任何后续请求（由调用方落 blob 审计）。逐调用判定，同批次
-// 正常调用不受牵连。执行仍用原始 calls：ParseArguments 对超限参数产生带出路的
-// 自纠正提示，而非缺参误导。
-func prepareAssistantCalls(calls []savedCall, streamInterrupted, finishLength bool) ([]savedCall, bool) {
-	if len(calls) == 0 || !(streamInterrupted || finishLength || hasOversizedArgs(calls)) {
-		return calls, false
-	}
-	stubbed := make([]savedCall, len(calls))
-	copy(stubbed, calls)
-	hit := false
-	for i := range stubbed {
-		raw := stubbed[i].Function.Arguments
-		if tools.ArgsOverLimit(raw) || !validCallArgs(raw) {
-			stubbed[i].Function.Arguments = rejectStubArgs(raw)
-			hit = true
+// callsNeedStub 大参数与非法参数都强制精简回放，但仅非法参数阻止执行。
+func callsNeedStub(calls []savedCall) bool {
+	for _, call := range calls {
+		if tools.ArgsNeedStub(call.Function.Arguments) || !validCallArgs(call.Function.Arguments) {
+			return true
 		}
 	}
-	if !hit {
-		return calls, false
-	}
-	return stubbed, true
+	return false
 }
 
 // isResultStub 内容是否已是结果 stub——幂等守卫用精确的固定前缀/标记判定，
@@ -155,8 +205,10 @@ func stubForToolResult(callName, callArgs, content string) string {
 	case "read_file":
 		offset := 1
 		if args != nil {
-			if v, ok := args["offset"].(float64); ok && int(v) > 1 {
-				offset = int(v)
+			if v, ok := args["offset"].(json.Number); ok {
+				if n, err := v.Float64(); err == nil && int(n) > 1 {
+					offset = int(n)
+				}
 			}
 		}
 		p := ""
@@ -203,9 +255,9 @@ func headTailLines(s string, n int) string {
 // 目标不一致时返回空——保守不折，宁可少合并不可误合并。
 func callTarget(calls []savedCall) (target, op string) {
 	ops := map[string]string{
-		"write_file":     "write",
-		"edit_file":      "edit",
-		"read_file":      "read",
+		"write_file":      "write",
+		"edit_file":       "edit",
+		"read_file":       "read",
 		"export_artifact": "export",
 	}
 	for _, c := range calls {
@@ -269,18 +321,8 @@ type msgExtras struct {
 	toolOp        string // tool_op
 }
 
-// hasOversizedArgs 批次里是否有超限参数（40KB，与 tools.ParseArguments 同一把尺）
-func hasOversizedArgs(calls []savedCall) bool {
-	for _, c := range calls {
-		if tools.ArgsOverLimit(c.Function.Arguments) {
-			return true
-		}
-	}
-	return false
-}
-
 // blobRef 持久化定位符：沙箱路径（模型侧身份）+ 对象存储归档 URL
-//（沙箱回收后重物化与前端查看全文的凭据）。
+// （沙箱回收后重物化与前端查看全文的凭据）。
 type blobRef struct {
 	Path string `json:"path"`
 	URL  string `json:"url,omitempty"`
@@ -303,51 +345,55 @@ func decodeBlobRef(s string) (path, url string) {
 	return s, ""
 }
 
-// writeRejectedBlob 超限/截断原文双写：工作区 .tool-outputs/（当场可查）
+// writeCallBlob 大参数/非法参数原文双写：工作区 .tool-outputs/（当场可查）
 // + 对象存储归档（沙箱回收后凭 URL 恢复），两种失败均降级（warn 不阻塞对话）
-func writeRejectedBlob(ctx context.Context, sessionID, data string) (string, string) {
+func writeCallBlob(ctx context.Context, sessionID, data string) (string, string) {
 	if data == "" {
 		return "", ""
 	}
-	base := fmt.Sprintf("rejected-%s-%s.json", time.Now().Format("0102-150405"), sigHash(data))
+	name := callBlobPath(data)
+	base := strings.TrimPrefix(name, ".tool-outputs/")
 	ref := ""
-	name := ".tool-outputs/" + base
 	if err := sandbox.WriteFile(ctx, sessionID, name, []byte(data)); err != nil {
-		slog.Warn("超限参数原文落盘失败", "session", sessionID, "err", err)
+		slog.Warn("工具参数原文落盘失败", "session", sessionID, "err", err)
 	} else {
 		ref = name
 	}
 	archiveURL := ""
 	if obj, err := storage.PutArchive(ctx, []byte(data), base, "application/json"); err != nil {
-		slog.Warn("超限参数原文归档失败", "session", sessionID, "err", err)
+		slog.Warn("工具参数原文归档失败", "session", sessionID, "err", err)
 	} else {
 		archiveURL = obj.URL
 	}
 	return ref, archiveURL
 }
 
+// 确定性路径让落库、历史回放和轮内重建的 stub 都能指向同一份完整参数。
+func callBlobPath(data string) string {
+	return fmt.Sprintf(".tool-outputs/arguments-%x.json", sha256.Sum256([]byte(data)))
+}
+
 // assistantExtras assistant 行的治理列装配（stub 版工具调用、token 估算、折叠键）
-func assistantExtras(ctx context.Context, sessionID, content string, persistCalls, origCalls []savedCall, rejected bool) *msgExtras {
-	ex := &msgExtras{tokensFull: estimateTokens(content)}
-	if len(persistCalls) > 0 {
-		if b, err := json.Marshal(persistCalls); err == nil {
+func assistantExtras(ctx context.Context, sessionID, content string, calls []savedCall) *msgExtras {
+	ex := &msgExtras{tokensFull: estimateTokens(content), forceStub: callsNeedStub(calls)}
+	if len(calls) > 0 {
+		if b, err := json.Marshal(calls); err == nil {
 			ex.tokensFull = estimateTokens(content, string(b))
 		}
-		stub := stubForToolCalls(persistCalls)
+		stub := stubForToolCalls(calls)
 		if b, err := json.Marshal(stub); err == nil {
 			ex.stubToolCalls = string(b)
 			ex.stubTokens = estimateTokens(content, ex.stubToolCalls)
 		} else {
 			ex.stubTokens = ex.tokensFull
 		}
-		ex.toolTarget, ex.toolOp = callTarget(persistCalls)
+		ex.toolTarget, ex.toolOp = callTarget(calls)
 	} else {
 		ex.stubTokens = ex.tokensFull
 	}
-	if rejected {
-		ex.forceStub = true
-		if b, err := json.Marshal(origCalls); err == nil {
-			path, url := writeRejectedBlob(ctx, sessionID, string(b))
+	if ex.forceStub {
+		if b, err := json.Marshal(calls); err == nil {
+			path, url := writeCallBlob(ctx, sessionID, string(b))
 			if path != "" || url != "" {
 				ex.blobRef = encodeBlobRef(path, url)
 			}

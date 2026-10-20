@@ -1,7 +1,7 @@
-# 生产层与写路径规范（进场有界 · 写时 Stub · 拦截置换）
+# 生产层与写路径规范（结果有界 · 原始参数持久化 · 写时 Stub）
 
 > 所属模块：[上下文组装治理](./README.md)  
-> 代码位置：`backend/pkg/tools/tools.go`（capRead / capProc / ArgsOverLimit）、`backend/pkg/agent/stub.go`（全部）、`backend/pkg/agent/agent.go`（saveMessage / ReAct 循环落库点）
+> 代码位置：`backend/pkg/tools/tools.go`（capRead / capProc / ArgsNeedStub）、`backend/pkg/agent/stub.go`（全部）、`backend/pkg/agent/agent.go`（saveMessage / ReAct 循环落库点）
 
 ---
 
@@ -38,15 +38,17 @@
 
 **链路顺序**：`sanitize`（控制字符清洗 + `maxOutput=256KB` 兜底）在 `formatResult` 内、`capProc` 之前执行——**blob 存的是清洗版（≤256KB），不是进程原始字节**。
 
-### 1.3 参数超限判定
+### 1.3 参数回放阈值与执行校验
 
-`ArgsOverLimit(raw) = len(raw) > 40KB`（与 `ParseArguments` 同一把尺，导出给 agent 层在落库前使用）。
+`ArgsNeedStub(raw) = len(raw) > 40KiB`，仅决定上下文是否强制精简，不拒绝存储或执行。`ParseArguments` 只校验完整 JSON 对象，不再限制字节数；空串、半截 JSON、数组、null 等不视为参数对象，不执行工具。本地工具与 MCP 均使用完整解析结果。
+
+解析使用 `json.Number` 保留数字原值，避免 MCP 的大整数 ID 经 float64 转换后丢失精度；读取行号、超时等本地整数参数兼容此类型。对象后有额外 JSON 或文本也判为非法。
 
 ---
 
 ## 2. 写时 Stub 规则（pkg/agent/stub.go）
 
-**按工具类型生成、不按大小**——"要不要生成 stub"与单条大小无关（大小只管工具层截断）；只有天然短小的内容 stub 列为 NULL。
+write/edit 按工具类型生成参数 stub；其他工具（含 MCP）参数超过 40KiB 时生成通用摘要。结果 stub 的规则保持不变；与原结果相同的 stub 不重复存储，列为 NULL。
 
 ### 2.1 stubForToolCalls —— assistant 批次
 
@@ -56,9 +58,13 @@
 |---|---|
 | write_file | `{"_pruned":true,"bytes":N,"lines":M,"note":"内容已省略，可用 read_file 查看","path":"…"}` |
 | edit_file | `{"_pruned":true,"note":"改参已省略","path":"…"}` |
-| read/bash/python 等 | **原样保留**（参数本来就小） |
+| 其他工具（含 MCP）参数 ≤40KiB | 原样保留 |
+| 其他工具（含 MCP）参数 >40KiB | `_pruned` + 原字节数 + 字段数 + 字段摘要；最多 16 个字段，每个字段名最多 64 字符，记录类型和大小，不复制嵌套载荷 |
+| 非法/不完整 JSON | `_rejected` + 准确的解析失败说明；仅影响回放副本 |
 
-幂等守卫：arguments 内含 `_pruned` / `_rejected` 键 → 原样返回。
+幂等守卫：小于等于阈值、带 `_pruned:true` / `_rejected:true` 的摘要保持原样。原始大参数不能凭同名字段绕过精简。write/edit 的路径摘要最多 1024 字符。
+
+强制 stub 的批次同时归档完整调用数组，摘要携带 `_source` 工作区路径。文件名为调用数组 JSON 的 SHA-256，落库、历史回放与轮内重建都能确定性地指向同一份原文。
 
 ### 2.2 stubForToolResult —— tool 结果
 
@@ -68,44 +74,38 @@
 | write/edit/export 成功 | 原文（短反馈，NULL） |
 | read_file | `[read %s L%d 起，约 %dKB；结果已省略，需要时重新 read_file]`（path/offset 从配对调用参数取） |
 | bash / python_exec | `[bash] <命令前 200 字符>\n<headTailLines(content, 3)>`；命令取 `command`/`code` 字段 |
-| 其它工具 >512 字符 | `[%s 结果已省略（约 %dKB），需要时重新调用]` |
-| 其它工具 ≤512 字符 | 原文（NULL） |
+| 其它工具 >512 字节 | `[%s 结果已省略（约 %dKB），需要时重新调用]` |
+| 其它工具 ≤512 字节 | 原文（NULL） |
 
 `headTailLines(s, n)`：总行数 ≤ 2n 原样；否则头 n 行 + `\n…（中间省略 %d 行）…\n` + 尾 n 行。进程超限结果的 stub 尾 3 行必然携带预览版末行的 blob 路径提示——**冷区模型仍可 read_file 取回**。  
 幂等守卫（`isResultStub`）：按 stub 固定前缀精确判定（`[read_file ` / `[bash] ` / `[python_exec] ` / 含"结果已省略"），**不可用"已省略"模糊匹配**——工具层预览自带的"…[中间省略 N 字符]…"含同样字样，会把超限结果的 stub 生成误拦（v1.0.0 修复的缺陷，有回归用例钉住）。
 
-### 2.3 拦截置换 —— `prepareAssistantCalls(calls, streamInterrupted, finishLength)`
+### 2.3 存储、执行、回放分离
 
-触发条件：流中断 / finish=length / 参数超限（任一）。**逐调用判定**，仅替换满足以下之一的调用：
-- `ArgsOverLimit(raw)`（>40KB）；
-- `!validCallArgs(raw)`（半截 JSON 等不可回放参数）。
+`callsNeedStub` 检查批次内是否存在 >40KiB 或非法 JSON 参数。命中时设置 `ctx_mode='stub'`，但不修改原始调用。
 
-置换为：`{"_rejected":true,"note":"原始参数 %d 字节，超限未执行；请拆成多次小段写入（每次一小段）","path":"…"}`（path 用 `json.Unmarshal` 直接探测保留——超限参数过不了 ParseArguments 长度闸门，但合法超限 JSON 的 path 仍在）。同批正常调用**不受牵连**。
-
-**关键时序**（agent.go ReAct 循环）：
-```
-streamOneRound → prepareAssistantCalls → persistCalls(stub 版) + rejected
-  ├─ assistant 行落库：tool_calls = persistCalls（原文不进任何列）
-  │   stub_tool_calls = 同款 · blob_ref = 原文 JSON · ctx_mode = 'stub'
-  ├─ 内存 msgs append persistCalls → 原文自此不进任何后续请求
-  └─ 执行仍用原始 calls → ParseArguments 产生自纠正错误文本：
-      [参数超限] arguments 长度 %d 超过 %dKB 上限。请把大文件拆成多次
-      write_file 追加写入（每次一小段），或只写入关键部分。
-      → 该文本成为补位的 tool 行 content（IsErrorResult → stub NULL）
+```text
+streamOneRound → 原始 calls
+  ├─ assistantExtras：生成 stub_tool_calls，估算两份 token，必要时归档
+  ├─ saveMessage：tool_calls 始终保存原文（包括半截 JSON 字符串）
+  ├─ assistantContextMessage：ctx_mode=stub 时立即向内存 msgs 追加精简副本
+  └─ 执行：对原始参数调用 ParseArguments
+      ├─ 完整合法：交给本地工具或 MCP，体积不阻止执行
+      └─ 非法/不完整：返回 [参数解析失败]，不调用工具
 ```
 
-`finish=length`：同路径置换后 turn 终止（原有行为），下轮回放由 flushDangling 补 `[未执行]` 合成行——**修复了半截 JSON 回放被上游 400 拒绝的存量缺陷**。
+`_rejected` 是回放说明，实际执行依据原始参数的解析结果。流异常、取消或 `finish=length` 时仍结束本轮且不执行该批调用，已生成的调用原文全部保存；下轮回放由 flushDangling 补 `[未执行]`。
 
 ### 2.4 blob_ref / ctx_mode 归属
 
 | 字段 | 行 | 条件 | 值 |
 |---|---|---|---|
 | blob_ref | tool 行 | bash/python 结果超限 | `{"path":".tool-outputs/<tool>-*.log","url":…}` |
-| blob_ref | assistant 行 | 批次含被拒调用 | `{"path":".tool-outputs/rejected-*.json","url":…}`（`writeRejectedBlob` 双写） |
+| blob_ref | assistant 行 | 批次含大参数或非法参数 | `{"path":".tool-outputs/arguments-<sha256>.json","url":…}`（`writeCallBlob` 双写） |
 | blob_ref | read_file 结果 | **永远没有** | 文件本体在沙箱，无需另存 |
-| ctx_mode='stub' | **仅 assistant 行** | 批次含被拒调用 | tool/user 行永不设置 |
+| ctx_mode='stub' | assistant 行 | 批次含大参数或非法参数 | 正常执行与强制精简回放相互独立 |
 
-被拒 write 的 assistant 行 `tool_calls` 与 `stub_tool_calls` 内容相同（均为 stub）——**有意冗余**：tool_calls 列被每轮 SELECT * 与前端历史接口读取，存原文会把大垃圾放回扫描路径。
+`tool_calls` 保存原始参数，`stub_tool_calls` 保存回放副本。数据库与前端历史可以查看原文；模型请求只使用符合上下文策略的版本。`ctx_mode` 随内存消息保留，但不序列化到模型协议。
 
 ### 2.5 token 估算与折叠键
 
@@ -120,7 +120,7 @@ streamOneRound → prepareAssistantCalls → persistCalls(stub 版) + rejected
 |---|---|
 | write 参数 stub | `{"_pruned":true,"bytes":12345,"lines":320,"note":"内容已省略，可用 read_file 查看","path":"src/a.py"}`（map 序列化按 key 字母序） |
 | edit 参数 stub | `{"_pruned":true,"note":"改参已省略","path":"src/a.py"}` |
-| 被拒参数 stub | `{"_rejected":true,"note":"原始参数 82000 字节，超限未执行；请拆成多次小段写入（每次一小段）","path":"big.bin"}` |
+| 非法参数 stub | `{"_rejected":true,"note":"原始参数 N 字节，JSON 非法或不完整，未执行；原文已保留，请重新输出完整 JSON 对象"}`（批次强制精简时另带 `_source`） |
 | read 结果 stub | `[read src/main.go L1 起，约 61KB；结果已省略，需要时重新 read_file]` |
 | bash 结果 stub | `[bash] <命令>␊<头3行>␊…（中间省略 N 行）…␊<尾3行>` |
 | 未知工具大结果 | `[some_tool 结果已省略（约 NKB），需要时重新调用]` |
@@ -135,4 +135,5 @@ streamOneRound → prepareAssistantCalls → persistCalls(stub 版) + rejected
 |---|---|---|---|---|---|
 | 参数小、结果小 | 原文 | formatResult 全文 | `[bash] 命令+头尾3行` | 无 | '' |
 | 参数小、结果超限 | 原文 | 预览版 | 预览版头尾 3 行（尾含路径提示行） | `.tool-outputs/<tool>-*.log` | '' |
-| 参数超限/半截 | `_rejected` stub | `[参数超限]…` | NULL（错误=原文） | `.tool-outputs/rejected-*.json` | 'stub' |
+| 参数 >40KiB 且合法 | 原文 | 正常执行结果 | 参数通用摘要；结果按原规则 | assistant 行参数归档 | 'stub'（assistant 行） |
+| 参数非法/半截 | 原文 | `[参数解析失败]…`；响应截断/流异常时不执行该批 | 参数 `_rejected`；错误结果 NULL | assistant 行参数归档 | 'stub'（assistant 行） |

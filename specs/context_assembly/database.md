@@ -12,18 +12,18 @@
 | 列 | 类型 | 语义 | 写入时机 |
 |---|---|---|---|
 | `stub_content` | longtext NULL | tool 结果精简版（冷区组装用）。**错误行=原文、天然短小=NULL**——NULL 时组装直接用 `content` | tool 行落库（`toolExtras`） |
-| `stub_tool_calls` | json NULL | assistant 批次精简版（结构同 `tool_calls`，仅替换 write/edit 的 arguments；id/type/name 原样） | assistant 行落库（`assistantExtras`） |
+| `stub_tool_calls` | json NULL | assistant 批次回放副本；write/edit 精简载荷，其他工具（含 MCP）的大参数用通用摘要，非法参数用 `_rejected`；id/type/name 原样 | assistant 行落库（`assistantExtras`） |
 | `tokens_full` | int NOT NULL DEFAULT 0 | content+tool_calls 粗估 token（`len/2` 字节估，偏保守）。**兼作旧数据判定**：`=0 且 content 非空` 视为治理列缺失的存量行，组装时现场生成 stub | 所有 assistant/tool 行 |
 | `stub_tokens` | int NOT NULL DEFAULT 0 | stub 版粗估 token | 同上 |
-| `blob_ref` | varchar(512) NULL | 完整输出的持久化定位符，JSON：`{"path":".tool-outputs/…","url":"归档URL"}`。path=沙箱工作区路径（模型侧身份）；url=对象存储归档（`storage.PutArchive`，Bucket 空落本地 uploads/），沙箱回收后凭此重物化。v1.0.0 裸路径行兼容读取但无从恢复。归属：tool 行=进程超限输出；assistant 行=被拒参数原文 | 超限/被拒时（双写：沙箱+归档） |
-| `ctx_mode` | varchar(16) NOT NULL DEFAULT '' | 上下文口径：空=按热/冷分区；`stub`=恒用精简版。**仅 assistant 行**会设置（批次含被拒调用时） | 拦截路径 |
+| `blob_ref` | varchar(512) NULL | JSON 定位符：`{"path":".tool-outputs/…","url":"归档URL"}`。tool 行=进程超限输出；assistant 行=大参数或非法参数的原始调用数组。参数归档使用确定性的 `arguments-<sha256>.json`，回放摘要带 `_source`；沙箱回收后凭 URL 重物化，兼容旧裸路径 | 工具输出超限或调用强制 stub 时 |
+| `ctx_mode` | varchar(16) NOT NULL DEFAULT '' | 空=按热/冷分区；`stub`=恒用精简版。assistant 批次含 >40KiB 或非法参数时设置；内存消息继承此字段，执行仍使用原参数 | assistant 行落库时 |
 | `tool_target` | varchar(255) NULL | 冷区折叠键：文件类=path / search=query / bash=NULL。同批次目标不一致 → NULL（保守不折叠） | 写时提取（`callTarget`） |
 | `tool_op` | varchar(16) NULL | 操作类型：write/append/edit/read/search/exec（冷区折叠用，**列先行、折叠逻辑后续阶段实现**） | 同上 |
 
 ### 1.1 不变量
 
-1. `content` / `tool_calls` 列**永远有界**（工具层进场保证）：原文只存 blob 文件，永不进 SELECT * 大行——`ListMessagesBySessionID` 每轮全量拉取会话，大行会拖慢每一轮；
-2. `stub_*` 是**额外一份**，不覆盖原文；被拒批次的 `tool_calls` 与 `stub_tool_calls` 同为 stub 版（有意冗余：前者被前端历史接口读取）；
+1. `tool_calls` 完整保存模型生成的参数，包括非法 JSON 字符串；工具 `content` 继续按工具层规则限制输出体积；
+2. `stub_*` 是额外一份，不覆盖原文；参数 >40KiB 只触发强制精简回放，合法参数仍执行。数据库列未变化，无需新增迁移；
 3. user 行治理列全默认（叙事永不裁，无 stub 概念）。
 
 ## 2. 迁移脚本

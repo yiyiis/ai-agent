@@ -146,24 +146,26 @@ func TestBuildContextLegacyFallback(t *testing.T) {
 	}
 }
 
-// TestBuildContextForceStub 被拦截调用（ctx_mode=stub）：即便处于最新 step 也恒用 stub
+// TestBuildContextForceStub 原参数完整保留，ctx_mode=stub 即便处于最新 step 也恒用精简版。
 func TestBuildContextForceStub(t *testing.T) {
 	session := &model.Session{SessionID: "s1", Model: "test-model"}
-	// tool_calls 列本身已存 stub 版（拦截路径），ctx_mode=stub
-	stubArgs := rejectStubArgs(`{"path":"big.bin","content":"` + strings.Repeat("q", 41<<10) + `"}`)
+	raw := `{"path":"big.bin","content":"` + strings.Repeat("q", 41<<10) + `"}`
 	history := []model.Message{
 		{Role: "user", Content: "写"},
-		{Role: "assistant", Content: "写入", ToolCalls: callsJSON(t, newSavedCall("c1", "write_file", stubArgs)), CtxMode: "stub", TokensFull: 60, StubTokens: 60},
-		{Role: "tool", Content: "[参数超限] arguments 长度 42060 超过 40KB 上限。", ToolCallID: sp("c1"), Name: sp("write_file"), TokensFull: 40, StubTokens: 40},
+		{Role: "assistant", Content: "写入", ToolCalls: callsJSON(t, newSavedCall("c1", "write_file", raw)), CtxMode: "stub", TokensFull: 22000, StubTokens: 60},
+		{Role: "tool", Content: "已写入 big.bin", ToolCallID: sp("c1"), Name: sp("write_file"), TokensFull: 40, StubTokens: 40},
 	}
 	msgs := buildContext(nil, session, history)
 	calls := asCalls(t, msgs[2])
-	if !strings.Contains(calls[0].Function.Arguments, "_rejected") {
+	if !strings.Contains(calls[0].Function.Arguments, "_pruned") || strings.Contains(calls[0].Function.Arguments, "_rejected") {
 		t.Fatalf("force-stub row must render stub even in-flight: %s", calls[0].Function.Arguments)
 	}
-	// 错误结果保留原文
-	if !strings.Contains(msgs[3].Content, "[参数超限]") {
-		t.Fatalf("error result must stay verbatim: %s", msgs[3].Content)
+	var persisted []savedCall
+	if err := json.Unmarshal([]byte(*history[1].ToolCalls), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if msgs[3].Content != "已写入 big.bin" || persisted[0].Function.Arguments != raw {
+		t.Fatal("successful result and stored original arguments must remain intact")
 	}
 }
 
@@ -261,7 +263,7 @@ func TestRezoneMsgs(t *testing.T) {
 		// 悬空行（无配对调用）：按叙事处理，永不被改
 		{Role: "tool", Content: "[未执行] 该轮对话中断", ToolCallID: "c_orphan"},
 	}
-	rezoneMsgs(msgs)
+	rezoneMsgs(msgs, "")
 
 	// bash 批次（distance 1，阈值 3？bash hotSteps=3 → 应保真！）
 	// 说明：bash 阈值为 3，distance 1 仍在热区——这里断言它保真，老化判定由 read/write
@@ -283,7 +285,7 @@ func TestRezoneMsgs(t *testing.T) {
 		{Role: "assistant", ToolCalls: []savedCall{newSavedCall("b2", "bash", `{"command":"ls"}`)}},
 		{Role: "tool", Content: "out", ToolCallID: "b2"},
 	}
-	rezoneMsgs(msgs2)
+	rezoneMsgs(msgs2, "")
 	// 最老的 read 批次（distance 3 ≥ 阈值 2）→ 结果换 stub
 	if !strings.Contains(msgs2[2].Content, "已省略") {
 		t.Fatalf("read result at distance 3 must be stubbed: %.40s", msgs2[2].Content)
@@ -304,7 +306,7 @@ func TestRezoneMsgs(t *testing.T) {
 
 	// 幂等：再次 rezone 结果不变
 	before, _ := json.Marshal(msgs2)
-	rezoneMsgs(msgs2)
+	rezoneMsgs(msgs2, "")
 	after, _ := json.Marshal(msgs2)
 	if string(before) != string(after) {
 		t.Fatalf("rezone must be idempotent")

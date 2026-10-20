@@ -283,19 +283,20 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 				}
 			}
 			rows = append(rows, ctxRow{
-				msg:         provider.ChatMessage{Role: "tool", Content: m.Content, ToolCallID: toolCallID},
+				msg:         provider.ChatMessage{Role: "tool", Content: m.Content, ToolCallID: toolCallID, CtxMode: m.CtxMode},
 				coldContent: coldContent,
 			})
 			items = append(items, zoneItem{
 				role:       "tool",
 				isPayload:  true,
 				toolName:   toolName,
+				forceStub:  m.CtxMode == "stub",
 				tokensFull: tokensOr(m.TokensFull, estimateTokens(m.Content)),
 			})
 		case "assistant":
 			flushDangling()
 			curCalls = map[string]savedCall{}
-			cm := provider.ChatMessage{Role: "assistant", Content: m.Content}
+			cm := provider.ChatMessage{Role: "assistant", Content: m.Content, CtxMode: m.CtxMode}
 			var calls []savedCall
 			hasCalls := false
 			if m.ToolCalls != nil && *m.ToolCalls != "" {
@@ -306,6 +307,10 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 						pendingIDs = append(pendingIDs, c.ID)
 						curCalls[c.ID] = c
 					}
+					// 旧数据即便未设置 ctx_mode，也不能回放大参数或非法 JSON。
+					if callsNeedStub(calls) {
+						cm.CtxMode = "stub"
+					}
 				}
 			}
 			row := ctxRow{msg: cm}
@@ -315,7 +320,7 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 				if m.StubToolCalls != nil && *m.StubToolCalls != "" {
 					_ = json.Unmarshal([]byte(*m.StubToolCalls), &cold)
 				}
-				if len(cold) == 0 {
+				if len(cold) == 0 || callsNeedStub(cold) {
 					cold = stubForToolCalls(calls)
 				}
 				row.coldCalls = cold
@@ -326,7 +331,7 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 					role:       "assistant",
 					isPayload:  true,
 					calls:      calls,
-					forceStub:  m.CtxMode == "stub",
+					forceStub:  cm.CtxMode == "stub",
 					tokensFull: tokensOr(m.TokensFull, estimateTokens(m.Content)+callsTokens(calls)),
 				})
 			} else {
@@ -445,14 +450,14 @@ func streamOneRound(
 	for {
 		select {
 		case <-ctx.Done():
-			return contentBuf.String(), reasoningBuf.String(), nil, "", lastUsage, nil
+			return contentBuf.String(), reasoningBuf.String(), collectSlots(slots, order), finishReason, lastUsage, ctx.Err()
 		case err, ok := <-errChan:
 			if ok && err != nil {
 				return contentBuf.String(), reasoningBuf.String(), collectSlots(slots, order), finishReason, lastUsage, err
 			}
 		case chunk, ok := <-chunkChan:
 			if !ok {
-				return contentBuf.String(), reasoningBuf.String(), collectSlots(slots, order), finishReason, lastUsage, nil
+				return contentBuf.String(), reasoningBuf.String(), collectSlots(slots, order), finishReason, lastUsage, ctx.Err()
 			}
 			if chunk.Usage != nil {
 				lastUsage = chunk.Usage
@@ -949,7 +954,7 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		// 与叙事行不动）。批量一次、之后前缀只增不变；首轮不触发，
 		// 由 buildContext 的分区兜底。
 		if lastPrompt > 0 && int64(lastPrompt) > int64(float64(provider.ContextWindow(session.Model))*ctxpolicy.Current().RezoneRatio) {
-			rezoneMsgs(msgs)
+			rezoneMsgs(msgs, session.Model)
 		}
 		req := &provider.ChatRequest{
 			Model:     session.Model,
@@ -971,10 +976,6 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			emit(Event{Type: "round_progress", Usage: turnUsage})
 		}
 
-		// 超限参数 / 截断半截 JSON 的调用换 stub 版落库与进上下文（原文落 blob），
-		// 执行仍用原始 calls 产生可自纠正的错误提示；逐调用判定，不牵连同批次正常调用
-		persistCalls, rejected := prepareAssistantCalls(calls, streamErr != nil, finish == "length")
-
 		if streamErr != nil {
 			note := fmt.Sprintf("[对话因异常中止：%v]", streamErr)
 			var text string
@@ -983,31 +984,31 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			} else {
 				text = note
 			}
-			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, persistCalls, "", "", nil,
-				assistantExtras(ctx, sessionID, text, persistCalls, calls, rejected))
+			errID, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil,
+				assistantExtras(ctx, sessionID, text, calls))
 			emit(Event{Type: "error", Error: streamErr.Error()})
 			emit(Event{Type: "done", ID: errID})
 			return nil
 		}
 
-		// finish=length 时 tool_calls 是被截断的半截 JSON，不能执行；已换 stub 版
-		// 落库，下轮回放不再携带非法 JSON
+		// 响应被截断时不执行工具；完整保存已生成的参数，回放副本修复非法 JSON。
 		if finish == "length" {
 			text := content + "\n\n[模型输出被 token 上限截断]"
-			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, persistCalls, "", "", nil,
-				assistantExtras(ctx, sessionID, text, persistCalls, calls, rejected))
+			id, _ := saveMessage(ctx, sessionID, "assistant", text, reasoning, calls, "", "", nil,
+				assistantExtras(ctx, sessionID, text, calls))
 			emit(Event{Type: "error", Error: "回答被 token 上限截断，可重试或拆小任务"})
 			emit(Event{Type: "done", ID: id})
 			return nil
 		}
 
-		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, persistCalls, "", "", nil,
-			assistantExtras(ctx, sessionID, content, persistCalls, calls, rejected))
+		extras := assistantExtras(ctx, sessionID, content, calls)
+		assistantID, err := saveMessage(ctx, sessionID, "assistant", content, reasoning, calls, "", "", nil, extras)
 		if err != nil {
 			return err
 		}
 		lastAssistantID = assistantID
-		msgs = append(msgs, provider.ChatMessage{Role: "assistant", Content: content, ToolCalls: callsOrNil(persistCalls)})
+		// 执行与落库保留原文，内存回放立即遵守 ctx_mode，不等待水位触发 rezone。
+		msgs = append(msgs, assistantContextMessage(content, calls, extras))
 
 		if len(calls) == 0 || finish != "tool_calls" {
 			emit(Event{Type: "done", ID: assistantID, Usage: turnUsage})

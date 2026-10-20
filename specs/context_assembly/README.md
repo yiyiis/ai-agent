@@ -1,6 +1,6 @@
 # 上下文组装治理技术规范 (Context Assembly Governance)
 
-> **版本**：v1.0.0  
+> **版本**：v1.1.0（原始参数持久化与强制 stub 回放）
 > **所属阶段**：系统架构阶段七 (Phase 7) —— 上下文预算、长程记忆与压缩 · 前置模块  
 > **核心组件**：工具层进场有界、写时 Stub 生成、messages 治理列、热/冷分区组装器、ReAct 轮内 Rezone、历史图片保留策略
 
@@ -24,9 +24,9 @@
 
 | 档位 | 载体 | 进 LLM 上下文 | 说明 |
 |---|---|---|---|
-| **原文** | blob 文件（沙箱 `.tool-outputs/`） | 永不 | 超限落盘的完整输出、被拒参数原文（审计） |
-| **content**（有界版） | `messages.content` / `tool_calls` 列 | 热区 | 落库口径 = 发模型口径（同一份字符串）；进场时已被工具层压界 |
-| **stub**（精简版） | `stub_content` / `stub_tool_calls` 列 | 冷区 | 写时用确定性规则生成，**额外存一份，不覆盖原文** |
+| **原文** | `tool_calls` 参数字符串及 `.tool-outputs/` 归档 | 参数仅在策略允许时进入；blob 不直接注入 | 模型生成参数完整落库，包含非法/截断原文；大参数与非法参数另行归档 |
+| **content**（结果有界版） | `messages.content` | 热区 | 工具结果先按 capRead/capProc 等规则压界，再落库和进入上下文 |
+| **stub**（精简版） | `stub_content` / `stub_tool_calls` | 冷区或强制 stub | 写时生成，额外存一份；>40KiB 或非法参数设置 `ctx_mode='stub'`，当前 Turn 与历史回放都立即使用 |
 
 **口径按可再生性划分**：不可再生的数据（用户输入、模型生成的参数）全量落库；可再生的数据（read 的文件本在沙箱、bash 超限输出落盘、命令可重跑）落"有界口径 + 引用"。这是"可逆压缩"——载荷丢掉、指针留下，模型真需要时自己取回。
 
@@ -35,7 +35,7 @@
 - **step = 一次上游 LLM 调用**：一条含 `tool_calls` 的 assistant 消息 + 其全部 tool 结果（含并行调用）。分区、计数均以 step 为粒度（与 Anthropic context editing 的 keep 粒度一致）。
 - **热区**：最近若干 step，payload 行（工具参数与结果）保留 content 原文。双条件任一触顶，更旧行全部进冷区：① 距今 step 数 ≥ 该工具阈值（read:2 / write:1 / edit:1 / bash:3 / python:3 / 其它:8）；② 热区累计 token 超窗口 × 25%。
 - **冷区**：stub 口径。
-- **豁免（无视分区）**：in-flight 最新 step 恒原文；user/system/纯文本 assistant（叙事）恒原文；错误结果 stub=原文恒保留；`ctx_mode='stub'`（被拦截）恒 stub。
+- **豁免（无视分区）**：`ctx_mode='stub'` 优先强制精简；其余 in-flight 最新 step 保留原文；user/system/纯文本 assistant（叙事）恒原文；已识别错误结果恒保留。
 
 ### 2.3 防线分工
 
@@ -56,11 +56,11 @@ flowchart TD
     subgraph WritePath [写路径 pkg/agent/stub.go]
         StubCalls[stubForToolCalls]
         StubResult[stubForToolResult]
-        Reject[prepareAssistantCalls 拦截置换]
-        Blob[writeRejectedBlob]
+        Mode[callsNeedStub 强制精简判定]
+        Blob[writeCallBlob 参数归档]
     end
     subgraph Store [持久层 messages 表]
-        C1[content / tool_calls 有界版]
+        C1[content 有界结果 / tool_calls 参数原文]
         C2[stub_content / stub_tool_calls]
         C3[blob_ref / ctx_mode / tool_target / tool_op / tokens]
     end
@@ -75,8 +75,8 @@ flowchart TD
     CapProc --> C3
     StubCalls --> C2
     StubResult --> C2
-    Reject --> C1
-    Reject --> Blob --> C3
+    Mode --> C3
+    Mode --> Blob --> C3
     C1 --> Zone
     C2 --> Zone
     Zone --> Req[provider.ChatRequest]
@@ -86,11 +86,11 @@ flowchart TD
 
 ## 4. 设计原则（不变量）
 
-1. **content / tool_calls 列永远有界**：原文只存 blob 文件，永不进上下文、不进 SELECT * 大行；
+1. **参数存储与回放分离**：`tool_calls` 完整保存原始参数；工具 `content` 按结果规则限长；大参数与非法参数只在模型回放中使用 stub；
 2. **stub 是额外一份**：三处消费（落库生成、旧数据组装回退、轮内 rezone）共用同一批纯函数，同输入同输出（Go map 序列化按 key 排序，确定性成立，有测试钉住）；
-3. **协议永真**：任何变换保持 tool_call/tool_result 按 `tool_call_id` 成对、arguments 恒为合法 JSON 字符串、id/type/name 结构不动；
+3. **回放协议完整**：变换保持调用与结果配对、回放 arguments 为合法 JSON 对象字符串、id/type/name 不变；数据库允许保存非法 arguments 原文供审计；
 4. **错误是证据**：失败结果在所有裁剪路径上保留原文；
-5. **被拒参数原文永不进任何后续请求**：置换发生在落库与内存 append 之前；
+5. **强制 stub 不影响原文**：在内存 append 时选择精简副本，历史组装与 rezone 同样遵守模式；执行只校验原始 JSON，合法大参数不因体积被拒绝；
 6. **组装确定性 + 缓存友好**：同样的行 + 同样的策略 → 逐字节相同请求；分区边界粘性（触顶后更旧全部冷区）、rezone 批量一次后前缀只增不变；
 7. **两把尺**：体积截断用 rune（字符）计数对齐 token 体量；token 估算用 `len/2`（字节）偏保守——中文密度高时宁可高估早裁。
 
@@ -98,8 +98,8 @@ flowchart TD
 
 | 文件 | 规范文档 | 内容 |
 |---|---|---|
-| `backend/pkg/tools/tools.go`（capRead/capProc/ArgsOverLimit） | [producer.md](producer.md) | 进场有界、超限落盘、截断模板 |
-| `backend/pkg/agent/stub.go` | [producer.md](producer.md) | stub 规则、拦截路径、extras 落库装配 |
+| `backend/pkg/tools/tools.go`（capRead/capProc/ArgsNeedStub） | [producer.md](producer.md) | 结果限长、参数解析与回放阈值 |
+| `backend/pkg/agent/stub.go` | [producer.md](producer.md) | stub 规则、原始参数归档、extras 落库装配 |
 | `backend/pkg/agent/agent.go`（buildContext / ReAct 循环） | [assemble.md](assemble.md) | 分区选择器、图片策略、rezone 接线 |
 | `backend/pkg/agent/assemble.go` | [assemble.md](assemble.md) | zoneBackward / rezoneMsgs 分区核心 |
 | `backend/pkg/ctxpolicy/` | [assemble.md](assemble.md) | 策略配置（叶子包，破导入环） |
@@ -110,8 +110,8 @@ flowchart TD
 
 | 场景 | 处理 |
 |---|---|
-| write 参数 >40KB | 落库/上下文均换 `_rejected` stub（path 保留），原文进 blob，`ctx_mode='stub'`；执行仍用原文 → `[参数超限]` 错误文本补 tool 行（带分块出路） |
-| finish=length 半截 JSON | 同上置换成合法 JSON stub；下轮回放走 flushDangling 补 `[未执行]` |
+| 任意工具参数 >40KiB 且合法（含 MCP） | 原文完整落库、正常执行；`stub_tool_calls` 精简参数，`ctx_mode='stub'` 立即作用于当前 Turn 与历史；原始调用数组另行归档，摘要携带 `_source` |
+| 非法 JSON / finish=length 半截 JSON | 原文完整落库；回放使用 `_rejected`；非法参数不进入工具执行，响应截断时结束整批，下轮由 flushDangling 补缺失结果 |
 | read 结果大 | content = 前 2000 行 + 翻页提示（无 blob，文件本在沙箱）；stub = 摘要行 |
 | bash/python 结果 >3万字符 | content = 头 8000 + 省略 + 尾 4000 + blob 路径；完整输出落 `.tool-outputs/`；错误结果豁免 |
 | 历史图片 | 仅最近 2 张真实图，其余文本占位且不做 URL/base64 解析；当前轮全量 |
@@ -119,11 +119,11 @@ flowchart TD
 
 ## 7. 已知限制（v1.0.0）
 
-1. `rezoneMsgs` 内部分区预算当前用默认窗口（131072），未随 `session.Model` 传入——非默认窗口模型（如 1M 的 MiniMax）触发线与裁剪力度不一致。建议修法：函数加 model 参数从循环传入。
+1. 完整参数现在保存在 `tool_calls`，大行仍会影响数据库读取和前端历史体积；stub 只控制模型请求。已有数据中被旧版本替换掉的参数不会自动回填。
 2. Loop Guard 提示前缀拼进 `out.Text` 后，`IsErrorResult` 可能识别不出被盖住前缀的错误（后果保守：错误走默认 stub 分支，不丢信息）。
 3. 被拒调用的 tool 行折叠键为 NULL（参数原文不可解析，保守不折叠）。
 4. blob 文件为 sanitize 后的清洗版（≤256KB），非进程原始字节。
-5. ~~blob 生命周期跟随沙箱~~（v1.0.1 已解决）：超限输出与被拒参数原文现在**双写**——沙箱 `.tool-outputs/`（模型当场可读）+ 对象存储归档（`storage.PutArchive`，Bucket 空自动落本地 uploads/），`blob_ref` 列存 `{"path","url"}` JSON。沙箱回收后 `materializeBlobs` 每轮按需重物化（文件还在则零流量跳过，与 `materializeAttachments` 同款生命周期兜底）。v1.0.0 的裸路径行兼容读取但无从恢复。残余限制：重物化的存在性检查在 docker/e2b 驱动下是一次远程读（本地驱动是廉价 os 调用）；归档为 sanitize 后的清洗版。
+5. blob 双写沙箱与对象存储（Bucket 空落本地 uploads/）；`blob_ref` 存 `{"path","url"}`，沙箱回收后 `materializeBlobs` 按需恢复。旧裸路径无 URL 时不能恢复，任一写入失败只告警。参数归档保存原始调用数组，进程输出归档则是 sanitize 后的版本。
 
 ## 8. 后续阶段（数据列已就绪）
 

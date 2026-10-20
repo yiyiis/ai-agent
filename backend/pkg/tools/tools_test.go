@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -156,6 +157,40 @@ func TestParseArguments(t *testing.T) {
 	}
 }
 
+func TestLargeArgumentsAreNotExecutionLimit(t *testing.T) {
+	for _, size := range []int{40 << 10, (40 << 10) + 1} {
+		raw := `{"data":"` + strings.Repeat("x", size-len(`{"data":""}`)) + `"}`
+		if ArgsNeedStub(raw) != (size > 40<<10) {
+			t.Fatalf("incorrect replay threshold at %d bytes", size)
+		}
+		if _, errMsg := ParseArguments(raw); errMsg != "" {
+			t.Fatalf("valid arguments must parse regardless of size: %s", errMsg)
+		}
+	}
+	for _, raw := range []string{"", " ", `{"data":"partial`, `[]`, `null`, `{} {}`, `{} trailing`} {
+		if _, errMsg := ParseArguments(raw); errMsg == "" {
+			t.Fatalf("invalid argument object should fail: %s", raw)
+		}
+	}
+	root := setupWorkspace(t)
+	content := strings.Repeat("完整内容\n", 10000)
+	raw, err := json.Marshal(map[string]any{"path": "large.txt", "content": content})
+	if err != nil {
+		t.Fatal(err)
+	}
+	args, errMsg := ParseArguments(string(raw))
+	if errMsg != "" || !ArgsNeedStub(string(raw)) {
+		t.Fatalf("large write arguments should parse: %s", errMsg)
+	}
+	if out := Execute(context.Background(), "sess1", "write_file", args); IsErrorResult(out) {
+		t.Fatalf("large write should execute: %s", out)
+	}
+	data, err := os.ReadFile(filepath.Join(root, "sess1", "large.txt"))
+	if err != nil || string(data) != content {
+		t.Fatalf("large write must preserve all content: %v", err)
+	}
+}
+
 func TestSanitizeTruncate(t *testing.T) {
 	in := "a\x00b\x07c\n"
 	if got := sanitize(in); got != "abc\n" {
@@ -233,7 +268,6 @@ func TestExportArtifactMissing(t *testing.T) {
 		t.Fatalf("missing file should fail clearly: %s", out)
 	}
 }
-
 
 // TestEnvInjectionIntoBash 阶段五：skill secrets 经 tools.WithEnv 注入 context，
 // bash / python_exec 执行时应转交给沙箱进程（local 驱动即进程环境变量）

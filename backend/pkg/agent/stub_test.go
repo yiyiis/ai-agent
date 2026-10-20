@@ -59,15 +59,16 @@ func TestStubForToolCallsSmallArgsUntouched(t *testing.T) {
 	}
 }
 
-func TestPrepareAssistantCallsRejection(t *testing.T) {
+func TestCallsNeedStub(t *testing.T) {
 	ok := mkCall("read_file", `{"path":"a.py"}`)
 	big := mkCall("write_file", `{"path":"a.py","content":"`+strings.Repeat("x", 41<<10)+`"}`)
 	half := mkCall("write_file", `{"path":"b.py","content":"xx`)
 
-	// 超限：仅超限调用被置换，同批次正常调用保留原文
-	out, rejected := prepareAssistantCalls([]savedCall{ok, big}, false, false)
-	if !rejected {
-		t.Fatalf("oversized call must be rejected")
+	// stub 只改回放副本，合法大参数可以正常解析，原始批次不变。
+	calls := []savedCall{ok, big}
+	out := stubForToolCalls(calls)
+	if !callsNeedStub(calls) || !validCallArgs(big.Function.Arguments) {
+		t.Fatal("large valid arguments should execute but force stub replay")
 	}
 	if out[0].Function.Arguments != ok.Function.Arguments {
 		t.Fatalf("normal call in batch must survive: %s", out[0].Function.Arguments)
@@ -76,25 +77,20 @@ func TestPrepareAssistantCallsRejection(t *testing.T) {
 	if err := json.Unmarshal([]byte(out[1].Function.Arguments), &stub); err != nil {
 		t.Fatalf("rejected stub must be valid JSON: %v", err)
 	}
-	if stub["_rejected"] != true || stub["path"] != "a.py" {
-		t.Fatalf("rejected stub should keep _rejected and path: %v", stub)
+	if stub["_pruned"] != true || stub["_rejected"] != nil || stub["path"] != "a.py" {
+		t.Fatalf("large write should use a normal pruned stub: %v", stub)
 	}
-
-	// finish=length：半截 JSON 置换成可回放的合法 JSON
-	out, rejected = prepareAssistantCalls([]savedCall{half}, false, true)
-	if !rejected || !validCallArgs(out[0].Function.Arguments) {
-		t.Fatalf("truncated call must become replayable JSON: %s", out[0].Function.Arguments)
+	if calls[1].Function.Arguments != big.Function.Arguments {
+		t.Fatal("original large arguments must remain untouched")
 	}
-
-	// 正常批次：原样返回、不拒绝
-	out, rejected = prepareAssistantCalls([]savedCall{ok}, false, false)
-	if rejected || out[0].Function.Arguments != ok.Function.Arguments {
-		t.Fatalf("normal batch must pass through")
+	// 非法 JSON 始终生成合法的回放占位，不再依赖 finish reason。
+	out = stubForToolCalls([]savedCall{half})
+	if !callsNeedStub([]savedCall{half}) || !validCallArgs(out[0].Function.Arguments) ||
+		!strings.Contains(out[0].Function.Arguments, "_rejected") {
+		t.Fatalf("invalid arguments must get a safe replay stub: %s", out[0].Function.Arguments)
 	}
-
-	// 流中断但参数完整合法：不置换（悬空修复已有兜底，合法 JSON 可正常回放）
-	if _, rejected = prepareAssistantCalls([]savedCall{ok}, true, false); rejected {
-		t.Fatalf("valid calls under stream error must survive")
+	if callsNeedStub([]savedCall{ok}) {
+		t.Fatal("small valid arguments should keep normal replay policy")
 	}
 }
 
@@ -204,7 +200,7 @@ func TestToolExtras(t *testing.T) {
 
 func TestAssistantExtras(t *testing.T) {
 	calls := []savedCall{mkCall("write_file", `{"path":"a.py","content":"hello world"}`)}
-	ex := assistantExtras(context.Background(), "sess", "我先写文件", calls, calls, false)
+	ex := assistantExtras(context.Background(), "sess", "我先写文件", calls)
 	if ex.forceStub || ex.blobRef != "" {
 		t.Fatalf("normal assistant row must not force stub: %+v", ex)
 	}
@@ -232,12 +228,12 @@ func setupBlobEnv(t *testing.T) (wsRoot, uploads string) {
 	return wsRoot, uploads
 }
 
-// TestWriteRejectedBlobArchive 被拒原文双写：沙箱 + 对象存储归档；blob_ref 编解码往返与裸路径兼容
-func TestWriteRejectedBlobArchive(t *testing.T) {
+// TestWriteCallBlobArchive 大参数/非法参数原文双写：沙箱 + 对象存储归档。
+func TestWriteCallBlobArchive(t *testing.T) {
 	wsRoot, uploads := setupBlobEnv(t)
 
-	path, url := writeRejectedBlob(context.Background(), "sess1", `{"calls":[{"id":"c1"}]}`)
-	if !strings.HasPrefix(path, ".tool-outputs/rejected-") {
+	path, url := writeCallBlob(context.Background(), "sess1", `{"calls":[{"id":"c1"}]}`)
+	if !strings.HasPrefix(path, ".tool-outputs/arguments-") {
 		t.Fatalf("sandbox path wrong: %q", path)
 	}
 	if !strings.HasPrefix(url, "/api/uploads/") {
@@ -264,7 +260,7 @@ func TestWriteRejectedBlobArchive(t *testing.T) {
 // TestMaterializeBlobs 沙箱回收重建后凭归档 URL 恢复；文件还在则不覆盖；裸路径行跳过
 func TestMaterializeBlobs(t *testing.T) {
 	wsRoot, _ := setupBlobEnv(t)
-	path, url := writeRejectedBlob(context.Background(), "sess1", "ORIG-DATA")
+	path, url := writeCallBlob(context.Background(), "sess1", "ORIG-DATA")
 	_ = wsRoot
 
 	// 模拟沙箱回收：切到全新空沙箱根

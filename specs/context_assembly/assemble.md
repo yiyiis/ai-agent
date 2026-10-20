@@ -69,23 +69,25 @@ assistant 行同理：`stub_tool_calls` 列优先，缺失则 `stubForToolCalls(
 
 ### 2.3 渲染
 
-`applyCold` 闭包（按索引安全捕获）在分区判定时就地把冷区行切到 stub 口径，然后统一输出 msgs。`ctx_mode='stub'` 行无视分区恒冷——被拒参数的原文永不出现在任何请求里。
+`applyCold` 闭包在分区判定时把冷区行切到 stub，然后输出 msgs。`ctx_mode='stub'` 优先于最新 step 豁免；大参数与非法参数原文不进入模型请求，数据库原文保持不变。旧行即便没有模式标记，也会按参数大小/合法性强制安全回放。
 
-## 3. ReAct 轮内 Rezone —— `rezoneMsgs(msgs)`
+## 3. ReAct 轮内 Rezone —— `rezoneMsgs(msgs, model)`
 
 ```
-循环内 msgs 只 append（内存增量，前缀缓存友好，现状保留）；
+循环内原始 calls 负责落库和执行；assistantContextMessage 负责内存回放：
+  ctx_mode=stub → append stubForToolCalls(calls)，立即生效，不等待 rezone 水位
+  其余 → append 正常 calls
 round 边界（构造 req 之前）：
   lastPrompt = 上一轮 streamOneRound 返回的 usage.PromptTokens（精确值，滞后一轮）
   if lastPrompt > ContextWindow(session.Model) × RezoneRatio(0.65)：
-      rezoneMsgs(msgs)   // 整体分区替换一次
+      rezoneMsgs(msgs, session.Model)   // 用真实模型窗口整体分区
 ```
 
 rezoneMsgs 内部：
 - 从内存 msgs 建 `callID → savedCall` 映射（tool 行冷区生成 stub 需要配对参数）；
 - tool 行无配对调用（悬空/合成）→ 叙事化，不动；
 - applyCold 用**与落库同一套 stub 函数**现场生成——幂等（`_pruned`/`_rejected`/"已省略"守卫），重复调用结果不变（有测试钉住）；
-- in-flight 最新 step 与叙事行不动。
+- 内存消息携带不参与模型协议序列化的 `CtxMode`；强制 stub 优先于最新 step 豁免，其他 in-flight 与叙事行不动。
 
 **纪律**：批量一次、替换后前缀只增不变（0.65 迟滞带保证不频繁触发）；首轮不触发（`lastPrompt == 0`），由 buildContext 分区兜底。预算检查的存在解决"单轮 ReAct 累积撑爆 → 全量已落库 → 重试继续爆 → 会话卡死"的生存性问题。
 
@@ -97,7 +99,7 @@ rezoneMsgs 内部：
 [历史·冷区：stub_tool_calls + stub_content + 错误原文 + 旧图文本占位]
 [历史·热区：最近 ≤K step 且 ≤25% 窗口，content 原文 + 最近 2 张真实图]
 [当前轮：用户消息 + 全部当前图片]
-[本轮新消息：assistant + tool（进场有界，轮内不裁直至 rezone 触发）]
+[本轮新消息：assistant 按 ctx_mode 立即选择参数版本；tool 结果进场有界]
 ```
 
 ## 5. 配置
