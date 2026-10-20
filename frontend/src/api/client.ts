@@ -19,10 +19,12 @@ import type {
   SkillRunStats,
   SkillRunSummary,
   SkillVersionDiff,
-  TokenUsage,
   WorkingDiff,
 } from '../types'
 import { readJwtCookie } from '../lib/auth'
+import { consumeStream, type StreamEvent, type StreamOptions } from './stream'
+
+export type { StreamEvent } from './stream'
 
 const BASE = '/api'
 
@@ -408,91 +410,6 @@ export const api = {
   me: () => http<LoginUser>('/auth/me'),
 }
 
-export type StreamEvent =
-  | { type: 'user_message_id'; id: string }
-  | { type: 'delta'; content?: string; reasoning?: string }
-  | { type: 'tool_call_start'; id: string; name: string; arguments: string }
-  | { type: 'tool_call_result'; id: string; output: string }
-  | { type: 'tool_call_error'; id: string; error: string }
-  | { type: 'round_progress'; usage: TokenUsage }
-  | {
-      type: 'memory_written'
-      memory_id: string
-      topic: string
-      content: string
-      is_update: boolean
-    }
-  | { type: 'tool_artifact'; tool_call_id: string; attachment: Attachment }
-  | {
-      type: 'skill_loaded'
-      tool_call_id: string
-      skill_id: number
-      name: string
-    }
-  | { type: 'done'; id: string; usage?: TokenUsage }
-  | { type: 'error'; message: string }
-
-interface StreamOptions {
-  signal?: AbortSignal
-  /** 每收到一帧带 `id:` 游标的 SSE 事件后回调（断线重连时携带 seq+1 作为 from_seq） */
-  onSeq?: (seq: number) => void
-}
-
-async function consumeStream(
-  res: Response,
-  onEvent: (ev: StreamEvent) => void,
-  opts?: StreamOptions,
-) {
-  const signal = opts?.signal
-  if (!res.ok || !res.body) {
-    onEvent({ type: 'error', message: `HTTP ${res.status}` })
-    return
-  }
-  // 流开始前的失败（鉴权/会话隔离等）以标准信封 JSON 返回，而非 SSE 帧
-  const ct = res.headers.get('content-type') || ''
-  if (ct.includes('application/json')) {
-    const body = await res.json().catch(() => null)
-    onEvent({ type: 'error', message: body?.msg || `HTTP ${res.status}` })
-    return
-  }
-  const reader = res.body.getReader()
-  const decoder = new TextDecoder()
-  let buffer = ''
-  try {
-    while (true) {
-      const { done, value } = await reader.read()
-      if (done) break
-      buffer += decoder.decode(value, { stream: true })
-      const lines = buffer.split('\n')
-      buffer = lines.pop() || ''
-      let pendingSeq: number | null = null
-      for (const raw of lines) {
-        // `id: N` 是紧随其后的 data 帧的游标；`: ping` 等注释行是心跳，均不携带事件
-        if (raw.startsWith('id: ')) {
-          pendingSeq = Number(raw.slice(4))
-          continue
-        }
-        if (!raw.startsWith('data: ')) continue
-        try {
-          onEvent(JSON.parse(raw.slice(6)) as StreamEvent)
-        } catch {
-          // 忽略解析失败的片段
-        }
-        if (pendingSeq != null) {
-          opts?.onSeq?.(pendingSeq)
-          pendingSeq = null
-        }
-      }
-    }
-  } catch (e) {
-    if (signal?.aborted) {
-      // 用户主动停止——上层会自己派发 done 事件
-      return
-    }
-    onEvent({ type: 'error', message: String(e) })
-  }
-}
-
 export async function streamMessage(
   sessionId: string,
   content: string,
@@ -574,10 +491,7 @@ export async function attachStream(
   )
   if (res.status === 401 && onUnauthorized) onUnauthorized()
   if (res.status === 204) return false
-  const contentType = res.headers.get('content-type') || ''
-  if (!res.ok || !contentType.includes('text/event-stream')) {
-    return false
-  }
+  // 仅 204 表示没有轮次；连接故障需继续重试，业务错误由 consumeStream 派发。
   await consumeStream(res, onEvent, opts)
   return true
 }

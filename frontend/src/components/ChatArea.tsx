@@ -31,6 +31,7 @@ import {
   streamMessage,
   type StreamEvent,
 } from '../api/client'
+import { followStream, type StreamStarter } from '../api/stream'
 import type {
   Attachment,
   EnabledSkillEntry,
@@ -699,6 +700,7 @@ export function ChatArea({
   const [editingId, setEditingId] = useState<string | null>(null)
   const [preview, setPreview] = useState<Attachment | null>(null)
   const [errorBanner, setErrorBanner] = useState<string | null>(null)
+  const [reconnectAttempt, setReconnectAttempt] = useState(0)
   // 自动加载 skill 的提示条——和错误条同一个位置，但不是错误，用中性配色
   const [noticeBanner, setNoticeBanner] = useState<string | null>(null)
   // 模型刚记下的跨会话记忆。**必须可见且能当场删掉**——记忆会注入之后每一轮
@@ -763,6 +765,7 @@ export function ChatArea({
     }
 
     activeIdRef.current = sessionId
+    setReconnectAttempt(0)
 
     // 切换会话时（无论切去草稿态还是切到其它已有会话），必须彻底清理上一会话的输入框还原态与记录，杜绝串到新会话
     setComposerValue(undefined)
@@ -846,15 +849,8 @@ export function ChatArea({
             }
             return prev
           })
-          void runStream(async (onEvent, opts) => {
-            const attached = await attachStream(sessionId, 0, onEvent, opts)
-            if (!attached) {
-              // 竞态兜底：探测与补播之间轮次恰好结束（204）——重拉全量消息，
-              // 补回刚被截掉的落库部分
-              refreshAfterTurn(sessionId)
-            }
-            return attached
-          })
+          // 探测与补播间轮次若消失（204），由 runStream 统一刷新历史兜底。
+          void runStream((onEvent, opts) => attachStream(sessionId, 0, onEvent, opts))
         })
       })
       .catch((err) => {
@@ -1100,9 +1096,11 @@ export function ChatArea({
     }
   }
 
-  // 组件卸载时停掉 rAF，避免泄漏
+  // 组件卸载时取消订阅与退避等待，避免后台重试继续操作已卸载视图。
   useEffect(() => {
     return () => {
+      abortRef.current?.abort()
+      if (streamTimerRef.current) clearInterval(streamTimerRef.current)
       pumpActiveRef.current = false
       if (rafRef.current != null) cancelAnimationFrame(rafRef.current)
     }
@@ -1141,7 +1139,9 @@ export function ChatArea({
     // 会话守卫：回调到达时用户可能已切到别的会话——旧会话的消息/标题
     // 不允许覆盖当前视图，直接放弃刷新（切回时会重新加载）
     if (activeIdRef.current !== currentId) return
+    const streamOwner = abortRef.current
     api.getSession(currentId).then((s) => {
+      if (activeIdRef.current !== currentId || abortRef.current !== streamOwner) return
       setMessages((prev) => {
         const notices = prev.filter((m) => m.role === 'notice')
         if (notices.length === 0) return s.messages
@@ -1171,6 +1171,11 @@ export function ChatArea({
         noticeTimerRef.current = setTimeout(() => setNoticeBanner(null), 6000)
       }
       lastAskRef.current = null
+    }).catch(() => {
+      // 离线时保留已收到的内容，本地收尾不依赖这次刷新成功。
+      if (activeIdRef.current === currentId && abortRef.current === streamOwner) {
+        abortRef.current = null
+      }
     })
   }
 
@@ -1328,6 +1333,7 @@ export function ChatArea({
 
       // 流结束：停泵并吐完剩余缓冲
       stopStreamPump()
+      setStreaming(false)
       const currentId = activeIdRef.current
       if (currentId) {
         refreshAfterTurn(currentId)
@@ -1343,10 +1349,7 @@ export function ChatArea({
   }
 
   const runStream = async (
-    starter: (
-      onEvent: (ev: StreamEvent) => void,
-      opts: { signal: AbortSignal; onSeq: (seq: number) => void },
-    ) => Promise<boolean | void>,
+    starter: StreamStarter,
     optimistic?: Message | null,
   ) => {
     // 流所属会话在启动时钉死：切走会话后到达的事件（abort 前已入队的微任务）
@@ -1354,7 +1357,12 @@ export function ChatArea({
     const streamSessionId = activeIdRef.current
     const ctrl = new AbortController()
     abortRef.current = ctrl
+    const ownsStream = () =>
+      activeIdRef.current === streamSessionId && abortRef.current === ctrl
     lastSeqRef.current = -1
+    setReconnectAttempt(0)
+    setErrorBanner(null)
+    if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
     setOptimisticUser(optimistic ?? null)
     setStreaming(true)
     setStreamProcessItems([])
@@ -1376,66 +1384,44 @@ export function ChatArea({
     }, 200)
 
     startStreamPump()
-    let sawDone = false
-    // 包一层 handleEvent，记录是否见过 done/error——后端任何路径若漏 yield done，
-    // 末尾的兜底会补发，确保 setStreaming(false) 一定被触发。
-    const onEvent = (ev: StreamEvent) => {
-      if (ev.type === 'done' || ev.type === 'error') sawDone = true
-      if (activeIdRef.current !== streamSessionId) return // 已切走：事件丢弃
-      handleEvent(ev)
+    const result = await followStream(
+      starter,
+      (fromSeq, onEvent, opts) => attachStream(streamSessionId!, fromSeq, onEvent, opts),
+      {
+        signal: ctrl.signal,
+        onEvent: (ev) => {
+          if (!ownsStream()) return
+          setReconnectAttempt(0)
+          handleEvent(ev)
+        },
+        onSeq: (seq) => {
+          if (ownsStream()) lastSeqRef.current = seq
+        },
+        onRetry: (attempt) => {
+          if (ownsStream()) setReconnectAttempt(attempt)
+        },
+      },
+    )
+    // 旧订阅被取消或切走后，不得清理新会话/新订阅的泵和计时器。
+    if (!ownsStream()) return
+    setReconnectAttempt(0)
+    if (streamTimerRef.current) {
+      clearInterval(streamTimerRef.current)
+      streamTimerRef.current = null
     }
-    const onSeq = (seq: number) => {
-      lastSeqRef.current = seq
-    }
-    let streamed = true
-    try {
-      // starter 返回 false 表示"当前没有可流的东西"（重连探测 204），静默收尾
-      streamed = (await starter(onEvent, { signal: ctrl.signal, onSeq })) !== false
-    } catch (e) {
-      if (!ctrl.signal.aborted) {
-        onEvent({ type: 'error', message: String(e) })
-      }
-    }
-    if (!streamed) {
-      if (streamTimerRef.current) {
-        clearInterval(streamTimerRef.current)
-        streamTimerRef.current = null
-      }
-      stopStreamPump()
-      setStreaming(false)
-      setOptimisticUser(null)
-      abortRef.current = null
+    stopStreamPump()
+    setStreaming(false)
+    if (result === 'terminal') return // 服务端终态已通过 handleEvent 刷新
+    if (result === 'unavailable') {
+      refreshAfterTurn(streamSessionId!)
       return
     }
-    // 断线重连：后台 Turn 不随连接中断而终止——流意外断开且未收到 done 时，
-    // 携带最后游标+1 指数退避重连，从服务端环形缓冲补播断线期间的事件。
-    // 重连目标钉死为流所属会话，而非当前显示的会话
-    if (!sawDone && !ctrl.signal.aborted && streamSessionId) {
-      for (let attempt = 0; attempt < 4 && !sawDone && !ctrl.signal.aborted; attempt++) {
-        await new Promise((r) => setTimeout(r, 500 * 2 ** attempt))
-        if (ctrl.signal.aborted || sawDone) break
-        try {
-          const attached = await attachStream(
-            streamSessionId,
-            lastSeqRef.current + 1,
-            onEvent,
-            { signal: ctrl.signal, onSeq },
-          )
-          if (!attached) break // 保留期已过或轮次不存在，走兜底收尾
-        } catch {
-          // 网络仍不可用，继续退避重试
-        }
-      }
-    }
-    // 兜底：无论 abort、异常还是 SSE 正常关闭，确保 streaming 状态被清掉。
-    // 重复触发 handleEvent('done') 是幂等的（最多多一次无害的 getSession）。
-    // 已切走会话时只停泵收尾——终态刷新交给切回时的加载流程。
-    if (!sawDone) {
-      if (activeIdRef.current === streamSessionId) {
-        handleEvent({ type: 'done', id: '' })
-      } else {
-        stopStreamPump()
-      }
+    abortRef.current = null
+    if (result === 'disconnected') {
+      // 只结束本地订阅，不伪造后台完成/失败，也不重发用户的任务。
+      if (errorTimerRef.current) clearTimeout(errorTimerRef.current)
+      errorTimerRef.current = null
+      setErrorBanner('连接中断，暂时无法恢复实时连接。后台任务可能仍在运行，请在网络恢复后刷新或重新进入此会话查看。')
     }
   }
 
@@ -1924,18 +1910,18 @@ export function ChatArea({
                     onPreview={setPreview}
                   />
                 )}
-                {streaming && (
+                {(streaming || streamProcessItems.length > 0 || streamFinalText.length > 0) && (
                   <AssistantTurnView
                     processItems={streamProcessItems}
                     finalAnswer={streamFinalText}
-                    streaming={true}
+                    streaming={streaming}
                     onPreview={setPreview}
-                    liveMetric={{
+                    liveMetric={streaming ? {
                       elapsedSec: streamElapsed,
                       totalTokens: streamTokens.total,
                       cachedTokens: streamTokens.cached,
                       promptTokens: streamTokens.prompt,
-                    }}
+                    } : undefined}
                   />
                 )}
               </div>
@@ -1982,6 +1968,12 @@ export function ChatArea({
             </div>
           )}
 
+          {streaming && reconnectAttempt > 0 && (
+            <div role="status" className="px-6 py-2 text-center text-xs text-[#747775] dark:text-[#9aa0a6]">
+              网络连接中断，正在尝试重连（{reconnectAttempt}/4）…
+            </div>
+          )}
+
           {/* 技能自动加载通知 */}
           {noticeBanner && (
             <div className="px-6 -mb-2 flex justify-center z-10 animate-slide-up">
@@ -2004,10 +1996,10 @@ export function ChatArea({
 
           {/* 错误提示条 */}
           {errorBanner && !streaming && (
-            <div className="px-6 -mb-2 flex justify-center z-10 animate-slide-up">
+            <div role="alert" className="px-6 -mb-2 flex justify-center z-10 animate-slide-up">
               <div className="flex items-center gap-2 max-w-[80%] px-3.5 py-1.5 text-xs bg-rose-50/95 dark:bg-rose-950/90 backdrop-blur-md border border-rose-200 dark:border-rose-900 text-rose-700 dark:text-rose-300 rounded-full shadow-sm">
                 <AlertCircle className="w-3.5 h-3.5 shrink-0 text-rose-600 dark:text-rose-400" />
-                <span className="truncate">{errorBanner}</span>
+                <span className="min-w-0 break-words">{errorBanner}</span>
                 <button
                   onClick={() => {
                     setErrorBanner(null)

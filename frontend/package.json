@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "test:stream": "node --experimental-strip-types --test tests/stream.test.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },
