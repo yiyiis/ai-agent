@@ -30,13 +30,13 @@ import (
 )
 
 const (
-	maxOutput     = 256 * 1024 // 工具输出最终保险上限（sanitize 兜底）
-	maxReadLines  = 2000       // read_file 单次最多返回行数
-	maxLineChars  = 2000       // read_file 单行超长截断阈值（字符）
-	maxProcChars  = 30000      // bash/python 喂给 LLM 的输出上限（字符）
-	procHeadChars = 8000       // 进程输出超限时保留的头部字符数
-	procTailChars = 4000       // 进程输出超限时保留的尾部字符数
-	bashTimeoutMax = 300       // bash 工具自身允许的最大超时（秒）
+	maxOutput      = 256 * 1024 // 工具输出最终保险上限（sanitize 兜底）
+	maxReadLines   = 2000       // read_file 单次最多返回行数
+	maxLineChars   = 2000       // read_file 单行超长截断阈值（字符）
+	maxProcChars   = 30000      // bash/python 喂给 LLM 的输出上限（字符）
+	procHeadChars  = 8000       // 进程输出超限时保留的头部字符数
+	procTailChars  = 4000       // 进程输出超限时保留的尾部字符数
+	bashTimeoutMax = 300        // bash 工具自身允许的最大超时（秒）
 
 	// SkillMountPrefix 工作区内 skill 挂载目录前缀（阶段五：pkg/skill.MountDir），
 	// 挂载文件是只读引用，写入类工具在此拦截
@@ -84,7 +84,7 @@ func Schemas() []any {
 		map[string]any{
 			"type": "function",
 			"function": map[string]any{
-				"name":  "write_file",
+				"name":        "write_file",
 				"description": "向工作区内某个文件写入文本内容（已存在则覆盖；父目录会自动创建）。",
 				"parameters": map[string]any{
 					"type": "object",
@@ -313,7 +313,7 @@ func ArgsOverLimit(raw string) bool { return len(raw) > maxArgumentsBytes }
 func ParseArguments(raw string) (map[string]any, string) {
 	if len(raw) > maxArgumentsBytes {
 		return nil, fmt.Sprintf(
-			"[参数超限] arguments 长度 %d 超过 %dKB 上限。请把大文件拆成多次 write_file 追加写入（每次一小段），或只写入关键部分。",
+			"[参数超限] arguments 长度 %d 超过 %dKB 上限。请把大文件拆成多次 edit_file 追加写入（每次一小段），或只写入关键部分。",
 			len(raw), maxArgumentsBytes>>10)
 	}
 	if strings.TrimSpace(raw) == "" {
@@ -382,7 +382,7 @@ func sanitize(s string) string {
 	return s[:maxOutput] + fmt.Sprintf("\n…(已截断 %d 字符)", len(s)-maxOutput)
 }
 
-func capRead(text, path string, paged bool) string {
+func capRead(text, path string, offset int, paged bool) string {
 	if text == "" {
 		return text
 	}
@@ -402,7 +402,11 @@ func capRead(text, path string, paged bool) string {
 		if len(r) <= maxLineChars {
 			continue // 中文场景：字节超但字符未超，保留
 		}
-		lines[i] = string(r[:maxLineChars]) + "…[单行超长已截断]"
+		lineNo := i + 1
+		if offset > 0 {
+			lineNo = offset + i
+		}
+		lines[i] = string(r[:maxLineChars]) + fmt.Sprintf("…[第 %d 行超过 2000 字符已截断。若需查看后半段，请使用 bash 的 cut/fold 命令或 python 脚本切片读取]", lineNo)
 		longLine = true
 	}
 	out := strings.Join(lines, "\n")
@@ -448,7 +452,10 @@ func capProc(ctx context.Context, sessionID, tool, text string) Output {
 	head, tail := string(r[:procHeadChars]), string(r[len(r)-procTailChars:])
 	out := head + fmt.Sprintf("\n…[中间省略 %d 字符]…\n", len(r)-procHeadChars-procTailChars) + tail
 	if ref != "" {
-		out += fmt.Sprintf("\n[输出超长，完整结果已写入工作区 %s，可 read_file 配合 offset 分段查看]", ref)
+		out += fmt.Sprintf("\n[输出超长，完整结果已写入工作区 %s。排查建议：\n"+
+			"1. 查找报错优先使用 grep：bash -c \"grep -E 'Error|Exception|Failed' %s\"\n"+
+			"2. 查看日志末尾优先使用 tail：bash -c \"tail -n 50 %s\"\n"+
+			"3. 精确查看代码再使用 read_file 配合 offset/limit]", ref, ref, ref)
 	} else {
 		out += "\n[输出超长已截断；如需完整输出请缩小命令输出范围后重跑]"
 	}
@@ -580,7 +587,7 @@ func doExecute(ctx context.Context, sessionID, name string, args map[string]any)
 			}
 			text = strings.Join(lines[start:end], "")
 		}
-		return Output{Text: capRead(sanitize(text), rel, paged)}
+		return Output{Text: capRead(sanitize(text), rel, offset, paged)}
 
 	case "write_file":
 		rel := argString(args, "path")

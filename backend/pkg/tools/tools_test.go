@@ -283,7 +283,7 @@ func TestCapReadLineWindow(t *testing.T) {
 	}
 	text := strings.Join(lines, "\n")
 
-	got := capRead(text, "a.txt", false)
+	got := capRead(text, "a.txt", 0, false)
 	if !strings.Contains(got, "l2000") || strings.Contains(got, "l2001") {
 		t.Fatalf("line window wrong: should show first 2000 lines only")
 	}
@@ -294,17 +294,17 @@ func TestCapReadLineWindow(t *testing.T) {
 		t.Fatalf("un-paged hint should steer to edit/paging: %q", got)
 	}
 
-	got = capRead(text, "a.txt", true)
+	got = capRead(text, "a.txt", 1, true)
 	if !strings.Contains(got, "继续用更大的 offset") {
 		t.Fatalf("paged hint wrong: %q", got)
 	}
 
-	got = capRead(strings.Repeat("甲", 5000), "a.txt", false)
-	if !strings.Contains(got, "单行超长已截断") {
+	got = capRead(strings.Repeat("甲", 5000), "a.txt", 0, false)
+	if !strings.Contains(got, "超过 2000 字符已截断") {
 		t.Fatalf("long line should be truncated: %q", got[:100])
 	}
 
-	if got := capRead("a\nb", "a.txt", false); got != "a\nb" {
+	if got := capRead("a\nb", "a.txt", 0, false); got != "a\nb" {
 		t.Fatalf("small file should pass through unchanged: %q", got)
 	}
 }

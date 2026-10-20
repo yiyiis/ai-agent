@@ -141,7 +141,10 @@ func TestStubForToolResult(t *testing.T) {
 func TestStubForToolResultProcPreview(t *testing.T) {
 	preview := "[stdout]\n" + strings.Repeat("line\n", 40) +
 		"…[中间省略 480000 字符]…\n" + strings.Repeat("tail\n", 4) +
-		"[输出超长，完整结果已写入工作区 .tool-outputs/bash-0921-x.log，可 read_file 配合 offset 分段查看]"
+		"[输出超长，完整结果已写入工作区 .tool-outputs/bash-0921-x.log。排查建议：\n" +
+		"1. 查找报错优先使用 grep：bash -c \"grep -E 'Error|Exception|Failed' .tool-outputs/bash-0921-x.log\"\n" +
+		"2. 查看日志末尾优先使用 tail：bash -c \"tail -n 50 .tool-outputs/bash-0921-x.log\"\n" +
+		"3. 精确查看代码再使用 read_file 配合 offset/limit]"
 
 	stub := stubForToolResult("bash", `{"command":"cat big.log"}`, preview)
 	if stub == preview {
