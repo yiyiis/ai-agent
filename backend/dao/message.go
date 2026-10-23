@@ -7,6 +7,7 @@ import (
 	"backend/dal/model"
 	"backend/pkg/db"
 	"backend/pkg/errors"
+	"backend/pkg/human"
 	"gorm.io/gorm"
 )
 
@@ -86,6 +87,9 @@ func RollbackDanglingTurn(ctx context.Context, sessionID string) *model.Message 
 	msgs, err := ListMessagesBySessionID(ctx, sessionID)
 	if err != nil || len(msgs) == 0 {
 		return nil
+	}
+	if human.Active(msgs) != nil {
+		return nil // 持久化的输入检查点不是悬空提问，重启后仍可继续。
 	}
 
 	lastUserIdx, substantive := -1, false

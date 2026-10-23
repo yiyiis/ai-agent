@@ -6,6 +6,42 @@ import type { StreamEvent, StreamOptions } from '../src/api/stream.ts'
 const encoder = new TextEncoder()
 const retryDelays = [0, 0, 0, 0] as const
 
+test('reconnect carries the server stream identity across a restart', async () => {
+  const seen = observe()
+  let attachedId: string | undefined
+  const outcome = await followStream(async (onEvent, opts) => {
+    await consumeStream(streamResponse([
+      'id: 99\ndata: {"type":"input_required","stream_id":"before-restart","request":{"message_id":"a","tool_call_id":"q","question":"格式？"}}\n\n',
+    ], new TypeError('network lost')), onEvent, opts)
+  }, async (fromSeq, onEvent, opts) => {
+    assert.equal(fromSeq, 100)
+    attachedId = opts.streamId
+    await consumeStream(streamResponse([
+      'id: 0\ndata: {"type":"stream_reset","stream_id":"after-restart"}\n\n',
+      'id: 1\ndata: {"type":"done","id":"final","stream_id":"after-restart"}\n\n',
+    ]), onEvent, opts)
+    assert.equal(opts.streamId, 'after-restart')
+    return true
+  }, {signal: new AbortController().signal, onEvent:seen.onEvent, onSeq:seen.onSeq, retryDelays})
+  assert.equal(attachedId, 'before-restart')
+  assert.equal(outcome, 'terminal')
+  assert.deepEqual(seen.sequences, [99,0,1])
+})
+
+test('input_required is non-terminal and restart resets the event sequence', async () => {
+  const seen = observe()
+  await consumeStream(streamResponse([
+    frame(19, { type: 'input_required', request: { message_id: 'a', tool_call_id: 'q', question: '格式？' } }),
+    frame(0, { type: 'stream_reset' }),
+    frame(1, { type: 'input_required', request: { message_id: 'a', tool_call_id: 'q', question: '格式？' } }),
+    frame(2, { type: 'tool_call_result', id: 'q', output: '{"status":"answered","answer":"PDF"}' }),
+    frame(3, { type: 'delta', content: '继续执行' }),
+    frame(4, { type: 'done', id: 'final' }),
+  ]), seen.onEvent, { onSeq: seen.onSeq })
+  assert.deepEqual(seen.sequences, [19, 0, 1, 2, 3, 4])
+  assert.equal(seen.events[4].type, 'delta')
+})
+
 function streamResponse(
   chunks: Array<string | Uint8Array>,
   readError?: Error,

@@ -1,4 +1,4 @@
-import type { Attachment, TokenUsage } from '../types'
+import type { Attachment, TokenUsage, InputRequest } from '../types'
 
 export type StreamEvent =
   | { type: 'user_message_id'; id: string }
@@ -6,6 +6,8 @@ export type StreamEvent =
   | { type: 'tool_call_start'; id: string; name: string; arguments: string }
   | { type: 'tool_call_result'; id: string; output: string }
   | { type: 'tool_call_error'; id: string; error: string }
+  | { type: 'input_required'; request: InputRequest }
+  | { type: 'stream_reset' }
   | { type: 'round_progress'; usage: TokenUsage }
   | {
       type: 'memory_written'
@@ -21,6 +23,8 @@ export type StreamEvent =
 
 export interface StreamOptions {
   signal?: AbortSignal
+  streamId?: string
+  onStreamId?: (id: string) => void
   /** 已交付事件的游标；重连从下一条开始补播。 */
   onSeq?: (seq: number) => void
   /** 已收到有效 SSE 响应，确认本次请求已进入后台订阅。 */
@@ -88,6 +92,8 @@ export async function consumeStream(
         } catch {
           continue
         }
+        const streamId = (event as StreamEvent & { stream_id?: string }).stream_id
+        if (typeof streamId === 'string') opts?.onStreamId?.(streamId)
         onEvent(event)
         if (seq != null) opts?.onSeq?.(seq)
       }
@@ -134,6 +140,11 @@ export async function followStream(
   }
   const streamOpts: RecoveryOptions = {
     signal,
+    streamId: opts.streamId,
+    onStreamId: (id) => {
+      streamOpts.streamId = id
+      opts.onStreamId?.(id)
+    },
     onOpen: () => {
       opened = true
       opts.onOpen?.()

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"backend/pkg/errors"
+	"github.com/google/uuid"
 )
 
 const (
@@ -34,6 +35,7 @@ var ErrTurnRunning = errors.NewMsg("该会话已有正在进行的对话轮次")
 // Turn 单轮对话的后台执行载体：事件环形缓冲 + 生命周期状态 + Abort 句柄
 type Turn struct {
 	sessionID string
+	streamID  string // Changes after restart; seq alone cannot identify a stream.
 
 	mu         sync.Mutex
 	events     []Event   // 滑动窗口；events[i] 的真实 seq = dropped + i
@@ -45,6 +47,8 @@ type Turn struct {
 
 // SessionID 所属会话
 func (t *Turn) SessionID() string { return t.sessionID }
+
+func (t *Turn) StreamID() string { return t.streamID }
 
 // NextSeq 下一个事件的序号（即已产出的总事件数）
 func (t *Turn) NextSeq() int {
@@ -188,7 +192,7 @@ func (r *TurnRegistry) Start(sessionID string, run func(ctx context.Context, emi
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	t := &Turn{sessionID: sessionID, cancel: cancel, wake: make(chan struct{})}
+	t := &Turn{sessionID: sessionID, streamID: uuid.NewString(), cancel: cancel, wake: make(chan struct{})}
 	r.turns[sessionID] = t
 	go t.pump(ctx, cancel, run)
 	return t, nil

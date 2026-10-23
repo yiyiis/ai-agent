@@ -101,6 +101,11 @@ export const api = {
     }),
 
   getSession: (id: string) => http<SessionDetail>(`/sessions/${id}`),
+  answerInput: (sessionId: string, messageId: string, callId: string, action: 'answer' | 'skip', answer: string) =>
+    http<{ content: string }>(`/sessions/${sessionId}/messages/${messageId}/tool-calls/${callId}/answer`, {
+      method: 'POST',
+      body: JSON.stringify({ action, answer }),
+    }),
 
   updateSession: (
     id: string,
@@ -482,7 +487,7 @@ export async function attachStream(
   opts?: StreamOptions,
 ): Promise<boolean> {
   const res = await fetch(
-    `${BASE}/sessions/${sessionId}/stream?from_seq=${fromSeq}`,
+    `${BASE}/sessions/${sessionId}/stream?from_seq=${fromSeq}${opts?.streamId ? `&stream_id=${encodeURIComponent(opts.streamId)}` : ''}`,
     {
       headers: authHeaders(),
       credentials: 'include',
@@ -528,5 +533,6 @@ export async function stopTurn(sessionId: string): Promise<void> {
   if (res.status === 401 && onUnauthorized) onUnauthorized()
   if (res.status === 204) return
   if (!res.ok) throw new Error(`${res.status} ${await res.text()}`)
+  await unwrapEnvelope(res)
 }
 

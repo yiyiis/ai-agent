@@ -176,7 +176,8 @@ timeline
 - [x] Model Context Protocol (MCP) 客户端与 MCP 广场：手写双模协议客户端（`server/discover` 探测 2026-07-28 无状态规范，回退存量 `initialize` 握手），Streamable HTTP / stdio 双传输，Tools Discovery 自动转 Function Calling 参与 ReAct 调度；共享广场支持用户添加（http 型）、测试连接、会话级启用，`config.yaml` 官方种子可导入 stdio 型（详见 `specs/mcp/`）
 - [ ] Anthropic Claude 原生协议适配器：Messages 协议与流式双向映射
 - [x] 视觉多模态输入接入 (Vision Multimodal)：图片附件自动解析为 Base64 Data URL 或公网直链，无缝注入模型 ContentParts
-- [ ] 人机协同中断确认：`request_input` 挂起机制实现人机交互确认与工具继续执行
+- [x] 阻塞式人机问答：`request_input` 复用 messages 保存问题/答案，支持并发回答防重、刷新与重启恢复、跳过问题和停止任务（详见 [交互设计](specs/human_input.md)）
+- [ ] 工具执行前审批与 MCP 原生补充输入协议接入
 
 ---
 

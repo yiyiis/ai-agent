@@ -10,10 +10,11 @@ import (
 	"backend/pkg/apiwarp"
 	"backend/pkg/db"
 	"backend/pkg/errors"
+	"backend/pkg/human"
 	"backend/pkg/jwt"
 	"backend/pkg/provider"
-	"strings"
 	"github.com/gin-gonic/gin"
+	"strings"
 )
 
 type SendMessageReq struct {
@@ -36,6 +37,13 @@ func startTurn(session *model.Session, build func(ctx context.Context) (history 
 	}
 	turn, err := turnRegistry.Start(session.SessionID, func(ctx context.Context, emit func(agent.Event)) error {
 		ctx = db.WithContext(ctx)
+		current, err := dao.ListMessagesBySessionID(ctx, session.SessionID)
+		if err != nil {
+			return err
+		}
+		if human.Active(current) != nil {
+			return errors.NewMsg("请先回答或跳过待处理的问题，或停止当前任务")
+		}
 		history, content, attachments, err := build(ctx)
 		if err != nil {
 			return err
@@ -57,7 +65,9 @@ func relaySSE(turn *agent.Turn, fromSeq int) *apiwarp.SSEData {
 	return &apiwarp.SSEData{Stream: func(sctx context.Context, emit func(payload any)) error {
 		turnRegistry.Follow(sctx, turn, fromSeq,
 			func(seq int, ev agent.Event) {
-				emit(apiwarp.SSEFrame{ID: int64(seq), Payload: ssePayload(ev)})
+				payload := ssePayload(ev)
+				payload["stream_id"] = turn.StreamID()
+				emit(apiwarp.SSEFrame{ID: int64(seq), Payload: payload})
 			},
 			func() { emit(apiwarp.SSEPing{}) })
 		return nil
@@ -201,8 +211,9 @@ func EditUserMessage(ctx context.Context, req *EditMessageReq) (*apiwarp.SSEData
 }
 
 type AttachStreamReq struct {
-	ID      string `uri:"id"`
-	FromSeq int    `form:"from_seq"`
+	ID       string `uri:"id"`
+	FromSeq  int    `form:"from_seq"`
+	StreamID string `form:"stream_id"`
 	// LiveOnly 仅接正在执行的轮次：已结束但仍在保留期内的 Turn 返回 204。
 	// 页面加载时的探测用它，避免把刚跑完的轮次整轮重放一遍
 	LiveOnly bool `form:"live_only"`
@@ -229,8 +240,24 @@ func AttachSessionStream(ctx context.Context, req *AttachStreamReq) (any, error)
 	}
 
 	turn := turnRegistry.Get(req.ID)
+	if turn == nil || !turn.Running() {
+		// Read-only viewers may view saved cards, but cannot start execution.
+		if dao.CheckSessionWriteAccess(identity, session) == nil {
+			var recovered bool
+			turn, recovered, err = resumeInputTurn(ctx, session)
+			if err != nil {
+				return nil, err
+			}
+			if recovered {
+				req.FromSeq = 0 // a restarted worker has a new event sequence
+			}
+		}
+	}
 	if turn == nil || (req.LiveOnly && !turn.Running()) {
 		return &apiwarp.NoContent{}, nil
+	}
+	if req.StreamID != "" && req.StreamID != turn.StreamID() {
+		req.FromSeq = 0 // Another tab may already have recreated this worker.
 	}
 	return relaySSE(turn, req.FromSeq), nil
 }
@@ -259,7 +286,11 @@ func StopSessionTurn(ctx context.Context, req *StopTurnReq) (*StatusOKResp, erro
 		return nil, err
 	}
 
+	if err := dao.StopInput(ctx, req.ID); err != nil {
+		return nil, err
+	}
 	turnRegistry.Abort(req.ID)
+	agent.NotifyInput(req.ID)
 	return &StatusOKResp{Status: "ok"}, nil
 }
 
@@ -281,6 +312,8 @@ func ssePayload(ev agent.Event) gin.H {
 		return gin.H{"type": ev.Type, "id": ev.ID, "output": ev.Output}
 	case "tool_call_error":
 		return gin.H{"type": ev.Type, "id": ev.ID, "error": ev.Error}
+	case "input_required":
+		return gin.H{"type": ev.Type, "request": ev.Input}
 	case "round_progress":
 		payload := gin.H{"type": ev.Type}
 		if ev.Usage != nil {

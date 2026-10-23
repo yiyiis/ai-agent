@@ -11,6 +11,7 @@ import (
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/errors"
+	"backend/pkg/human"
 	"backend/pkg/jwt"
 	"backend/pkg/sandbox"
 	"github.com/google/uuid"
@@ -64,6 +65,7 @@ type SessionDetailOut struct {
 	// 读取时回滚掉的悬空提问（服务中断/中止留下的无回答轮次），
 	// 前端应把它还原到输入框让用户重发
 	PendingQuestion *PendingQuestionOut `json:"pending_question,omitempty"`
+	PendingInputs   []human.Request     `json:"pending_inputs"`
 }
 
 type PendingQuestionOut struct {
@@ -325,6 +327,7 @@ func GetSessionDetail(ctx context.Context, req *GetSessionDetailReq) (*SessionDe
 		EnabledMcpIDs:   mcpIDs,
 		EnabledMcps:     enabledMcps,
 		PendingQuestion: pending,
+		PendingInputs:   human.Pending(messages),
 	}, nil
 }
 

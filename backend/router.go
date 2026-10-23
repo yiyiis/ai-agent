@@ -42,6 +42,7 @@ func RegisterRouter(engine *gin.Engine) {
 		sessionGroup.PUT("/:id/messages/:mid", Controller(api.EditUserMessage))
 		// 优雅中止当前回答（后台 Turn 不随断连终止，需显式中止）
 		sessionGroup.POST("/:id/messages/stop", Controller(api.StopSessionTurn))
+		sessionGroup.POST("/:id/messages/:mid/tool-calls/:cid/answer", Controller(api.AnswerSessionInput))
 		// 断线重连补播（携带 from_seq 从环形缓冲续传）
 		sessionGroup.GET("/:id/stream", Controller(api.AttachSessionStream))
 	}

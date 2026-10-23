@@ -34,6 +34,7 @@ import {
 import { followStream, type StreamStarter } from '../api/stream'
 import type {
   Attachment,
+  InputRequest,
   EnabledSkillEntry,
   Message,
   Model,
@@ -50,6 +51,8 @@ import { MessageBubble } from './MessageBubble'
 import { ModelPicker } from './ModelPicker'
 import { SkillsPanel } from './SkillsPanel'
 import { ToolCallCard } from './ToolCallCard'
+import { InputActionsContext } from './RequestInputCard'
+import { parseInputResponse } from '../lib/requestInput'
 import { CompletedTokenBadge, LiveTokenProgress } from './TokenBadge'
 
 interface Props {
@@ -104,6 +107,7 @@ type ChatTurn = UserTurn | NoticeTurn | AssistantTurn
 
 /** 与后端 tools.errorPrefixes 保持一致：工具结果以这些前缀开头时按失败渲染 */
 const TOOL_ERROR_PREFIXES = [
+  '[未执行]',
   '[执行失败]',
   '[超时]',
   '[未读取]',
@@ -117,7 +121,7 @@ function isToolError(content: string): boolean {
   return TOOL_ERROR_PREFIXES.some((p) => content.startsWith(p))
 }
 
-function buildTurns(messages: Message[], models: Model[] = []): ChatTurn[] {
+function buildTurns(messages: Message[], models: Model[] = [], pendingInputs: InputRequest[] = []): ChatTurn[] {
   const turns: ChatTurn[] = []
   const invocationById = new Map<string, ToolInvocation>()
   let currentAssistantTurn: AssistantTurn | null = null
@@ -226,6 +230,7 @@ function buildTurns(messages: Message[], models: Model[] = []): ChatTurn[] {
               name: tc.function.name,
               arguments: tc.function.arguments,
               status: 'pending',
+              inputMessageId: m.id,
             }
             invocationById.set(tc.id, inv)
             currentAssistantTurn.processItems.push({
@@ -265,6 +270,10 @@ function buildTurns(messages: Message[], models: Model[] = []): ChatTurn[] {
   // 中断轮遗留的悬挂调用处理
   for (const inv of invocationById.values()) {
     if (inv.status === 'pending' || inv.status === 'running') {
+      if (pendingInputs.some((r) => r.message_id === inv.inputMessageId && r.tool_call_id === inv.id)) {
+        inv.status = 'waiting'
+        continue
+      }
       inv.status = 'error'
       inv.error = '[中断] 该轮对话未完成（连接中断或服务重启）'
     }
@@ -374,6 +383,9 @@ function ProcessAccordion({
     }
     return null
   }, [items, streaming])
+  const waiting = items.some((i) => i.kind === 'tool' && i.invocation.status === 'waiting')
+  const stopped = items.some((i) => i.kind === 'tool' && i.invocation.name === 'request_input' &&
+    parseInputResponse(i.invocation.output)?.action === 'stop')
 
   return (
     <div className="rounded-xl border border-[#e3e3e3] dark:border-[#3c4043] bg-[#f8f9fa] dark:bg-[#1e1f20] transition-all duration-200 w-full max-w-3xl flex flex-col relative">
@@ -388,7 +400,11 @@ function ProcessAccordion({
         }`}
       >
         <div className="flex items-center gap-2 min-w-0 font-medium">
-          {runningTool ? (
+          {waiting ? (
+            <span className="text-blue-700 dark:text-blue-300">等待你的回答</span>
+          ) : stopped ? (
+            <span className="text-gray-600 dark:text-gray-300">任务已停止</span>
+          ) : runningTool ? (
             <>
               <Loader2 className="w-3.5 h-3.5 animate-spin text-[#1a73e8] dark:text-[#8ab4f8] shrink-0" />
               <span className="truncate text-[#1a73e8] dark:text-[#8ab4f8]">
@@ -665,6 +681,7 @@ export function ChatArea({
   onSessionCreated,
 }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
+  const [pendingInputs, setPendingInputs] = useState<InputRequest[]>([])
   const [loading, setLoading] = useState(Boolean(sessionId))
   const [streaming, setStreaming] = useState(false)
   const [streamProcessItems, setStreamProcessItems] = useState<ProcessItem[]>([])
@@ -787,6 +804,7 @@ export function ChatArea({
       loadedIdRef.current = null
       // 草稿态 / 新会话：无须向后端请求，直接进入空状态
       setMessages([])
+      setPendingInputs([])
       setTitle('新会话')
       setLoading(false)
       setStreamProcessItems([])
@@ -803,6 +821,7 @@ export function ChatArea({
     }
 
     setLoading(true)
+    setPendingInputs([])
     setStreamProcessItems([])
     setStreamFinalText('')
     streamFinalTextRef.current = ''
@@ -813,6 +832,7 @@ export function ChatArea({
         if (cancelled) return
         loadedIdRef.current = sessionId
         setMessages(s.messages)
+        setPendingInputs(s.pending_inputs ?? [])
         setTitle(s.title)
         // 优先用新的 enabled_skills（带 pin 信息）；老后端 / 老接口降级到 enabled_skill_ids
         setEnabledEntries(
@@ -1149,6 +1169,7 @@ export function ChatArea({
           (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime(),
         )
       })
+      setPendingInputs(s.pending_inputs ?? [])
       // 自动加载会改动启用列表——跟着刷新，避免面板里状态过期
       if (s.enabled_skills) setEnabledEntries(s.enabled_skills)
       setStreamProcessItems([])
@@ -1180,7 +1201,21 @@ export function ChatArea({
   }
 
   const handleEvent = (ev: StreamEvent) => {
-    if (ev.type === 'delta') {
+    if (ev.type === 'stream_reset') {
+      setStreamProcessItems([])
+      setStreamFinalText('')
+      streamFinalTextRef.current = ''
+      pendingTextRef.current = ''
+      pendingReasoningRef.current = ''
+      setPendingInputs([])
+    } else if (ev.type === 'input_required') {
+      const r = ev.request
+      setPendingInputs((prev) => [...prev.filter((v) => v.tool_call_id !== r.tool_call_id), r])
+      updateInvocation(r.tool_call_id, { status: 'waiting', inputMessageId: r.message_id }, {
+        id: r.tool_call_id, name: 'request_input', arguments: JSON.stringify({ question: r.question, options: r.options }),
+        status: 'waiting', inputMessageId: r.message_id,
+      })
+    } else if (ev.type === 'delta') {
       // 后台标签页 rAF 冻结，打字机泵不转：直接落屏，避免回来时文字停在老位置。
       // 先冲掉队列残留，保证与直写文本的先后顺序。
       if (document.hidden) {
@@ -1244,6 +1279,7 @@ export function ChatArea({
         },
       )
     } else if (ev.type === 'tool_call_result') {
+      setPendingInputs((prev) => prev.filter((r) => r.tool_call_id !== ev.id))
       updateInvocation(ev.id, { status: 'success', output: ev.output })
     } else if (ev.type === 'tool_call_error') {
       updateInvocation(ev.id, { status: 'error', error: ev.error })
@@ -1474,7 +1510,7 @@ export function ChatArea({
   }
 
   const send = async (content: string, attachments: Attachment[] = []) => {
-    if (streaming) return
+    if (streaming || pendingInputs.length > 0) return
 
     // 成功发送新提问时，清除之前的恢复暂存，防止多轮混淆
     setComposerValue(undefined)
@@ -1619,7 +1655,7 @@ export function ChatArea({
 
   // 重新生成：本地截断旧回答，调用 /regenerate 端点重新流式生成
   const regenerate = async () => {
-    if (streaming || !activeIdRef.current) return
+    if (streaming || pendingInputs.length > 0 || !activeIdRef.current) return
     const lastUser = [...messages].reverse().find((m) => m.role === 'user')
     if (lastUser) {
       lastAskRef.current = {
@@ -1651,7 +1687,46 @@ export function ChatArea({
     )
   }
 
-  const historyTurns = useMemo(() => buildTurns(messages, models), [messages, models])
+  const respondToInput = async (inv: ToolInvocation, action: 'answer' | 'skip', answer: string) => {
+    const sid = activeIdRef.current
+    if (!sid || !inv.inputMessageId) throw new Error('问题已失效，请刷新')
+    try {
+      const result = await api.answerInput(sid, inv.inputMessageId, inv.id, action, answer)
+      if (activeIdRef.current !== sid) return
+      updateInvocation(inv.id, { status: 'success', output: result.content })
+      setPendingInputs((prev) => prev.filter((r) => r.tool_call_id !== inv.id))
+      if (!streaming) {
+        setMessages((prev) => {
+          const index = prev.map((m) => m.role).lastIndexOf('user')
+          return index < 0 ? prev : prev.slice(0, index + 1)
+        })
+        void runStream((onEvent, opts) => attachStream(sid, 0, onEvent, opts))
+      }
+    } catch (err) {
+      // Another browser may have won the answer race. Reconcile the saved card.
+      if (activeIdRef.current === sid && !streaming) {
+        const detail = await api.getSession(sid)
+        if (activeIdRef.current === sid) {
+          setMessages(detail.messages)
+          setPendingInputs(detail.pending_inputs ?? [])
+        }
+      }
+      throw err
+    }
+  }
+
+  const stopInputTask = async () => {
+    const sid = activeIdRef.current
+    if (!sid) return
+    await stopTurn(sid)
+    if (activeIdRef.current !== sid) return
+    abortRef.current?.abort()
+    stopStreamPump()
+    setStreaming(false)
+    refreshAfterTurn(sid)
+  }
+
+  const historyTurns = useMemo(() => buildTurns(messages, models, pendingInputs), [messages, models, pendingInputs])
   const isEmpty = !loading && historyTurns.length === 0 && !optimisticUser && !streaming
 
   useEffect(() => {
@@ -1683,6 +1758,7 @@ export function ChatArea({
   }
 
   return (
+    <InputActionsContext.Provider value={{ respond: respondToInput, stop: stopInputTask }}>
     <div className="flex-1 flex flex-col h-full bg-white dark:bg-[#131314] bg-[radial-gradient(circle_at_50%_40%,_rgba(219,234,254,0.45)_0%,_rgba(240,244,249,0.15)_50%,_#ffffff_75%)] dark:bg-[radial-gradient(circle_at_50%_40%,_rgba(30,58,138,0.15)_0%,_rgba(24,24,27,0.3)_50%,_#131314_75%)] relative overflow-hidden">
       {/* 顶部轻量导航条 */}
       <header className="px-6 py-3 border-b border-[#e3e3e3]/70 dark:border-[#28292a] bg-white/80 dark:bg-[#1e1f20]/80 backdrop-blur-md sticky top-0 z-20 flex items-center gap-3 shrink-0">
@@ -1778,7 +1854,7 @@ export function ChatArea({
               key={`empty-${composerKey}`}
               onSend={send}
               onUseSkill={useSkill}
-              disabled={streaming}
+              disabled={streaming || pendingInputs.length > 0}
               streaming={streaming}
               onStop={stop}
               skills={sessionActiveSkills}
@@ -1872,14 +1948,14 @@ export function ChatArea({
                         onPreview={setPreview}
                         isEditing={turn.messageId === editingId}
                         onSubmitEdit={
-                          !streaming && turn.messageId
+                          !streaming && pendingInputs.length === 0 && turn.messageId
                             ? (content) =>
                                 submitEdit(turn.messageId, content, turn.attachments ?? null)
                             : undefined
                         }
                         onCancelEdit={editingId ? () => setEditingId(null) : undefined}
                         onEdit={
-                          !streaming && turn.messageId && turn.content
+                          !streaming && pendingInputs.length === 0 && turn.messageId && turn.content
                             ? () => setEditingId(turn.messageId)
                             : undefined
                         }
@@ -1894,7 +1970,7 @@ export function ChatArea({
                         finalAnswer={turn.finalAnswer}
                         isLastAssistant={turn.messageId === lastAssistantId}
                         streaming={false}
-                        onRegenerate={regenerate}
+                        onRegenerate={pendingInputs.length > 0 ? undefined : regenerate}
                         onPreview={setPreview}
                         metric={turn.messageId ? turnMetrics[turn.messageId] : undefined}
                       />
@@ -2039,5 +2115,6 @@ export function ChatArea({
 
       <FilePreviewModal attachment={preview} onClose={() => setPreview(null)} />
     </div>
+    </InputActionsContext.Provider>
   )
 }

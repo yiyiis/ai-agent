@@ -29,16 +29,18 @@ import (
 	"backend/dal/model"
 	"backend/dao"
 	"backend/pkg/ctxpolicy"
+	"backend/pkg/human"
 	"backend/pkg/mcp"
 	"backend/pkg/provider"
 	"backend/pkg/sandbox"
 	"backend/pkg/storage"
 	"backend/pkg/tools"
+
 	"github.com/google/uuid"
 )
 
 // MaxToolRounds 单个 turn 内允许的 tool 调用轮数上限
-const MaxToolRounds = 32
+const MaxToolRounds = 64
 
 // Loop Guard 阈值——同一轮 turn 内，相同 (tool_name, args) 的调用：
 // 第 3 次在结果前注入 hint 提醒模型；第 4 次且输出仍然相同则判定无进展，强制结束
@@ -64,6 +66,7 @@ type Event struct {
 	// Attachments 导出的工件（tool_artifact，每次事件携带一个；
 	// ID 为对应 tool_call_id，前端据此挂到工具调用卡片上）
 	Attachments []Attachment
+	Input       *human.Request
 }
 
 // Deps 运行依赖：模型 Provider 与工具执行器（测试可注入假实现）
@@ -239,9 +242,16 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 	// 合成行内容极小，按叙事处理（不参与分区）。
 	var pendingIDs []string
 	done := map[string]bool{}
+	inputCalls := map[string]bool{}
+	activeInput := human.Active(history)
 	flushDangling := func() {
 		for _, id := range pendingIDs {
 			if done[id] {
+				continue
+			}
+			// A durable question is awaiting a real answer, not interrupted.
+			// ResumeInput completes it before invoking the provider.
+			if inputCalls[id] {
 				continue
 			}
 			rows = append(rows, ctxRow{msg: provider.ChatMessage{
@@ -252,6 +262,7 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 			items = append(items, zoneItem{})
 		}
 		pendingIDs, done = nil, map[string]bool{}
+		inputCalls = map[string]bool{}
 	}
 
 	// curCalls 当前批次的 callID → 原调用（tool 行旧数据现场生成 stub 时取配对参数）
@@ -306,6 +317,10 @@ func buildContext(ctx context.Context, session *model.Session, history []model.M
 					for _, c := range calls {
 						pendingIDs = append(pendingIDs, c.ID)
 						curCalls[c.ID] = c
+						if c.Function.Name == human.ToolName && activeInput != nil && activeInput.MessageID == m.MessageID {
+							_, err := human.Parse(c.Function.Arguments)
+							inputCalls[c.ID] = err == nil
+						}
 					}
 					// 旧数据即便未设置 ctx_mode，也不能回放大参数或非法 JSON。
 					if callsNeedStub(calls) {
@@ -882,35 +897,41 @@ func buildMultimodalUserMessage(ctx context.Context, userContent string, turnAtt
 // session 为已加载的会话实体，history 为本轮之前的历史消息（不含本条用户输入），
 // attachments 为用户随本条消息上传的附件。
 func Run(ctx context.Context, deps Deps, session *model.Session, history []model.Message, userContent string, attachments []Attachment, emit func(Event)) error {
+	return run(ctx, deps, session, history, userContent, attachments, emit, false)
+}
+
+func run(ctx context.Context, deps Deps, session *model.Session, history []model.Message, userContent string, attachments []Attachment, emit func(Event), resume bool) error {
 	sessionID := session.SessionID
 
 	// 1. 落库用户消息；首条对话顺带提取标题
-	stripped := strings.TrimSpace(userContent)
-	autoTitle := ""
-	if stripped != "" {
-		r := []rune(strings.Split(stripped, "\n")[0])
-		autoTitle = string(r)
-		if len(r) > 20 {
-			autoTitle = string(r[:20]) + "..."
+	if !resume {
+		stripped := strings.TrimSpace(userContent)
+		autoTitle := ""
+		if stripped != "" {
+			r := []rune(strings.Split(stripped, "\n")[0])
+			autoTitle = string(r)
+			if len(r) > 20 {
+				autoTitle = string(r[:20]) + "..."
+			}
+		} else if len(attachments) > 0 {
+			if isImageAttachment(attachments[0]) {
+				autoTitle = "[图片] " + attachments[0].Filename
+			} else {
+				autoTitle = "[附件] " + attachments[0].Filename
+			}
+			r := []rune(autoTitle)
+			if len(r) > 20 {
+				autoTitle = string(r[:20]) + "..."
+			}
 		}
-	} else if len(attachments) > 0 {
-		if isImageAttachment(attachments[0]) {
-			autoTitle = "[图片] " + attachments[0].Filename
-		} else {
-			autoTitle = "[附件] " + attachments[0].Filename
+		userMsgID, err := saveMessage(ctx, sessionID, "user", userContent, "", nil, "", "", attachments, nil)
+		if err != nil {
+			return err
 		}
-		r := []rune(autoTitle)
-		if len(r) > 20 {
-			autoTitle = string(r[:20]) + "..."
+		emit(Event{Type: "user_message_id", ID: userMsgID})
+		if (session.Title == "新会话" || session.Title == "") && autoTitle != "" {
+			_ = dao.UpdateSessionTitle(context.WithoutCancel(ctx), sessionID, autoTitle)
 		}
-	}
-	userMsgID, err := saveMessage(ctx, sessionID, "user", userContent, "", nil, "", "", attachments, nil)
-	if err != nil {
-		return err
-	}
-	emit(Event{Type: "user_message_id", ID: userMsgID})
-	if (session.Title == "新会话" || session.Title == "") && autoTitle != "" {
-		_ = dao.UpdateSessionTitle(context.WithoutCancel(ctx), sessionID, autoTitle)
 	}
 
 	// 2. 装配上下文：历史（不含刚落库的本条用户消息，由 handler 在落库前加载）+ 本轮用户输入
@@ -923,12 +944,17 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	}
 	// 附件落入会话工作区（沙箱），同时构造包含视觉图片的多模态用户消息
 	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
-	userTurn := buildMultimodalUserMessage(ctx, userContent, attachments, placed)
+	if !resume {
+		userTurn := buildMultimodalUserMessage(ctx, userContent, attachments, placed)
+		msgs = append(msgs, userTurn)
+	}
 	// blob 重物化：沙箱回收重建后，把历史消息引用的 .tool-outputs 归档恢复回
 	// 工作区（文件还在则零流量跳过），恢复模型 read_file 取回完整输出的能力
 	materializeBlobs(ctx, sessionID, history)
-	msgs = append(msgs, userTurn)
 	toolSchemas := tools.Schemas()
+	if session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") {
+		toolSchemas = append(toolSchemas, human.Schema())
+	}
 	if ts.hasCatalog() {
 		// 存在可按需装载的候选才暴露 load_skill——否则模型会看到一个
 		// 永远只能返回"没有这个技能"的工具，白白浪费 token 和调用轮次
@@ -945,10 +971,31 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 	guard := map[string][]string{}
 	lastAssistantID := ""
 	turnUsage := (*provider.Usage)(nil) // 整轮各轮 usage 累计，随 done 事件下发
+	startRound := 0
+	if resume {
+		// Count already generated model responses; answering never resets the cap.
+		for _, m := range history {
+			if m.Role == "user" {
+				startRound = 0
+				guard = map[string][]string{}
+			} else if m.Role == "assistant" {
+				startRound++
+				lastAssistantID = m.MessageID
+			}
+		}
+		guard = restoredGuard(history)
+		turnUsage = restoreTurnUsage(ctx, sessionID, history)
+		if turnUsage != nil {
+			emit(Event{Type: "round_progress", Usage: turnUsage})
+		}
+	}
 
 	// lastPrompt 上一轮实测 prompt tokens（rezone 预算判断，天然滞后一轮）
 	lastPrompt := 0
-	for round := 0; round < MaxToolRounds; round++ {
+	for round := startRound; round < MaxToolRounds; round++ {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		// 轮内预算兜底：上一轮实测 prompt_tokens 超窗口×RezoneRatio 时，用与
 		// 组装器同一套 stub 规则对内存 msgs 整体分区替换一次（in-flight 最新 step
 		// 与叙事行不动）。批量一次、之后前缀只增不变；首轮不触发，
@@ -1020,6 +1067,19 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 			emit(Event{Type: "tool_call_start", ID: tc.ID, Name: tc.Function.Name, Arguments: orEmptyJSON(tc.Function.Arguments)})
 		}
 
+		if session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") && hasInputCall(calls) {
+			results, err := waitInputs(ctx, sessionID, assistantID, emit)
+			if err != nil {
+				return err
+			}
+			for _, m := range results {
+				if m.ToolCallID != nil {
+					msgs = append(msgs, provider.ChatMessage{Role: "tool", ToolCallID: *m.ToolCallID, Content: m.Content})
+				}
+			}
+			continue
+		}
+
 		// 4. load_skill 串行先行（改写 turn 内的挂载列表与 secrets 合并表，
 		//    后续工具才拿得到新挂载的文件与机密），其余工具并发执行；
 		//    装载成功同时广播 skill_loaded（前端同步启用列表并弹提示条）
@@ -1049,6 +1109,14 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 				if parseErr != "" {
 					logArgAnomaly(sessionID, session.Model, tc, "参数解析失败")
 					outputs[i] = tools.Output{Text: parseErr}
+					return
+				}
+				if tc.Function.Name == human.ToolName {
+					text := "[执行失败] 当前运行方式不支持交互输入。"
+					if _, err := human.Parse(tc.Function.Arguments); err != nil {
+						text = "[参数解析失败] " + err.Error()
+					}
+					outputs[i] = tools.Output{Text: text}
 					return
 				}
 				// 阶段八：MCP 消歧名（mcp_<server>_<tool>）路由到 MCP 引擎执行，
@@ -1108,8 +1176,12 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 	}
 
-	emit(Event{Type: "error", Error: fmt.Sprintf("已达单轮工具调用轮数上限（%d 轮）", MaxToolRounds)})
-	emit(Event{Type: "done", ID: lastAssistantID})
+	note := fmt.Sprintf("已达单轮工具调用轮数上限（%d 轮）", MaxToolRounds)
+	if id, err := saveMessage(ctx, sessionID, "assistant", "["+note+"]", "", nil, "", "", nil, nil); err == nil {
+		lastAssistantID = id
+	}
+	emit(Event{Type: "error", Error: note})
+	emit(Event{Type: "done", ID: lastAssistantID, Usage: turnUsage})
 	return nil
 }
 

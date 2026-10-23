@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"backend/constants"
 	"backend/dal/model"
@@ -52,4 +53,34 @@ func sumUsage(acc, cur *provider.Usage) *provider.Usage {
 	acc.ReasoningTokens += cur.ReasoningTokens
 	acc.ContextTokens = cur.ContextTokens
 	return acc
+}
+
+// restoreTurnUsage recovers the cumulative display without writing usage again.
+// The latest user message is the durable boundary of this logical turn.
+func restoreTurnUsage(ctx context.Context, sessionID string, history []model.Message) *provider.Usage {
+	var since time.Time
+	for _, m := range history {
+		if m.Role == "user" {
+			since = m.CreatedAt
+		}
+	}
+	if since.IsZero() {
+		return nil
+	}
+	rows, err := dao.ListTokenUsagesBySession(ctx, sessionID, 500)
+	if err != nil {
+		slog.Warn("恢复输入等待轮次的用量失败", "session", sessionID, "err", err)
+		return nil
+	}
+	var usage *provider.Usage
+	for _, row := range rows {
+		if row.CreatedAt.Before(since) || row.Purpose != string(constants.UsagePurposeTurn) {
+			continue
+		}
+		usage = sumUsage(usage, &provider.Usage{
+			PromptTokens: int(row.PromptTokens), CompletionTokens: int(row.CompletionTokens),
+			CachedTokens: int(row.CachedTokens), ReasoningTokens: int(row.ReasoningTokens),
+		})
+	}
+	return usage
 }

@@ -194,6 +194,9 @@ func isResultStub(s string) bool {
 // stubForToolResult tool 结果的精简版（按工具类型）。错误结果与天然短小的
 // 返回原文——调用方据此写 NULL，组装时直接用 content。
 func stubForToolResult(callName, callArgs, content string) string {
+	if callName == "request_input" {
+		return content // 用户决定必须在冷区保留，不能变成“重新调用”。
+	}
 	if tools.IsErrorResult(content) {
 		return content // 失败是证据，保留全文
 	}

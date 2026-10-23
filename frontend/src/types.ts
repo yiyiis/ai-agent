@@ -48,7 +48,15 @@ export interface EnabledSkillEntry {
   source?: 'full' | 'auto' | 'auto_loaded' | string
 }
 
+export interface InputRequest {
+  message_id: string
+  tool_call_id: string
+  question: string
+  options?: string[]
+}
+
 export interface SessionDetail extends Session {
+  pending_inputs?: InputRequest[] | null
   messages: Message[]
   enabled_skill_ids: number[]
   enabled_skills?: EnabledSkillEntry[]
@@ -249,10 +257,11 @@ export interface SkillVersionDiff {
 
 /** UI 渲染用：把 assistant 的 tool_call 与之后的 tool 消息配对 */
 export interface ToolInvocation {
+  inputMessageId?: string
   id: string
   name: string
   arguments: string
-  status: 'pending' | 'running' | 'success' | 'error'
+  status: 'pending' | 'running' | 'waiting' | 'success' | 'error'
   output?: string
   error?: string
   /** export_artifact 等工具产出的可预览文件 */

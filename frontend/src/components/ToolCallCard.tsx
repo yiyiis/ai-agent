@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react'
 import { AlertCircle, CheckCircle2, ChevronDown, ChevronRight, FileText, Loader2, Terminal } from 'lucide-react'
 import type { Attachment, ToolInvocation } from '../types'
+import { RequestInputCard } from './RequestInputCard'
 
 const STATUS_CONFIG = {
+  waiting: {
+    icon: <AlertCircle className="w-3.5 h-3.5 text-blue-600" />,
+    badge: 'bg-blue-50 text-blue-700 border-blue-200',
+    label: '等待回答',
+  },
   pending: {
     icon: <Loader2 className="w-3.5 h-3.5 animate-spin text-[#747775] dark:text-[#9aa0a6]" />,
     badge: 'bg-[#f0f4f9] dark:bg-[#28292a] text-[#747775] dark:text-[#9aa0a6] border-[#e3e3e3] dark:border-[#3c4043]',
@@ -63,6 +69,10 @@ export function ToolCallCard({ invocation, onPreview }: Props) {
   const slow = status === 'running' && elapsed >= 30
   const statusInfo = STATUS_CONFIG[status]
   const [outputOpen, setOutputOpen] = useState(false)
+
+  if (name === 'request_input' && status !== 'error') {
+    return <RequestInputCard invocation={invocation} />
+  }
 
   return (
     <div className="border border-[#e3e3e3] dark:border-[#3c4043] rounded-2xl bg-[#f0f4f9] dark:bg-[#1e1f20] text-xs overflow-hidden transition-all duration-200 hover:border-[#b4d7fe] dark:hover:border-[#1a73e8]">
