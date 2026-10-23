@@ -297,6 +297,19 @@ func StopSessionTurn(ctx context.Context, req *StopTurnReq) (*StatusOKResp, erro
 // ssePayload 协议事件 → 前端 StreamEvent 契约字段
 func ssePayload(ev agent.Event) gin.H {
 	switch ev.Type {
+	case "agent_status":
+		return gin.H{"type": ev.Type, "agent": ev.Agent}
+	case "agent_event":
+		payload := gin.H{"type": ev.Type, "agent_id": ev.AgentID}
+		if ev.Agent != nil {
+			payload["session_id"] = ev.Agent.SessionID
+			payload["parent_agent_id"] = ev.Agent.ParentAgentID
+			payload["workspace_id"] = ev.Agent.WorkspaceID
+		}
+		if ev.ChildEvent != nil {
+			payload["event"] = ssePayload(*ev.ChildEvent)
+		}
+		return payload
 	case "delta":
 		payload := gin.H{"type": "delta"}
 		if ev.Content != "" {

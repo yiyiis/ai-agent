@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test:stream": "node --experimental-strip-types --test tests/stream.test.ts",
+    "test:stream": "node --experimental-strip-types --test tests/stream.test.ts tests/agents.test.ts",
     "build": "tsc -b && vite build",
     "preview": "vite preview"
   },

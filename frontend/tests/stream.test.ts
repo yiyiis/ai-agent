@@ -6,6 +6,31 @@ import type { StreamEvent, StreamOptions } from '../src/api/stream.ts'
 const encoder = new TextEncoder()
 const retryDelays = [0, 0, 0, 0] as const
 
+test('child completion and errors do not terminate the root stream or prevent reconnect', async () => {
+  const seen = observe()
+  const nested: StreamEvent[] = [
+    { type: 'agent_event', agent_id: 'child', event: { type: 'delta', content: 'child output' } },
+    { type: 'agent_event', agent_id: 'child', event: { type: 'done', id: 'child-answer' } },
+    { type: 'agent_event', agent_id: 'other-child', event: { type: 'error', message: 'child failed' } },
+  ]
+  let reconnected = false
+  const outcome = await followStream(async (onEvent, opts) => {
+    await consumeStream(streamResponse(nested.map((event, index) => frame(index, event)), new TypeError('connection lost')), onEvent, opts)
+  }, async (fromSeq, onEvent, opts) => {
+    reconnected = true
+    assert.equal(fromSeq, 3)
+    await consumeStream(streamResponse([
+      frame(3, { type: 'delta', content: 'root synthesis' }),
+      frame(4, { type: 'done', id: 'root-answer' }),
+    ]), onEvent, opts)
+    return true
+  }, { signal: new AbortController().signal, onEvent: seen.onEvent, onSeq: seen.onSeq, retryDelays })
+  assert.equal(reconnected, true)
+  assert.equal(outcome, 'terminal')
+  assert.deepEqual(seen.events.slice(0, 3), nested)
+  assert.deepEqual(seen.events.filter((event) => event.type === 'delta'), [{ type: 'delta', content: 'root synthesis' }])
+})
+
 test('reconnect carries the server stream identity across a restart', async () => {
   const seen = observe()
   let attachedId: string | undefined

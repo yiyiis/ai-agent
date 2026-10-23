@@ -40,7 +40,6 @@ func TestConnectFrameRoundTrip(t *testing.T) {
 	}
 }
 
-
 // TestE2BRunAgainstFakeEnvd 假 E2B 服务走协议主链路：
 // 创建（API）→ Start（Connect 帧 + 头路由 + base64 输出）→ exitCode 映射
 func TestE2BRunAgainstFakeEnvd(t *testing.T) {
@@ -81,9 +80,10 @@ func TestE2BRunAgainstFakeEnvd(t *testing.T) {
 			if len(body) < 5 || body[0] != 0 {
 				t.Errorf("request not connect-framed: %v", body[:min(5, len(body))])
 			}
-			// 主命令带 timeout 包裹，同步辅助命令是裸 bash——只记录主命令
-			if bytes.Contains(body, []byte("/usr/bin/timeout")) {
-				_ = json.Unmarshal(body[5:], &lastStart)
+			var request startRequest
+			_ = json.Unmarshal(body[5:], &request)
+			if len(request.Process.Args) > 1 && request.Process.Args[1] == remoteProcessSupervisor {
+				lastStart = request
 			}
 
 			w.Header().Set("Content-Type", "application/connect+json")
@@ -114,9 +114,9 @@ func TestE2BRunAgainstFakeEnvd(t *testing.T) {
 	if res.Stdout != "hi\n" || res.Stderr != "warn" || res.ExitCode != 0 || res.Killed {
 		t.Fatalf("result wrong: %+v", res)
 	}
-	// 外层 timeout 包裹 + /bin/bash -l -c
-	if lastStart.Process.Cmd != "/usr/bin/timeout" || lastStart.Process.Args[3] != "/bin/bash" ||
-		lastStart.Process.Args[4] != "-l" || lastStart.Process.Args[5] != "-c" {
+	// Python supervisor + private token/timeout + /bin/bash -l -c.
+	if lastStart.Process.Cmd != "/usr/bin/python3" || lastStart.Process.Args[4] != "/bin/bash" ||
+		lastStart.Process.Args[5] != "-l" || lastStart.Process.Args[6] != "-c" {
 		t.Fatalf("argv wrong: %+v", lastStart.Process)
 	}
 	if lastStart.Process.Cwd != "/workspace" {

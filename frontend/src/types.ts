@@ -40,6 +40,31 @@ export interface Message {
   created_at: string
 }
 
+export type AgentStatus = 'queued' | 'running' | 'completed' | 'failed' | 'cancelled' | 'interrupted'
+
+export interface AgentRun {
+  agent_id: string
+  session_id: string
+  parent_agent_id?: string | null
+  workspace_id: string
+  tool_call_id: string
+  name: string
+  task: string
+  mode: string
+  model: string
+  status: AgentStatus
+  result?: string | null
+  error?: string | null
+  created_at: string
+  started_at?: string | null
+  finished_at?: string | null
+}
+
+export interface AgentDetail {
+  agent: AgentRun
+  messages: Message[]
+}
+
 export interface EnabledSkillEntry {
   skill_id: number
   /** NULL = 跟随当前激活版本 */

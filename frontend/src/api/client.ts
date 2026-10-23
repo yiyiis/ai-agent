@@ -1,4 +1,6 @@
 import type {
+  AgentDetail,
+  AgentRun,
   Attachment,
   LoginResult,
   LoginUser,
@@ -101,6 +103,10 @@ export const api = {
     }),
 
   getSession: (id: string) => http<SessionDetail>(`/sessions/${id}`),
+  listAgents: (sessionId: string) =>
+    http<AgentRun[]>(`/sessions/${encodeURIComponent(sessionId)}/agents`),
+  getAgent: (sessionId: string, agentId: string) =>
+    http<AgentDetail>(`/sessions/${encodeURIComponent(sessionId)}/agents/${encodeURIComponent(agentId)}`),
   answerInput: (sessionId: string, messageId: string, callId: string, action: 'answer' | 'skip', answer: string) =>
     http<{ content: string }>(`/sessions/${sessionId}/messages/${messageId}/tool-calls/${callId}/answer`, {
       method: 'POST',

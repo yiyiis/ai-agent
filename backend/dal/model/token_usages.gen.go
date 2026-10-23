@@ -13,7 +13,8 @@ const TableNameTokenUsage = "token_usages"
 // TokenUsage mapped from table <token_usages>
 type TokenUsage struct {
 	ID               int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
-	SessionID        string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_token_usages_session_id,priority:1" json:"session_id"`
+	SessionID        string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_token_usages_session_agent,priority:1;index:idx_token_usages_session_id,priority:1" json:"session_id"`
+	AgentID          string    `gorm:"column:agent_id;type:varchar(36);not null;index:idx_token_usages_session_agent,priority:2;comment:Child agent; empty for main agent" json:"agent_id"` // Child agent; empty for main agent
 	CompanyID        int64     `gorm:"column:company_id;type:bigint;not null;index:idx_token_usages_company_id,priority:1" json:"company_id"`
 	UserID           int64     `gorm:"column:user_id;type:bigint;not null;index:idx_token_usages_user_id,priority:1" json:"user_id"`
 	Model            string    `gorm:"column:model;type:varchar(128);not null;index:idx_token_usages_model,priority:1" json:"model"`

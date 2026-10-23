@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"backend/dal/model"
+	"backend/pkg/agentctx"
 	"backend/pkg/db"
 	"backend/pkg/errors"
 	"backend/pkg/human"
@@ -13,6 +14,11 @@ import (
 
 // CreateMessage 插入单条消息
 func CreateMessage(ctx context.Context, msg *model.Message) error {
+	if msg == nil {
+		return errors.NewMsg("消息不能为空")
+	}
+	// Ownership comes from the trusted execution context, never caller input.
+	msg.AgentID = agentctx.AgentID(ctx)
 	if msg.CreatedAt.IsZero() {
 		msg.CreatedAt = time.Now()
 	}
@@ -22,11 +28,11 @@ func CreateMessage(ctx context.Context, msg *model.Message) error {
 	return nil
 }
 
-// ListMessagesBySessionID 按自增 id 正序获取会话的全部历史消息
+// ListMessagesBySessionID 获取当前 Agent 的历史；未指定 Agent 时仅返回主 Agent 消息。
 func ListMessagesBySessionID(ctx context.Context, sessionID string) ([]model.Message, error) {
 	m := db.Ctx(ctx).Message
 	list, err := m.WithContext(ctx).
-		Where(m.SessionID.Eq(sessionID)).
+		Where(m.SessionID.Eq(sessionID), m.AgentID.Eq(agentctx.AgentID(ctx))).
 		Order(m.ID).
 		Find()
 	if err != nil {
@@ -44,7 +50,7 @@ func ListMessagesBySessionID(ctx context.Context, sessionID string) ([]model.Mes
 func GetMessageByMessageID(ctx context.Context, messageID string) (*model.Message, error) {
 	m := db.Ctx(ctx).Message
 	msg, err := m.WithContext(ctx).
-		Where(m.MessageID.Eq(messageID)).
+		Where(m.MessageID.Eq(messageID), m.AgentID.Eq(agentctx.AgentID(ctx))).
 		First()
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
@@ -59,7 +65,7 @@ func GetMessageByMessageID(ctx context.Context, messageID string) (*model.Messag
 func CountMessagesBySessionID(ctx context.Context, sessionID string) (int64, error) {
 	m := db.Ctx(ctx).Message
 	count, err := m.WithContext(ctx).
-		Where(m.SessionID.Eq(sessionID)).
+		Where(m.SessionID.Eq(sessionID), m.AgentID.Eq(agentctx.AgentID(ctx))).
 		Count()
 	if err != nil {
 		return 0, errors.Join(err, errors.New("统计会话消息数量失败"), errors.NewMsg("系统异常"))
@@ -72,7 +78,7 @@ func CountMessagesBySessionID(ctx context.Context, sessionID string) (int64, err
 func DeleteMessagesFromRowID(ctx context.Context, sessionID string, fromRowID int64) error {
 	m := db.Ctx(ctx).Message
 	if _, err := m.WithContext(ctx).
-		Where(m.SessionID.Eq(sessionID), m.ID.Gte(fromRowID)).
+		Where(m.SessionID.Eq(sessionID), m.AgentID.Eq(agentctx.AgentID(ctx)), m.ID.Gte(fromRowID)).
 		Delete(); err != nil {
 		return errors.Join(err, errors.New("截断会话消息失败"), errors.NewMsg("系统异常"))
 	}

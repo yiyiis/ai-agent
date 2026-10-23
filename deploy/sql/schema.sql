@@ -1,7 +1,7 @@
 -- ai-agent 全量表结构定义（唯一源头，手工维护）
 -- 修改表结构：先改本文件 → 执行建表 → 运行 dal/gen.go 重新生成模型与 query 层。
 -- 生成时间: 2026-09-12 00:15:22
--- 说明：应用启动时 GORM AutoMigrate 会按生成的模型自动补齐表结构；
+-- 说明：应用启动只连接数据库；已有数据库须执行 migrations 下的增量迁移。
 --       默认管理员账号（admin）由应用首次启动时自动播种，不在本脚本内。
 -- 警告：脚本包含 DROP TABLE 与 USE 语句，执行会清空目标库中的表数据，执行前请确认连接的库名。
 
@@ -70,6 +70,7 @@ CREATE TABLE `messages` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `message_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
   `session_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `agent_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '' COMMENT '消息所属子 Agent；空字符串为主 Agent',
   `role` varchar(32) COLLATE utf8mb4_unicode_ci NOT NULL,
   `content` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
   `reasoning` longtext COLLATE utf8mb4_unicode_ci COMMENT '模型思考过程',
@@ -89,7 +90,33 @@ CREATE TABLE `messages` (
   PRIMARY KEY (`id`),
   UNIQUE KEY `idx_messages_message_id` (`message_id`),
   KEY `idx_messages_session_id` (`session_id`),
+  KEY `idx_messages_session_agent` (`session_id`,`agent_id`,`id`),
   CONSTRAINT `fk_sessions_messages` FOREIGN KEY (`session_id`) REFERENCES `sessions` (`session_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+DROP TABLE IF EXISTS `agent_runs`;
+CREATE TABLE `agent_runs` (
+  `agent_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `session_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `parent_agent_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '父 Agent；主 Agent 使用 session_id',
+  `workspace_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL COMMENT '共享工作区；当前固定为 session_id',
+  `tool_call_id` varchar(64) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `name` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '',
+  `task` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `mode` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'read_only',
+  `model` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `status` varchar(16) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT 'queued',
+  `result` longtext COLLATE utf8mb4_unicode_ci NOT NULL,
+  `error` text COLLATE utf8mb4_unicode_ci NOT NULL,
+  `created_at` datetime(3) NOT NULL DEFAULT CURRENT_TIMESTAMP(3),
+  `started_at` datetime(3) DEFAULT NULL,
+  `finished_at` datetime(3) DEFAULT NULL,
+  PRIMARY KEY (`agent_id`),
+  UNIQUE KEY `uk_agent_runs_session_tool` (`session_id`,`tool_call_id`),
+  KEY `idx_agent_runs_session_created` (`session_id`,`created_at`),
+  KEY `idx_agent_runs_parent` (`parent_agent_id`),
+  KEY `idx_agent_runs_status` (`status`),
+  CONSTRAINT `fk_sessions_agent_runs` FOREIGN KEY (`session_id`) REFERENCES `sessions` (`session_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
 
 DROP TABLE IF EXISTS `skills`;
@@ -196,6 +223,7 @@ DROP TABLE IF EXISTS `token_usages`;
 CREATE TABLE `token_usages` (
   `id` bigint NOT NULL AUTO_INCREMENT,
   `session_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `agent_id` varchar(36) COLLATE utf8mb4_unicode_ci NOT NULL DEFAULT '' COMMENT '计费所属子 Agent；空字符串为主 Agent',
   `company_id` bigint NOT NULL DEFAULT '0',
   `user_id` bigint NOT NULL DEFAULT '0',
   `model` varchar(128) COLLATE utf8mb4_unicode_ci NOT NULL,
@@ -212,6 +240,7 @@ CREATE TABLE `token_usages` (
   KEY `idx_token_usages_purpose` (`purpose`),
   KEY `idx_token_usages_created_at` (`created_at`),
   KEY `idx_token_usages_session_id` (`session_id`),
+  KEY `idx_token_usages_session_agent` (`session_id`,`agent_id`),
   KEY `idx_token_usages_company_id` (`company_id`),
   KEY `idx_token_usages_user_id` (`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;

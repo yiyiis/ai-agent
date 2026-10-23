@@ -135,13 +135,14 @@ func (t *Turn) pump(ctx context.Context, cancel context.CancelFunc, run func(ctx
 
 // TurnRegistry 进程内会话级 Turn 注册表：会话互斥 + 生命周期管理 + 事件订阅
 type TurnRegistry struct {
-	mu    sync.Mutex
-	turns map[string]*Turn // sessionID -> Turn（单实例内存态）
+	mu       sync.Mutex
+	turns    map[string]*Turn // sessionID -> Turn（单实例内存态）
+	deleting map[string]bool  // Tombstones also reject a request loaded before deletion.
 }
 
 // NewTurnRegistry 创建独立注册表（生产用包级单例 DefaultRegistry，测试可独立实例化）
 func NewTurnRegistry() *TurnRegistry {
-	return &TurnRegistry{turns: map[string]*Turn{}}
+	return &TurnRegistry{turns: map[string]*Turn{}, deleting: map[string]bool{}}
 }
 
 // DefaultRegistry 全局默认注册表
@@ -175,6 +176,50 @@ func (r *TurnRegistry) Abort(sessionID string) {
 	}
 }
 
+// DeleteWhenStopped fences new turns, cancels the entire execution tree and
+// waits for final persistence before deleting. On failure the session remains
+// usable; on success its UUID stays tombstoned to reject stale loaded requests.
+func (r *TurnRegistry) DeleteWhenStopped(ctx context.Context, sessionID string, remove func() error) error {
+	r.mu.Lock()
+	if r.deleting[sessionID] {
+		r.mu.Unlock()
+		return errors.NewMsg("会话正在删除或已删除")
+	}
+	r.deleting[sessionID] = true
+	t := r.turns[sessionID]
+	r.mu.Unlock()
+	failed := true
+	defer func() {
+		if failed {
+			r.mu.Lock()
+			delete(r.deleting, sessionID)
+			r.mu.Unlock()
+		}
+	}()
+	if t != nil {
+		r.Abort(sessionID)
+		NotifyInput(sessionID)
+		for {
+			t.mu.Lock()
+			running, wake := t.finishedAt.IsZero(), t.wake
+			t.mu.Unlock()
+			if !running {
+				break
+			}
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-wake:
+			}
+		}
+	}
+	if err := remove(); err != nil {
+		return err
+	}
+	failed = false
+	return nil
+}
+
 // Start 启动会话的后台 Turn：
 //  1. 顺带 GC 超过保留期的已完成 Turn；
 //  2. 会话互斥——已有在跑 Turn 时返回 ErrTurnRunning（并发两轮同时读写
@@ -187,6 +232,9 @@ func (r *TurnRegistry) Start(sessionID string, run func(ctx context.Context, emi
 	defer r.mu.Unlock()
 
 	r.gcLocked(time.Now())
+	if r.deleting[sessionID] {
+		return nil, errors.NewMsg("会话正在删除或已删除")
+	}
 	if t, ok := r.turns[sessionID]; ok && t.Running() {
 		return nil, ErrTurnRunning
 	}

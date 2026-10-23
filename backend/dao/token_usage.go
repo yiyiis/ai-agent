@@ -8,6 +8,7 @@ import (
 
 	"backend/constants"
 	"backend/dal/model"
+	"backend/pkg/agentctx"
 	"backend/pkg/db"
 	"backend/pkg/errors"
 )
@@ -85,6 +86,7 @@ func CreateTokenUsage(ctx context.Context, row *model.TokenUsage) error {
 	if row == nil || strings.TrimSpace(row.SessionID) == "" {
 		return errors.NewMsg("用量记录缺少会话归属")
 	}
+	row.AgentID = agentctx.AgentID(ctx)
 	if strings.TrimSpace(row.Purpose) == "" {
 		row.Purpose = string(constants.UsagePurposeTurn)
 	}

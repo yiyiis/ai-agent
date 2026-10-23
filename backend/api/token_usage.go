@@ -184,6 +184,7 @@ type GetSessionTokenUsageReq struct {
 type TokenUsageItemOut struct {
 	ID               int64   `json:"id"`
 	SessionID        string  `json:"session_id"`
+	AgentID          string  `json:"agent_id"`
 	Model            string  `json:"model"`
 	ProviderKey      string  `json:"provider_key"`
 	RoundIndex       int64   `json:"round_index"`
@@ -219,6 +220,7 @@ func GetSessionTokenUsage(ctx context.Context, req *GetSessionTokenUsageReq) (*[
 		out = append(out, TokenUsageItemOut{
 			ID:               r.ID,
 			SessionID:        r.SessionID,
+			AgentID:          r.AgentID,
 			Model:            r.Model,
 			ProviderKey:      r.ProviderKey,
 			RoundIndex:       r.RoundIndex,

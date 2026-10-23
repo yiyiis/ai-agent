@@ -14,6 +14,7 @@ import (
 	"backend/constants"
 	"backend/dal/model"
 	"backend/dao"
+	"backend/pkg/agentctx"
 	"backend/pkg/db"
 	"backend/pkg/jwt"
 	"backend/pkg/provider"
@@ -168,6 +169,13 @@ func TestSessionTokenUsageAccess(t *testing.T) {
 		_, _ = q.TokenUsage.WithContext(ctx).Where(q.TokenUsage.SessionID.Eq(sid)).Delete()
 		_ = dao.DeleteSession(ctx, sid)
 	})
+	const childID = "usage-child-agent"
+	if err := dao.CreateTokenUsage(agentctx.WithAgentID(ctx, childID), &model.TokenUsage{
+		SessionID: sid, CompanyID: 1, UserID: 101, Model: "MiniMax-Text-01", ProviderKey: "minimax",
+		Purpose: "turn", RoundIndex: 0, PromptTokens: 40, CompletionTokens: 10,
+	}); err != nil {
+		t.Fatalf("Create child token usage failed: %v", err)
+	}
 
 	tokenOf := func(uid int64, utype constants.UserType) string {
 		tok, err := jwt.GenAccessToken(jwt.TokenClaims{
@@ -196,10 +204,26 @@ func TestSessionTokenUsageAccess(t *testing.T) {
 	if err := json.Unmarshal(env.Data, &items); err != nil {
 		t.Fatalf("decode items failed: %v", err)
 	}
-	if len(items) != 1 {
-		t.Fatalf("expected 1 item, got %d", len(items))
+	if len(items) != 2 {
+		t.Fatalf("expected root and child usage, got %d items", len(items))
 	}
-	it := items[0]
+	// The endpoint is a root-session ledger; each row must retain its stream
+	// identity instead of making child costs indistinguishable from root calls.
+	var it api.TokenUsageItemOut
+	var childFound bool
+	for _, item := range items {
+		switch item.AgentID {
+		case "":
+			it = item
+		case childID:
+			childFound = item.PromptTokens == 40 && item.CompletionTokens == 10 && item.TotalTokens == 50
+		default:
+			t.Fatalf("unexpected agent attribution: %+v", item)
+		}
+	}
+	if !childFound {
+		t.Fatal("child usage lost agent_id or counters in API mapping")
+	}
 	if it.RoundIndex != 1 || it.Purpose != "turn" || it.ProviderKey != "minimax" ||
 		it.PromptTokens != 300 || it.CompletionTokens != 45 || it.CachedTokens != 80 || it.TotalTokens != 345 {
 		t.Fatalf("mismatched item: %+v", it)

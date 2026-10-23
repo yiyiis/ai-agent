@@ -37,6 +37,7 @@ var tables = []struct {
 	}},
 	{"sessions", "Session", nil},
 	{"messages", "Message", nil},
+	{"agent_runs", "AgentRun", []gen.ModelOpt{gen.FieldType("result", "string")}},
 	{"skills", "Skill", nil},
 	{"skill_versions", "SkillVersion", nil},
 	{"session_skills", "SessionSkill", nil},
@@ -52,7 +53,7 @@ var tables = []struct {
 // jsonColumns DB 中为 JSON 类型的列，业务代码按 JSON 文本（*string）读写，
 // 覆盖 gen 默认的 datatypes.JSON 映射
 var jsonColumns = []string{
-	"tool_calls", "attachments", "tags", "allowed_skills",
+	"tool_calls", "stub_tool_calls", "attachments", "tags", "allowed_skills",
 	"params", "result", "artifacts", "progress", "exec_context", "attempts",
 	"headers", "command", "env", "tool_allow",
 }
@@ -87,7 +88,7 @@ func main() {
 	flag.Parse()
 
 	dbDSN := resolveDSN()
-	fmt.Println("Connecting to DB:", dbDSN)
+	fmt.Println("Connecting to configured database")
 
 	g := gen.NewGenerator(gen.Config{
 		OutPath:           "./query",

@@ -12,9 +12,10 @@ const TableNameMessage = "messages"
 
 // Message mapped from table <messages>
 type Message struct {
-	ID            int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true" json:"id"`
+	ID            int64     `gorm:"column:id;type:bigint;primaryKey;autoIncrement:true;index:idx_messages_session_agent,priority:3" json:"id"`
 	MessageID     string    `gorm:"column:message_id;type:varchar(36);not null;uniqueIndex:idx_messages_message_id,priority:1" json:"message_id"`
-	SessionID     string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_id,priority:1" json:"session_id"`
+	SessionID     string    `gorm:"column:session_id;type:varchar(36);not null;index:idx_messages_session_agent,priority:1;index:idx_messages_session_id,priority:1" json:"session_id"`
+	AgentID       string    `gorm:"column:agent_id;type:varchar(36);not null;index:idx_messages_session_agent,priority:2;comment:Child agent; empty for main agent" json:"agent_id"` // Child agent; empty for main agent
 	Role          string    `gorm:"column:role;type:varchar(32);not null" json:"role"`
 	Content       string    `gorm:"column:content;type:longtext;not null" json:"content"`
 	Reasoning     *string   `gorm:"column:reasoning;type:longtext;comment:模型思考过程" json:"reasoning"` // 模型思考过程

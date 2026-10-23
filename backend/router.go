@@ -30,6 +30,8 @@ func RegisterRouter(engine *gin.Engine) {
 		sessionGroup.POST("", Controller(api.CreateSession))
 		sessionGroup.GET("", Controller(api.ListSessions))
 		sessionGroup.GET("/:id", Controller(api.GetSessionDetail))
+		sessionGroup.GET("/:id/agents", Controller(api.ListSessionAgents))
+		sessionGroup.GET("/:id/agents/:agent_id", Controller(api.GetSessionAgent))
 		sessionGroup.PATCH("/:id", Controller(api.UpdateSession))
 		sessionGroup.DELETE("/:id", Controller(api.DeleteSession))
 		sessionGroup.PUT("/:id/skills", Controller(api.SetEnabledSkills))

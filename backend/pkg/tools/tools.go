@@ -759,7 +759,7 @@ func formatSandboxResult(res sandbox.Result) string {
 }
 
 // ExecuteWithOutput 执行单个工具调用，返回完整产物（文本 + 导出工件）。
-// 每次调用有外层硬超时兜底。
+// 每次调用有取消期限；返回前等待实际执行器退出，以便调用方安全释放工作区锁。
 func ExecuteWithOutput(ctx context.Context, sessionID, name string, args map[string]any) Output {
 	if msg := CheckArgs(name, args); msg != "" {
 		return Output{Text: msg}
@@ -767,6 +767,9 @@ func ExecuteWithOutput(ctx context.Context, sessionID, name string, args map[str
 	timeout := timeoutFor(name, args)
 	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if ctx.Err() != nil {
+		return Output{Text: "[执行失败] 工具执行已取消"}
+	}
 
 	done := make(chan Output, 1)
 	go func() {
@@ -780,11 +783,21 @@ func ExecuteWithOutput(ctx context.Context, sessionID, name string, args map[str
 		}()
 	}()
 
+	return awaitToolOutput(ctx, name, timeout, done)
+}
+
+func awaitToolOutput(ctx context.Context, name string, timeout time.Duration, done <-chan Output) Output {
 	select {
 	case out := <-done:
 		return out
 	case <-ctx.Done():
-		return Output{Text: fmt.Sprintf("[超时] 工具 %s 执行超过 %.0fs 未返回，已放弃。", name, timeout.Seconds())}
+		// Context cancellation does not stop a goroutine. Join the worker so a
+		// late filesystem write/cleanup cannot race the next tool or deletion.
+		<-done
+		if errors.Is(ctx.Err(), context.Canceled) {
+			return Output{Text: "[执行失败] 工具 " + name + " 已取消并结束执行。"}
+		}
+		return Output{Text: fmt.Sprintf("[超时] 工具 %s 超过 %.0fs，执行器已退出。", name, timeout.Seconds())}
 	}
 }
 

@@ -67,12 +67,23 @@ type Event struct {
 	// ID 为对应 tool_call_id，前端据此挂到工具调用卡片上）
 	Attachments []Attachment
 	Input       *human.Request
+	// Child events are nested so their done/error/delta never terminate or
+	// overwrite the root conversation stream.
+	Agent      *model.AgentRun
+	AgentID    string
+	ChildEvent *Event
 }
 
 // Deps 运行依赖：模型 Provider 与工具执行器（测试可注入假实现）
 type Deps struct {
-	Provider provider.Provider
-	ExecTool func(ctx context.Context, sessionID, name string, args map[string]any) tools.Output
+	Provider         provider.Provider
+	ExecTool         func(ctx context.Context, sessionID, name string, args map[string]any) tools.Output
+	multi            *multiAgentRuntime
+	child            bool
+	childMode        string
+	inheritedSkills  *turnSkills
+	inheritedSchemas []any
+	maxRounds        int
 }
 
 func (d *Deps) execTool() func(ctx context.Context, sessionID, name string, args map[string]any) tools.Output {
@@ -902,6 +913,48 @@ func Run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 func run(ctx context.Context, deps Deps, session *model.Session, history []model.Message, userContent string, attachments []Attachment, emit func(Event), resume bool) error {
 	sessionID := session.SessionID
+	if deps.multi == nil {
+		deps.multi = newMultiAgentRuntime(deps, session, emit)
+		if resume && !deps.child {
+			// Answering request_input resumes the same logical turn and must not
+			// reset its delegation budget.
+			calls := map[string]bool{}
+			for _, m := range history {
+				if m.Role == "user" {
+					calls = map[string]bool{}
+				}
+				if m.ToolCalls != nil {
+					var saved []savedCall
+					if json.Unmarshal([]byte(*m.ToolCalls), &saved) == nil {
+						for _, c := range saved {
+							if c.Function.Name == DelegateAgentTool {
+								calls[c.ID] = true
+							}
+						}
+					}
+				}
+			}
+			runs, err := dao.ListAgentRuns(ctx, sessionID)
+			if err != nil {
+				return err
+			}
+			for _, child := range runs {
+				if calls[child.ToolCallID] {
+					deps.multi.total++
+				}
+			}
+		}
+	}
+	// A single execution tree owns the workspace. Children neither acquire a
+	// second sandbox nor rematerialize files over a sibling's changes.
+	if !deps.child {
+		release := sandbox.AcquireLease(sessionID)
+		defer release()
+	}
+	maxRounds := MaxToolRounds
+	if deps.maxRounds > 0 {
+		maxRounds = deps.maxRounds
+	}
 
 	// 1. 落库用户消息；首条对话顺带提取标题
 	if !resume {
@@ -929,7 +982,7 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 			return err
 		}
 		emit(Event{Type: "user_message_id", ID: userMsgID})
-		if (session.Title == "新会话" || session.Title == "") && autoTitle != "" {
+		if !deps.child && (session.Title == "新会话" || session.Title == "") && autoTitle != "" {
 			_ = dao.UpdateSessionTitle(context.WithoutCancel(ctx), sessionID, autoTitle)
 		}
 	}
@@ -938,34 +991,49 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 	msgs := buildContext(ctx, session, history)
 	// 技能装配（阶段五）：启用技能挂载进沙箱 + Catalog 目录注入 System Prompt；
 	// 任一步失败降级为无技能对话，不阻塞整轮
-	ts := loadTurnSkills(ctx, session)
+	ts := deps.inheritedSkills
+	if ts == nil {
+		ts = loadTurnSkills(ctx, session)
+	}
 	if section := ts.systemPromptSection(); section != "" {
 		msgs[0].Content = msgs[0].Content + "\n\n" + section
 	}
 	// 附件落入会话工作区（沙箱），同时构造包含视觉图片的多模态用户消息
-	placed := materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
+	var placed []Attachment
+	if !deps.child {
+		placed = materializeAttachments(ctx, sessionID, collectAttachments(history, attachments))
+	}
 	if !resume {
 		userTurn := buildMultimodalUserMessage(ctx, userContent, attachments, placed)
 		msgs = append(msgs, userTurn)
 	}
 	// blob 重物化：沙箱回收重建后，把历史消息引用的 .tool-outputs 归档恢复回
 	// 工作区（文件还在则零流量跳过），恢复模型 read_file 取回完整输出的能力
-	materializeBlobs(ctx, sessionID, history)
-	toolSchemas := tools.Schemas()
-	if session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") {
-		toolSchemas = append(toolSchemas, human.Schema())
+	if !deps.child {
+		materializeBlobs(ctx, sessionID, history)
 	}
-	if ts.hasCatalog() {
+	toolSchemas := tools.Schemas()
+	if !deps.child && session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") {
+		toolSchemas = append(toolSchemas, human.Schema())
+		toolSchemas = append(toolSchemas, DelegateAgentSchema())
+		msgs[0].Content += "\n\n## 多 Agent 协作\n复杂任务可在同一轮调用多个 delegate_agent 并行委派独立子任务。给出自包含任务和验收条件；只读分析使用 read_only，需要改文件明确用 write。子 Agent 共享当前工作区但历史独立，请按文件划分任务，避免同时改同一文件。你负责核对结果、整合并向用户交付；简单任务直接完成即可。"
+	}
+	if !deps.child && ts.hasCatalog() {
 		// 存在可按需装载的候选才暴露 load_skill——否则模型会看到一个
 		// 永远只能返回"没有这个技能"的工具，白白浪费 token 和调用轮次
 		toolSchemas = append(toolSchemas, tools.LoadSkillSchema())
 	}
 	// 阶段八：会话启用的 MCP Server 工具注入（惰性拨号，未就绪的跳过本轮；
 	// 与内置工具同一 schema 协议，模型无感知差别）
-	mcpDefs := loadTurnMcps(ctx, sessionID)
-	if len(mcpDefs) > 0 {
-		toolSchemas = append(toolSchemas, mcp.SchemasFor(mcpDefs)...)
+	if deps.child {
+		toolSchemas = deps.inheritedSchemas
+	} else {
+		mcpDefs := loadTurnMcps(ctx, sessionID)
+		if len(mcpDefs) > 0 {
+			toolSchemas = append(toolSchemas, mcp.SchemasFor(mcpDefs)...)
+		}
 	}
+	allowed := schemaToolNames(toolSchemas)
 
 	// Loop guard：sig(=tool+args 哈希) -> 历次输出哈希
 	guard := map[string][]string{}
@@ -992,7 +1060,7 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 
 	// lastPrompt 上一轮实测 prompt tokens（rezone 预算判断，天然滞后一轮）
 	lastPrompt := 0
-	for round := startRound; round < MaxToolRounds; round++ {
+	for round := startRound; round < maxRounds; round++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -1067,7 +1135,7 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 			emit(Event{Type: "tool_call_start", ID: tc.ID, Name: tc.Function.Name, Arguments: orEmptyJSON(tc.Function.Arguments)})
 		}
 
-		if session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") && hasInputCall(calls) {
+		if !deps.child && session.APIKeyID == nil && !strings.HasPrefix(sessionID, "run_") && hasInputCall(calls) {
 			results, err := waitInputs(ctx, sessionID, assistantID, emit)
 			if err != nil {
 				return err
@@ -1086,7 +1154,7 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 		outputs := make([]tools.Output, len(calls))
 		executed := make([]bool, len(calls))
 		for i, tc := range calls {
-			if tc.Function.Name == tools.LoadSkillTool {
+			if !deps.child && tc.Function.Name == tools.LoadSkillTool && allowed[tc.Function.Name] {
 				var loaded *Event
 				outputs[i], loaded = ts.runLoadSkill(ctx, sessionID, tc)
 				executed[i] = true
@@ -1105,10 +1173,25 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 			wg.Add(1)
 			go func(i int, tc savedCall) {
 				defer wg.Done()
+				defer func() {
+					if v := recover(); v != nil {
+						slog.Error("工具执行 panic", "session", sessionID, "tool", tc.Function.Name, "panic", v)
+						outputs[i] = tools.Output{Text: fmt.Sprintf("[执行失败] 工具执行异常：%v", v)}
+					}
+				}()
 				args, parseErr := tools.ParseArguments(tc.Function.Arguments)
 				if parseErr != "" {
 					logArgAnomaly(sessionID, session.Model, tc, "参数解析失败")
 					outputs[i] = tools.Output{Text: parseErr}
+					return
+				}
+				if (deps.child && (!allowed[tc.Function.Name] || !childAllowedTool(deps, tc.Function.Name))) ||
+					(tc.Function.Name == DelegateAgentTool && !allowed[tc.Function.Name]) {
+					outputs[i] = tools.Output{Text: "[执行失败] 当前 Agent 未获授权使用工具 " + tc.Function.Name}
+					return
+				}
+				if tc.Function.Name == "delegate_agent" {
+					outputs[i] = deps.multi.delegate(execCtx, tc.ID, args, ts, toolSchemas)
 					return
 				}
 				if tc.Function.Name == human.ToolName {
@@ -1123,13 +1206,17 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 				// 不经沙箱（远端 HTTP 天然在外；stdio 种子由管理员负责）。
 				// Loop Guard、事件广播与结果落库复用下方公共路径
 				if mcp.IsTool(tc.Function.Name) {
-					outputs[i] = tools.Output{Text: mcp.ExecuteTool(execCtx, tc.Function.Name, args).Text}
+					outputs[i] = deps.multi.withWorkspace(execCtx, func() tools.Output {
+						return tools.Output{Text: mcp.ExecuteTool(execCtx, tc.Function.Name, args).Text}
+					})
 					return
 				}
 				if tools.CheckArgs(tc.Function.Name, args) != "" {
 					logArgAnomaly(sessionID, session.Model, tc, "参数缺失")
 				}
-				outputs[i] = exec(execCtx, sessionID, tc.Function.Name, args)
+				outputs[i] = deps.multi.withWorkspace(execCtx, func() tools.Output {
+					return exec(execCtx, sessionID, tc.Function.Name, args)
+				})
 			}(i, tc)
 		}
 		wg.Wait()
@@ -1176,7 +1263,7 @@ func run(ctx context.Context, deps Deps, session *model.Session, history []model
 		}
 	}
 
-	note := fmt.Sprintf("已达单轮工具调用轮数上限（%d 轮）", MaxToolRounds)
+	note := fmt.Sprintf("已达单轮工具调用轮数上限（%d 轮）", maxRounds)
 	if id, err := saveMessage(ctx, sessionID, "assistant", "["+note+"]", "", nil, "", "", nil, nil); err == nil {
 		lastAssistantID = id
 	}
@@ -1190,6 +1277,26 @@ func callsOrNil(calls []savedCall) any {
 		return nil
 	}
 	return calls
+}
+
+func schemaToolNames(schemas []any) map[string]bool {
+	names := make(map[string]bool, len(schemas))
+	for _, schema := range schemas {
+		// Schemas may be structs or maps depending on the tool provider.
+		b, err := json.Marshal(schema)
+		if err != nil {
+			continue
+		}
+		var def struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		}
+		if json.Unmarshal(b, &def) == nil && def.Function.Name != "" {
+			names[def.Function.Name] = true
+		}
+	}
+	return names
 }
 
 func orEmptyJSON(s string) string {

@@ -17,6 +17,7 @@ import (
 
 var (
 	Q                = new(Query)
+	AgentRun         *agentRun
 	ApiKey           *apiKey
 	Company          *company
 	McpServer        *mcpServer
@@ -35,6 +36,7 @@ var (
 
 func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 	*Q = *Use(db, opts...)
+	AgentRun = &Q.AgentRun
 	ApiKey = &Q.ApiKey
 	Company = &Q.Company
 	McpServer = &Q.McpServer
@@ -54,6 +56,7 @@ func SetDefault(db *gorm.DB, opts ...gen.DOOption) {
 func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 	return &Query{
 		db:               db,
+		AgentRun:         newAgentRun(db, opts...),
 		ApiKey:           newApiKey(db, opts...),
 		Company:          newCompany(db, opts...),
 		McpServer:        newMcpServer(db, opts...),
@@ -74,6 +77,7 @@ func Use(db *gorm.DB, opts ...gen.DOOption) *Query {
 type Query struct {
 	db *gorm.DB
 
+	AgentRun         agentRun
 	ApiKey           apiKey
 	Company          company
 	McpServer        mcpServer
@@ -95,6 +99,7 @@ func (q *Query) Available() bool { return q.db != nil }
 func (q *Query) clone(db *gorm.DB) *Query {
 	return &Query{
 		db:               db,
+		AgentRun:         q.AgentRun.clone(db),
 		ApiKey:           q.ApiKey.clone(db),
 		Company:          q.Company.clone(db),
 		McpServer:        q.McpServer.clone(db),
@@ -123,6 +128,7 @@ func (q *Query) WriteDB() *Query {
 func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 	return &Query{
 		db:               db,
+		AgentRun:         q.AgentRun.replaceDB(db),
 		ApiKey:           q.ApiKey.replaceDB(db),
 		Company:          q.Company.replaceDB(db),
 		McpServer:        q.McpServer.replaceDB(db),
@@ -141,6 +147,7 @@ func (q *Query) ReplaceDB(db *gorm.DB) *Query {
 }
 
 type queryCtx struct {
+	AgentRun         IAgentRunDo
 	ApiKey           IApiKeyDo
 	Company          ICompanyDo
 	McpServer        IMcpServerDo
@@ -159,6 +166,7 @@ type queryCtx struct {
 
 func (q *Query) WithContext(ctx context.Context) *queryCtx {
 	return &queryCtx{
+		AgentRun:         q.AgentRun.WithContext(ctx),
 		ApiKey:           q.ApiKey.WithContext(ctx),
 		Company:          q.Company.WithContext(ctx),
 		McpServer:        q.McpServer.WithContext(ctx),

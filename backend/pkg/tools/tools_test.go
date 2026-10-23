@@ -4,10 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"mime"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 	"unicode/utf8"
 
 	"backend/pkg/sandbox"
@@ -232,8 +234,9 @@ func TestExportArtifact(t *testing.T) {
 		t.Fatalf("attachment missing: %+v", out)
 	}
 	att := out.Attachments[0]
+	mediaType, _, mimeErr := mime.ParseMediaType(att.ContentType)
 	if !strings.HasPrefix(att.URL, "/api/uploads/") || att.Filename != "最终报告.md" ||
-		att.Size == nil || *att.Size != 7 || att.ContentType != "text/markdown" {
+		att.Size == nil || *att.Size != 7 || mimeErr != nil || mediaType != "text/markdown" {
 		t.Fatalf("attachment wrong: %+v", att)
 	}
 	if _, err := os.Stat(filepath.Join(uploads, filepath.Base(att.URL))); err != nil {
@@ -258,6 +261,28 @@ func TestExportArtifact(t *testing.T) {
 	nestedAtt := outNested.Attachments[0]
 	if nestedAtt.Filename != "Header.tsx" || nestedAtt.Path != "src/components/Header.tsx" {
 		t.Fatalf("nested attachment wrong: %+v", nestedAtt)
+	}
+}
+
+func TestCancelledToolWaitsForWorkerBeforeReturning(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	worker := make(chan Output, 1)
+	returned := make(chan Output, 1)
+	go func() { returned <- awaitToolOutput(ctx, "write_file", time.Minute, worker) }()
+	select {
+	case <-returned:
+		t.Fatal("cancellation returned with a live worker")
+	case <-time.After(20 * time.Millisecond):
+	}
+	worker <- Output{Text: "worker complete"}
+	select {
+	case out := <-returned:
+		if !IsErrorResult(out.Text) {
+			t.Fatalf("expected cancellation result: %+v", out)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("join did not finish")
 	}
 }
 

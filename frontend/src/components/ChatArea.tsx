@@ -33,6 +33,7 @@ import {
 } from '../api/client'
 import { followStream, type StreamStarter } from '../api/stream'
 import type {
+  AgentRun,
   Attachment,
   InputRequest,
   EnabledSkillEntry,
@@ -44,6 +45,7 @@ import type {
   TurnMetric,
 } from '../types'
 import { BrandIcon } from './BrandIcons'
+import { AgentRunCards } from './AgentRunCards'
 import { Composer } from './Composer'
 import { FilePreviewModal } from './FilePreviewModal'
 import { McpPanel } from './McpPanel'
@@ -54,6 +56,7 @@ import { ToolCallCard } from './ToolCallCard'
 import { InputActionsContext } from './RequestInputCard'
 import { parseInputResponse } from '../lib/requestInput'
 import { CompletedTokenBadge, LiveTokenProgress } from './TokenBadge'
+import { agentsForToolCalls, upsertAgent } from '../lib/agents'
 
 interface Props {
   sessionId: string | null
@@ -481,6 +484,7 @@ function ProcessAccordion({
 
 function AssistantTurnView({
   processItems,
+  agents = [],
   finalAnswer,
   isLastAssistant,
   streaming,
@@ -490,6 +494,7 @@ function AssistantTurnView({
   liveMetric,
 }: {
   processItems: ProcessItem[]
+  agents?: AgentRun[]
   finalAnswer: string
   isLastAssistant?: boolean
   streaming?: boolean
@@ -593,6 +598,8 @@ function AssistantTurnView({
             return null
           })}
 
+        <AgentRunCards agents={agents} />
+
         {/* 3. 最终交付结果（正文） */}
         {hasAnswer && (
           <div className="text-[15px] leading-relaxed text-[#1f1f1f] dark:text-[#e3e3e3] markdown-body select-text">
@@ -681,6 +688,11 @@ export function ChatArea({
   onSessionCreated,
 }: Props) {
   const [messages, setMessages] = useState<Message[]>([])
+  const [agentRuns, setAgentRuns] = useState<AgentRun[]>([])
+  const [agentLoadError, setAgentLoadError] = useState(false)
+  const agentLoadIdRef = useRef(0)
+  const agentRevisionRef = useRef(0)
+  const agentRevisionsRef = useRef<Record<string, number>>({})
   const [pendingInputs, setPendingInputs] = useState<InputRequest[]>([])
   const [loading, setLoading] = useState(Boolean(sessionId))
   const [streaming, setStreaming] = useState(false)
@@ -764,6 +776,25 @@ export function ChatArea({
   // 记录当前已成功加载就绪的会话 ID，避免草稿态转正或重复切换时重复拉取，同时保证页面初次载入或 F5 刷新时正常请求
   const loadedIdRef = useRef<string | null>(null)
 
+  const loadAgentRuns = (id: string) => {
+    const requestId = ++agentLoadIdRef.current
+    const revision = agentRevisionRef.current
+    api.listAgents(id).then((runs) => {
+      if (activeIdRef.current !== id || agentLoadIdRef.current !== requestId) return
+      setAgentRuns((current) => {
+        let snapshot = runs ?? []
+        // A snapshot requested before an SSE update must not regress that agent's status.
+        for (const agent of current) {
+          if ((agentRevisionsRef.current[agent.agent_id] ?? 0) > revision) snapshot = upsertAgent(snapshot, agent)
+        }
+        return snapshot
+      })
+      setAgentLoadError(false)
+    }).catch(() => {
+      if (activeIdRef.current === id && agentLoadIdRef.current === requestId) setAgentLoadError(true)
+    })
+  }
+
   useEffect(() => {
     let cancelled = false
 
@@ -782,6 +813,10 @@ export function ChatArea({
     }
 
     activeIdRef.current = sessionId
+    ++agentLoadIdRef.current
+    agentRevisionsRef.current = {}
+    setAgentRuns([])
+    setAgentLoadError(false)
     setReconnectAttempt(0)
 
     // 切换会话时（无论切去草稿态还是切到其它已有会话），必须彻底清理上一会话的输入框还原态与记录，杜绝串到新会话
@@ -831,6 +866,7 @@ export function ChatArea({
       .then((s) => {
         if (cancelled) return
         loadedIdRef.current = sessionId
+        loadAgentRuns(sessionId)
         setMessages(s.messages)
         setPendingInputs(s.pending_inputs ?? [])
         setTitle(s.title)
@@ -1159,6 +1195,7 @@ export function ChatArea({
     // 会话守卫：回调到达时用户可能已切到别的会话——旧会话的消息/标题
     // 不允许覆盖当前视图，直接放弃刷新（切回时会重新加载）
     if (activeIdRef.current !== currentId) return
+    loadAgentRuns(currentId)
     const streamOwner = abortRef.current
     api.getSession(currentId).then((s) => {
       if (activeIdRef.current !== currentId || abortRef.current !== streamOwner) return
@@ -1201,7 +1238,16 @@ export function ChatArea({
   }
 
   const handleEvent = (ev: StreamEvent) => {
-    if (ev.type === 'stream_reset') {
+    if (ev.type === 'agent_status') {
+      if (ev.agent.session_id !== activeIdRef.current) return
+      agentRevisionsRef.current[ev.agent.agent_id] = ++agentRevisionRef.current
+      setAgentRuns((current) => upsertAgent(current, ev.agent))
+      return
+    } else if (ev.type === 'agent_event') {
+      // Child events have their own transcript. In particular, child done/error/delta
+      // must never complete, fail, or append text to the root conversation.
+      return
+    } else if (ev.type === 'stream_reset') {
       setStreamProcessItems([])
       setStreamFinalText('')
       streamFinalTextRef.current = ''
@@ -1967,6 +2013,7 @@ export function ChatArea({
                       <AssistantTurnView
                         key={turn.key}
                         processItems={turn.processItems}
+                        agents={agentsForToolCalls(agentRuns, turn.processItems.flatMap((item) => item.kind === 'tool' ? [item.invocation.id] : []))}
                         finalAnswer={turn.finalAnswer}
                         isLastAssistant={turn.messageId === lastAssistantId}
                         streaming={false}
@@ -1989,6 +2036,7 @@ export function ChatArea({
                 {(streaming || streamProcessItems.length > 0 || streamFinalText.length > 0) && (
                   <AssistantTurnView
                     processItems={streamProcessItems}
+                    agents={agentsForToolCalls(agentRuns, streamProcessItems.flatMap((item) => item.kind === 'tool' ? [item.invocation.id] : []))}
                     finalAnswer={streamFinalText}
                     streaming={streaming}
                     onPreview={setPreview}
@@ -1999,6 +2047,12 @@ export function ChatArea({
                       promptTokens: streamTokens.prompt,
                     } : undefined}
                   />
+                )}
+                {agentLoadError && (
+                  <div role="status" className="flex items-center gap-2 text-xs text-[#747775] dark:text-[#9aa0a6]">
+                    <span>协作 Agent 状态暂时无法读取</span>
+                    <button type="button" className="text-[#1a73e8] dark:text-[#8ab4f8]" onClick={() => { if (activeIdRef.current) loadAgentRuns(activeIdRef.current) }}>重试</button>
+                  </div>
                 )}
               </div>
             </div>

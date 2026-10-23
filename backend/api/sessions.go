@@ -391,20 +391,22 @@ func DeleteSession(ctx context.Context, req *DeleteSessionReq) (*StatusOKResp, e
 		return nil, errors.NewMsg("登录态已失效")
 	}
 
-	if _, err := loadOwnedSession(ctx, identity, req.ID); err != nil {
+	session, err := loadOwnedSession(ctx, identity, req.ID)
+	if err != nil {
 		return nil, err
 	}
-
-	// 先中止该会话在跑的后台 Turn，避免级联删除与后台写入竞争
-	turnRegistry.Abort(req.ID)
-
-	if err := dao.DeleteSession(ctx, req.ID); err != nil {
+	if err := dao.CheckSessionWriteAccess(identity, session); err != nil {
 		return nil, err
 	}
-
-	// 沙箱资源随会话销毁（docker/e2b 强制销毁容器；local 清理宿主工作区目录；
-	// 尽力而为，失败不影响删除结果）
-	sandbox.Close(req.ID)
+	if err := turnRegistry.DeleteWhenStopped(ctx, req.ID, func() error {
+		if err := dao.DeleteSession(ctx, req.ID); err != nil {
+			return err
+		}
+		sandbox.Close(req.ID)
+		return nil
+	}); err != nil {
+		return nil, err
+	}
 	return &StatusOKResp{Status: "ok"}, nil
 }
 

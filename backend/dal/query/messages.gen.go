@@ -30,6 +30,7 @@ func newMessage(db *gorm.DB, opts ...gen.DOOption) message {
 	_message.ID = field.NewInt64(tableName, "id")
 	_message.MessageID = field.NewString(tableName, "message_id")
 	_message.SessionID = field.NewString(tableName, "session_id")
+	_message.AgentID = field.NewString(tableName, "agent_id")
 	_message.Role = field.NewString(tableName, "role")
 	_message.Content = field.NewString(tableName, "content")
 	_message.Reasoning = field.NewString(tableName, "reasoning")
@@ -59,6 +60,7 @@ type message struct {
 	ID            field.Int64
 	MessageID     field.String
 	SessionID     field.String
+	AgentID       field.String // Child agent; empty for main agent
 	Role          field.String
 	Content       field.String
 	Reasoning     field.String // 模型思考过程
@@ -94,6 +96,7 @@ func (m *message) updateTableName(table string) *message {
 	m.ID = field.NewInt64(table, "id")
 	m.MessageID = field.NewString(table, "message_id")
 	m.SessionID = field.NewString(table, "session_id")
+	m.AgentID = field.NewString(table, "agent_id")
 	m.Role = field.NewString(table, "role")
 	m.Content = field.NewString(table, "content")
 	m.Reasoning = field.NewString(table, "reasoning")
@@ -134,10 +137,11 @@ func (m *message) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (m *message) fillFieldMap() {
-	m.fieldMap = make(map[string]field.Expr, 19)
+	m.fieldMap = make(map[string]field.Expr, 20)
 	m.fieldMap["id"] = m.ID
 	m.fieldMap["message_id"] = m.MessageID
 	m.fieldMap["session_id"] = m.SessionID
+	m.fieldMap["agent_id"] = m.AgentID
 	m.fieldMap["role"] = m.Role
 	m.fieldMap["content"] = m.Content
 	m.fieldMap["reasoning"] = m.Reasoning

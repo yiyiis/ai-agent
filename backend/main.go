@@ -7,6 +7,7 @@ import (
 
 	"backend/api"
 	"backend/config"
+	"backend/dao"
 	"backend/pkg/ctxpolicy"
 	"backend/pkg/db"
 	"backend/pkg/dispatcher"
@@ -35,6 +36,11 @@ func main() {
 	jwt.InitJwt(conf.Auth)
 	log.InitSlog(conf.Log)
 	validate.InitGinValidate()
+	// Single-instance recovery: a previous process cannot still own these runs.
+	// Fail startup if the migration/recovery failed instead of hiding lost work.
+	if err := dao.InterruptAgentRuns(db.WithContext(context.Background())); err != nil {
+		panic(fmt.Sprintf("恢复 Agent 运行状态失败，请确认已执行多 Agent 迁移: %v", err))
+	}
 
 	// 3. 注册 LLM Provider 及模型路由（含上下文窗口表装载）
 	provider.InitProviders(conf.LLM)

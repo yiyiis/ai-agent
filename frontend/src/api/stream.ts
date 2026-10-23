@@ -1,6 +1,8 @@
-import type { Attachment, TokenUsage, InputRequest } from '../types'
+import type { AgentRun, Attachment, TokenUsage, InputRequest } from '../types'
 
 export type StreamEvent =
+  | { type: 'agent_status'; agent: AgentRun }
+  | { type: 'agent_event'; agent_id: string; event: StreamEvent }
   | { type: 'user_message_id'; id: string }
   | { type: 'delta'; content?: string; reasoning?: string }
   | { type: 'tool_call_start'; id: string; name: string; arguments: string }

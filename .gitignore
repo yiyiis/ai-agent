@@ -45,6 +45,12 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 backend/workspace/
+# Skills installed at runtime; keep only the two bundled skills in Git.
+backend/skills/*
+!backend/skills/fetch-url/
+!backend/skills/fetch-url/**
+!backend/skills/bing-ye/
+!backend/skills/bing-ye/**
 backend/skills/.secrets/
 backend/uploads/
 .zcode/

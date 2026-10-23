@@ -29,6 +29,7 @@ func newTokenUsage(db *gorm.DB, opts ...gen.DOOption) tokenUsage {
 	_tokenUsage.ALL = field.NewAsterisk(tableName)
 	_tokenUsage.ID = field.NewInt64(tableName, "id")
 	_tokenUsage.SessionID = field.NewString(tableName, "session_id")
+	_tokenUsage.AgentID = field.NewString(tableName, "agent_id")
 	_tokenUsage.CompanyID = field.NewInt64(tableName, "company_id")
 	_tokenUsage.UserID = field.NewInt64(tableName, "user_id")
 	_tokenUsage.Model = field.NewString(tableName, "model")
@@ -52,6 +53,7 @@ type tokenUsage struct {
 	ALL              field.Asterisk
 	ID               field.Int64
 	SessionID        field.String
+	AgentID          field.String // Child agent; empty for main agent
 	CompanyID        field.Int64
 	UserID           field.Int64
 	Model            field.String
@@ -81,6 +83,7 @@ func (t *tokenUsage) updateTableName(table string) *tokenUsage {
 	t.ALL = field.NewAsterisk(table)
 	t.ID = field.NewInt64(table, "id")
 	t.SessionID = field.NewString(table, "session_id")
+	t.AgentID = field.NewString(table, "agent_id")
 	t.CompanyID = field.NewInt64(table, "company_id")
 	t.UserID = field.NewInt64(table, "user_id")
 	t.Model = field.NewString(table, "model")
@@ -118,9 +121,10 @@ func (t *tokenUsage) GetFieldByName(fieldName string) (field.OrderExpr, bool) {
 }
 
 func (t *tokenUsage) fillFieldMap() {
-	t.fieldMap = make(map[string]field.Expr, 13)
+	t.fieldMap = make(map[string]field.Expr, 14)
 	t.fieldMap["id"] = t.ID
 	t.fieldMap["session_id"] = t.SessionID
+	t.fieldMap["agent_id"] = t.AgentID
 	t.fieldMap["company_id"] = t.CompanyID
 	t.fieldMap["user_id"] = t.UserID
 	t.fieldMap["model"] = t.Model

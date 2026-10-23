@@ -12,7 +12,6 @@ import (
 	"net/http"
 	"net/url"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -26,8 +25,6 @@ const (
 	containerPath = "/workspace"
 	// labelManaged 打在本系统创建的全部容器上：重启清扫与人工排查都靠它
 	labelManaged = "ai-agent-sandbox"
-	// execKillGrace 内层 timeout 命令的 KILL 宽限（秒）：TERM 后仍不退则强杀
-	execKillGrace = 5
 	// reapInterval 生命周期巡检间隔
 	reapInterval = 30 * time.Second
 )
@@ -52,9 +49,10 @@ type dockerDriver struct {
 	idleTimeout time.Duration
 	maxLifetime time.Duration
 
-	mu   sync.Mutex
-	ctrs map[string]*ctrState // sessionID -> 容器状态
-	stop chan struct{}        // 关闭巡检协程（仅测试用）
+	mu      sync.Mutex
+	ctrs    map[string]*ctrState // sessionID -> 容器状态
+	blocked map[string]bool      // command termination could not be confirmed
+	stop    chan struct{}        // 关闭巡检协程（仅测试用）
 
 	// ensureMu 串行化容器冷启动（inspect→create→start）：一轮对话的多个工具
 	// 调用并发执行，不串行会各自 create 同名容器、后到者撞 409（线上真实发生过）
@@ -120,15 +118,14 @@ func (d *dockerDriver) RunPython(ctx context.Context, sessionID, scriptRel strin
 	return d.run(ctx, sessionID, timeoutSecs, []string{"python3", containerPath + "/" + scriptRel}, env)
 }
 
-// run 在会话容器内执行 argv。外层包一层 `timeout -k` 做命令级硬超时：
-// Engine API 没有"取消 exec"的接口，靠镜像内的 timeout 命令兜底最可靠
-// （GNU coreutils 与 busybox 均支持该参数序）。env 经 exec 配置注入容器进程。
+// run supervises one process group and confirms cleanup before returning. Engine
+// stream cancellation alone does not cancel the corresponding remote exec.
 func (d *dockerDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string, env []string) Result {
 	id, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
-	wrapped := append([]string{"timeout", "-k", strconv.Itoa(execKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
+	token, wrapped := supervisedRemoteCommand("python3", timeoutSecs, argv)
 
 	eid, err := d.client.createExec(ctx, id, wrapped, env)
 	if err != nil {
@@ -143,12 +140,31 @@ func (d *dockerDriver) run(ctx context.Context, sessionID string, timeoutSecs in
 	}
 
 	var stdout, stderr bytes.Buffer
-	if err := d.client.startExecStream(ctx, eid, &stdout, &stderr); err != nil {
-		return Result{Err: infraErr(err, "读取执行输出失败")}
+	streamErr := d.client.startExecStream(ctx, eid, &stdout, &stderr)
+	// Losing the HTTP stream does not stop an Engine exec. Cancellation and even
+	// successful commands must acknowledge group cleanup before the caller can
+	// release its shared-workspace lock.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), remoteCleanupTimeout)
+	cleanupCode, cleanupErr := d.execQuiet(cleanupCtx, id, cleanupRemoteCommand("python3", token))
+	cleanupCancel()
+	if cleanupErr != nil || cleanupCode != 0 {
+		d.mu.Lock()
+		if d.blocked == nil {
+			d.blocked = map[string]bool{}
+		}
+		d.blocked[sessionID] = true
+		d.mu.Unlock()
+		return Result{Killed: true, Err: blockedWorkspaceError()}
+	}
+	if streamErr != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			streamErr = ctx.Err()
+		}
+		return Result{Killed: true, Err: infraErr(streamErr, "执行已中止且远端命令已清理")}
 	}
 	exitCode, err := d.client.execExitCode(ctx, eid)
 	if err != nil {
-		return Result{Err: infraErr(err, "获取退出码失败")}
+		return Result{Err: infraErr(err, "获取退出码失败（远端命令已清理）")}
 	}
 	d.touch(sessionID)
 	// 124=timeout 超时退出；137=SIGKILL（-k 宽限后强杀）
@@ -167,12 +183,24 @@ func (d *dockerDriver) Close(sessionID string) {
 	delete(d.ctrs, sessionID)
 	d.mu.Unlock()
 	if st == nil {
+		d.mu.Lock()
+		delete(d.blocked, sessionID)
+		d.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := d.client.removeContainer(ctx, st.id); err != nil {
 		slog.Warn("sandbox 销毁容器失败", "session", sessionID, "err", err)
+		// Keep the handle and quarantine for a later explicit retry. Forgetting
+		// it would let a second Close clear the block without removing anything.
+		d.mu.Lock()
+		d.ctrs[sessionID] = st
+		d.mu.Unlock()
+	} else {
+		d.mu.Lock()
+		delete(d.blocked, sessionID)
+		d.mu.Unlock()
 	}
 }
 
@@ -186,7 +214,7 @@ func (d *dockerDriver) forget(sessionID string) {
 // touch 刷新会话容器的最后使用时间（空闲销毁的计时依据）
 func (d *dockerDriver) touch(sessionID string) {
 	d.mu.Lock()
-	if st := d.ctrs[sessionID]; st != nil {
+	if st := d.ctrs[sessionID]; st != nil && !d.blocked[sessionID] {
 		st.lastUsed = time.Now()
 	}
 	d.mu.Unlock()
@@ -207,6 +235,15 @@ func (d *dockerDriver) registered(sessionID string) (string, bool) {
 // 没跑则启。冷启动全程持 ensureMu，防止并发工具调用重复 create 同名容器。
 // ephemeral 工作区：全新容器从空工作区开始，附件由 agent 层按轮重物化。
 func (d *dockerDriver) ensure(ctx context.Context, sessionID string) (string, error) {
+	d.mu.Lock()
+	blocked := d.blocked[sessionID]
+	d.mu.Unlock()
+	if blocked {
+		return "", blockedWorkspaceError()
+	}
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if id, ok := d.registered(sessionID); ok {
 		return id, nil
 	}
@@ -344,8 +381,9 @@ func (d *dockerDriver) RemoveFile(sessionID, rel string) {
 	}
 	d.mu.Lock()
 	st := d.ctrs[sessionID]
+	blocked := d.blocked[sessionID]
 	d.mu.Unlock()
-	if st == nil {
+	if st == nil || blocked {
 		return // 容器未拉起：ephemeral 工作区里也没有该文件
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
@@ -373,7 +411,7 @@ func pidsLimitOrNil(n int64) *int64 {
 }
 
 // reapLoop 生命周期巡检：空闲超过 IdleTimeout 或存活超过 MaxLifetime 的容器强制销毁。
-// MaxLifetime 对"活跃"容器同样生效——常驻容器到期销毁，下次使用自动重拉，杜绝泄漏累积。
+// 根执行树持有租约时延后回收，避免多 Agent 执行途中共享文件突然消失。
 func (d *dockerDriver) reapLoop() {
 	ticker := time.NewTicker(reapInterval)
 	defer ticker.Stop()
@@ -388,15 +426,25 @@ func (d *dockerDriver) reapLoop() {
 }
 
 func (d *dockerDriver) reapOnce() {
-	type victim struct{ sessionID, id string }
+	// Do not let a new lease/ensure adopt a container between retirement and
+	// removal. Existing users hold workspace leases and are skipped below.
+	d.ensureMu.Lock()
+	defer d.ensureMu.Unlock()
+	type victim struct {
+		sessionID string
+		state     *ctrState
+	}
 	d.mu.Lock()
 	now := time.Now()
 	var victims []victim
 	for sid, st := range d.ctrs {
+		if workspaceLeased(sid) || d.blocked[sid] {
+			continue
+		}
 		idle := now.Sub(st.lastUsed) > d.idleTimeout
 		expired := now.Sub(st.created) > d.maxLifetime
 		if idle || expired {
-			victims = append(victims, victim{sid, st.id})
+			victims = append(victims, victim{sid, st})
 			delete(d.ctrs, sid)
 		}
 	}
@@ -404,8 +452,11 @@ func (d *dockerDriver) reapOnce() {
 
 	for _, v := range victims {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		if err := d.client.removeContainer(ctx, v.id); err != nil {
+		if err := d.client.removeContainer(ctx, v.state.id); err != nil {
 			slog.Warn("sandbox 巡检销毁容器失败", "session", v.sessionID, "err", err)
+			d.mu.Lock()
+			d.ctrs[v.sessionID] = v.state
+			d.mu.Unlock()
 		} else {
 			slog.Info("sandbox 容器已销毁（空闲/超期）", "session", v.sessionID)
 		}

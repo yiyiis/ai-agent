@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"backend/dal/model"
+	"backend/pkg/agentctx"
 	"backend/pkg/db"
 	"backend/pkg/errors"
 	"backend/pkg/human"
@@ -45,7 +46,7 @@ func ReadInputResults(ctx context.Context, sessionID string, batch *human.Batch)
 		ids = append(ids, human.ResultID(sessionID, batch.MessageID, c.ID))
 	}
 	m := db.Ctx(ctx).Message
-	return m.WithContext(ctx).Where(m.SessionID.Eq(sessionID), m.MessageID.In(ids...)).Order(m.ID).Find()
+	return m.WithContext(ctx).Where(m.SessionID.Eq(sessionID), m.AgentID.Eq(agentctx.AgentID(ctx)), m.MessageID.In(ids...)).Order(m.ID).Find()
 }
 
 // AnswerInput accepts only one answer to an active, valid request.

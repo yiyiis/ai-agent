@@ -44,7 +44,6 @@ const (
 	e2bWorkspace       = "/workspace" // 工作区在云端沙箱内的路径
 	e2bUser            = "user"       // 沙箱默认用户（envd Basic 鉴权与文件参数都用它）
 	e2bMaxSyncBytes    = 256 << 20    // 单次工作区同步包上限
-	e2bExecKillGrace   = 5            // 内层 timeout 命令的 KILL 宽限（秒）
 	e2bUploadTimeout   = 5 * time.Minute
 )
 
@@ -55,8 +54,9 @@ type e2bDriver struct {
 	envdBase string // 测试可覆写
 	http     *http.Client
 
-	mu    sync.Mutex
-	boxes map[string]*e2bBox // sessionID -> 句柄
+	mu      sync.Mutex
+	boxes   map[string]*e2bBox // sessionID -> 句柄
+	blocked map[string]bool    // uncertain command termination quarantines the workspace
 
 	// ensureMu 串行化云端沙箱冷启动：并发工具调用不串行会重复建沙箱（多花钱）
 	ensureMu sync.Mutex
@@ -117,46 +117,50 @@ func (d *e2bDriver) RunPython(ctx context.Context, sessionID, scriptRel string, 
 	return d.run(ctx, sessionID, timeoutSecs, []string{"/usr/bin/python3", e2bWorkspace + "/" + scriptRel}, env)
 }
 
-// run 完整执行一轮：确保沙箱 → 执行命令。沙箱句柄失效（TTL 回收等）时
-// 重建一次并整体重试。
+// run executes once against the existing sandbox. Uncertain transport failures
+// are cleaned up or quarantined, never replayed as possibly duplicated writes.
 func (d *e2bDriver) run(ctx context.Context, sessionID string, timeoutSecs int, argv []string, env []string) Result {
 	box, err := d.ensure(ctx, sessionID)
 	if err != nil {
 		return Result{Err: err}
 	}
-	res, stale := d.runOnce(ctx, box, timeoutSecs, argv, env)
-	if stale {
-		slog.Info("sandbox(e2b) 句柄失效，重建后重试", "session", sessionID)
-		d.forget(sessionID)
-		if box, err = d.ensure(ctx, sessionID); err != nil {
-			return Result{Err: err}
-		}
-		res, _ = d.runOnce(ctx, box, timeoutSecs, argv, env)
-	}
-	return res
+	return d.runOnce(ctx, sessionID, box, timeoutSecs, argv, env)
 }
 
-// runOnce 单次执行；stale 表示沙箱句柄已失效（应重建重试）。
-// ephemeral 工作区：文件经 WriteFile 直达沙箱，沙箱生灭不回拉。
-func (d *e2bDriver) runOnce(ctx context.Context, box *e2bBox, timeoutSecs int, argv []string, env []string) (Result, bool) {
-	// 外层包 timeout 做命令级硬超时（base 模板为 Ubuntu，含 coreutils）
-	wrapped := append([]string{"/usr/bin/timeout", "-k", strconv.Itoa(e2bExecKillGrace), strconv.Itoa(timeoutSecs)}, argv...)
-	out, err := d.startProcess(ctx, box, wrapped, env)
-	if err != nil {
-		if errors.Is(err, errE2BStale) {
-			return Result{}, true
+func (d *e2bDriver) runOnce(ctx context.Context, sessionID string, box *e2bBox, timeoutSecs int, argv []string, env []string) Result {
+	token, wrapped := supervisedRemoteCommand("/usr/bin/python3", timeoutSecs, argv)
+	out, runErr := d.startProcess(ctx, box, wrapped, env)
+	// No unverified RPC is required: use the existing Start protocol to execute
+	// an independent cancellation helper against this same sandbox handle.
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), remoteCleanupTimeout)
+	cleanup, cleanupErr := d.startProcess(cleanupCtx, box, cleanupRemoteCommand("/usr/bin/python3", token), nil)
+	cleanupCancel()
+	if cleanupErr != nil || cleanup.ExitCode != 0 {
+		d.mu.Lock()
+		if d.blocked == nil {
+			d.blocked = map[string]bool{}
 		}
-		return Result{Err: infraErr(err, "在云端沙箱执行命令失败")}, false
+		d.blocked[sessionID] = true
+		d.mu.Unlock()
+		return Result{Killed: true, Err: blockedWorkspaceError()}
+	}
+	if runErr != nil || ctx.Err() != nil {
+		if ctx.Err() != nil {
+			runErr = ctx.Err()
+		}
+		return Result{Killed: true, Err: infraErr(runErr, "云端命令已中止且清理")}
 	}
 
+	d.mu.Lock()
 	box.lastUsed = time.Now()
+	d.mu.Unlock()
 	killed := out.ExitCode == 124 || out.ExitCode == 137
 	return Result{
 		Stdout:   strings.ToValidUTF8(out.Stdout, ""),
 		Stderr:   strings.ToValidUTF8(out.Stderr, ""),
 		ExitCode: out.ExitCode,
 		Killed:   killed,
-	}, false
+	}
 }
 
 func (d *e2bDriver) Close(sessionID string) {
@@ -165,12 +169,22 @@ func (d *e2bDriver) Close(sessionID string) {
 	delete(d.boxes, sessionID)
 	d.mu.Unlock()
 	if box == nil {
+		d.mu.Lock()
+		delete(d.blocked, sessionID)
+		d.mu.Unlock()
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	if err := d.killSandbox(ctx, box.sandboxID); err != nil {
 		slog.Warn("sandbox(e2b) 销毁失败", "session", sessionID, "err", err)
+		d.mu.Lock()
+		d.boxes[sessionID] = box
+		d.mu.Unlock()
+	} else {
+		d.mu.Lock()
+		delete(d.blocked, sessionID)
+		d.mu.Unlock()
 	}
 }
 
@@ -184,6 +198,15 @@ func (d *e2bDriver) forget(sessionID string) {
 // 调用并发执行，不串行会重复创建云沙箱。ephemeral 工作区：新沙箱从空工作区
 // 开始，附件由 agent 层按轮重物化。
 func (d *e2bDriver) ensure(ctx context.Context, sessionID string) (*e2bBox, error) {
+	d.mu.Lock()
+	blocked := d.blocked[sessionID]
+	d.mu.Unlock()
+	if blocked {
+		return nil, blockedWorkspaceError()
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if box := d.registered(sessionID); box != nil {
 		return box, nil
 	}
@@ -347,6 +370,7 @@ func (d *e2bDriver) startProcess(ctx context.Context, box *e2bBox, argv []string
 	reqBody.Process.Cmd = argv[0]
 	reqBody.Process.Args = argv[1:]
 	reqBody.Process.Cwd = e2bWorkspace
+	reqBody.Process.Envs = map[string]string{}
 	reqBody.Stdin = false
 	for _, kv := range env {
 		if k, v, ok := strings.Cut(kv, "="); ok {
@@ -368,6 +392,7 @@ func (d *e2bDriver) startProcess(ctx context.Context, box *e2bBox, argv []string
 	defer resp.Body.Close()
 
 	var out e2bCommandResult
+	sawExit := false
 	var stdout, stderr bytes.Buffer
 	err = readConnectStream(resp.Body, func(frame []byte) error {
 		var ev startEvent
@@ -388,11 +413,15 @@ func (d *e2bDriver) startProcess(ctx context.Context, box *e2bBox, argv []string
 		}
 		if ev.Event.End != nil {
 			out.ExitCode = ev.Event.End.ExitCode
+			sawExit = ev.Event.End.Exited
 		}
 		return nil
 	})
 	if err != nil {
 		return e2bCommandResult{}, err
+	}
+	if !sawExit {
+		return e2bCommandResult{}, io.ErrUnexpectedEOF
 	}
 	out.Stdout, out.Stderr = stdout.String(), stderr.String()
 	return out, nil
@@ -501,8 +530,9 @@ func (d *e2bDriver) RemoveFile(sessionID, rel string) {
 	}
 	d.mu.Lock()
 	box := d.boxes[sessionID]
+	blocked := d.blocked[sessionID]
 	d.mu.Unlock()
-	if box == nil {
+	if box == nil || blocked {
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)

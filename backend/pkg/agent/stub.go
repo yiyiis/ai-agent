@@ -205,6 +205,20 @@ func stubForToolResult(callName, callArgs, content string) string {
 	}
 	args, _ := tools.ParseArguments(callArgs)
 	switch callName {
+	case DelegateAgentTool:
+		// Replaying a delegation is not a read operation. Preserve its identity
+		// and useful result in cold context instead of advising another spawn.
+		var result map[string]any
+		if json.Unmarshal([]byte(content), &result) == nil {
+			if text, ok := result["result"].(string); ok {
+				runes := []rune(text)
+				if len(runes) > 2000 {
+					result["result"] = string(runes[:2000]) + "\n[冷区结果摘要；不要仅为回看历史重新委派任务]"
+				}
+			}
+			return marshalStub(result)
+		}
+		return content
 	case "read_file":
 		offset := 1
 		if args != nil {

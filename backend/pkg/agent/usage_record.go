@@ -8,6 +8,7 @@ import (
 	"backend/constants"
 	"backend/dal/model"
 	"backend/dao"
+	"backend/pkg/agentctx"
 	"backend/pkg/provider"
 )
 
@@ -74,7 +75,7 @@ func restoreTurnUsage(ctx context.Context, sessionID string, history []model.Mes
 	}
 	var usage *provider.Usage
 	for _, row := range rows {
-		if row.CreatedAt.Before(since) || row.Purpose != string(constants.UsagePurposeTurn) {
+		if row.AgentID != agentctx.AgentID(ctx) || row.CreatedAt.Before(since) || row.Purpose != string(constants.UsagePurposeTurn) {
 			continue
 		}
 		usage = sumUsage(usage, &provider.Usage{

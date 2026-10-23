@@ -10,6 +10,7 @@ import (
 
 	"gorm.io/gen"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 // CreateSession 创建新会话
@@ -124,14 +125,27 @@ func UpdateSession(ctx context.Context, sessionID string, updates map[string]int
 // DeleteSession 删除会话及级联清理消息
 func DeleteSession(ctx context.Context, sessionID string) error {
 	return db.Transition(ctx, func(txCtx context.Context) error {
+		s := db.Ctx(txCtx).Session
+		if _, err := s.WithContext(txCtx).Clauses(clause.Locking{Strength: "UPDATE"}).
+			Where(s.SessionID.Eq(sessionID)).First(); err != nil {
+			if errors.Is(err, gorm.ErrRecordNotFound) {
+				return nil
+			}
+			return errors.Join(err, errors.New("锁定待删除会话失败"), errors.NewMsg("系统异常"))
+		}
+		// Session deletion deliberately spans all agent streams. Normal message
+		// readers and truncation remain scoped to their execution context.
 		m := db.Ctx(txCtx).Message
 		if _, err := m.WithContext(txCtx).
 			Where(m.SessionID.Eq(sessionID)).
 			Delete(); err != nil {
 			return errors.Join(err, errors.New("删除会话消息失败"), errors.NewMsg("系统异常"))
 		}
+		a := db.Ctx(txCtx).AgentRun
+		if _, err := a.WithContext(txCtx).Where(a.SessionID.Eq(sessionID)).Delete(); err != nil {
+			return errors.Join(err, errors.New("删除会话 Agent 记录失败"), errors.NewMsg("系统异常"))
+		}
 
-		s := db.Ctx(txCtx).Session
 		if _, err := s.WithContext(txCtx).
 			Where(s.SessionID.Eq(sessionID)).
 			Delete(); err != nil {
